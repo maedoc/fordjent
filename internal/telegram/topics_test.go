@@ -2,9 +2,11 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNewMappingStore(t *testing.T) {
@@ -200,7 +202,7 @@ func TestMultipleMappings(t *testing.T) {
 			ChatID:    -100,
 			ThreadID:  i,
 			Repository: "org/repo",
-			SessionKey: "org/repo/issues/" + string(rune('0'+i)),
+			SessionKey: fmt.Sprintf("org/repo/issues/%d", i),
 			IssueNumber: i,
 		})
 	}
@@ -224,7 +226,8 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	defer store.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Create initial mapping
 	store.CreateMapping(&TopicMapping{

@@ -59,6 +59,7 @@ func main() {
 			os.Exit(1)
 		}
 		if tgRouter != nil {
+			defer tgRouter.Close()
 			go tgRouter.Start(ctx)
 			slog.Info("telegram bot started", "bot_user", tgRouter.Bot().Me.Username)
 		}

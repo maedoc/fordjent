@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +18,11 @@ import (
 // Router receives Telegram messages, normalizes them to events, and publishes
 // to the event bus. It also manages forum topic creation and mapping.
 type Router struct {
-	cfg    *config.Config
-	bus    *event.Bus
-	bot    *tb.Bot
-	store  *MappingStore
+	cfg   *config.Config
+	bus   *event.Bus
+	bot   *tb.Bot
+	store *MappingStore
+	ctx   context.Context
 }
 
 // NewRouter creates a new Telegram router.
@@ -43,7 +45,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus) (*Router, error) {
 		return nil, fmt.Errorf("telegram bot init: %w", err)
 	}
 
-	dbPath := cfg.Agent.WorkDir + "/telegram/mappings.db"
+	dbPath := filepath.Join(cfg.Agent.WorkDir, "telegram", "mappings.db")
 	store, err := NewMappingStore(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("topic store init: %w", err)
@@ -62,6 +64,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus) (*Router, error) {
 
 // Start begins long polling for Telegram updates.
 func (r *Router) Start(ctx context.Context) {
+	r.ctx = ctx
 	go func() {
 		<-ctx.Done()
 		r.bot.Stop()
@@ -69,6 +72,11 @@ func (r *Router) Start(ctx context.Context) {
 
 	slog.Info("telegram bot starting", "bot_username", r.bot.Me.Username)
 	r.bot.Start()
+}
+
+// Close releases resources held by the router.
+func (r *Router) Close() error {
+	return r.store.Close()
 }
 
 // Bot returns the underlying telebot.Bot (for topic creation from other components).
@@ -110,8 +118,8 @@ func (r *Router) registerHandlers() {
 		}
 		// This is an admin command — in a real deployment, check user permissions.
 		// For now, we just acknowledge it. The real binding is via config.
-		return c.Reply(fmt.Sprintf("Chat binding configured via fordjent.yaml.\n"+
-			"Set `telegram.chat_bindings.%d.repository: \"%s\"`", c.Chat().ID, args))
+		return c.Reply("Bindings are configured in fordjent.yaml and require a restart.\n" +
+			fmt.Sprintf("Add telegram.chat_bindings.%d.repository: \"%s\"", c.Chat().ID, args))
 	})
 
 	// All text messages (in topics or general)
@@ -149,12 +157,42 @@ func (r *Router) handleMessage(c tb.Context) error {
 		return c.Reply("No repository bound to this chat. Configure in fordjent.yaml.")
 	}
 
-	// If message is in a topic thread, look up the session key
+	// Extract sender name
+	senderName := "unknown"
+	if sender != nil {
+		senderName = sender.Username
+		if senderName == "" {
+			senderName = sender.FirstName
+		}
+	}
+
+	// Build event using pure normalization function
+	evt := NormalizeMessage(chatID, threadID, msg.ID, repo, senderName, text, r.store)
+	if evt == nil {
+		// No session mapped — not routed to agent
+		return nil
+	}
+
+	slog.Info("telegram: normalized event",
+		"event_id", evt.ID,
+		"session_key", evt.SessionKey,
+		"sender", senderName,
+	)
+
+	r.bus.Publish(r.ctx, evt)
+	return nil
+}
+
+// NormalizeMessage is a pure function that converts a Telegram message into an
+// internal Event. Returns nil if the message should not be routed to an agent
+// (e.g., no topic mapping exists, or the message is not in a topic thread).
+// This function is separated from handleMessage for testability.
+func NormalizeMessage(chatID int64, threadID, messageID int, repo, sender, text string, store *MappingStore) *event.Event {
 	var sessionKey string
 	var issueNumber, prNumber int
 
 	if threadID != 0 {
-		mapping, err := r.store.GetByThread(chatID, threadID)
+		mapping, err := store.GetByThread(chatID, threadID)
 		if err != nil {
 			slog.Error("telegram: failed to lookup topic mapping", "error", err)
 			return nil
@@ -164,46 +202,27 @@ func (r *Router) handleMessage(c tb.Context) error {
 			issueNumber = mapping.IssueNumber
 			prNumber = mapping.PRNumber
 		} else {
-			// Topic exists but no mapping — could be the General topic or an unmapped topic.
-			// Treat as a free-form message to the agent with no specific session.
+			// No mapping for this thread — unmapped topic or General topic.
 			slog.Debug("telegram: no mapping for thread", "chat_id", chatID, "thread_id", threadID)
 			return nil
 		}
 	}
 
 	if sessionKey == "" {
-		// No specific session — this is a general message, not routed to agent.
 		return nil
 	}
 
-	// Normalize to internal Event
-	senderName := "unknown"
-	if sender != nil {
-		senderName = sender.Username
-		if senderName == "" {
-			senderName = sender.FirstName
-		}
-	}
-
-	evt := event.NewEvent(event.TelegramMessage, repo, issueNumber, prNumber, senderName, "message")
+	evt := event.NewEvent(event.TelegramMessage, repo, issueNumber, prNumber, sender, "message")
 	evt.SessionKey = sessionKey
 	evt.Payload = map[string]interface{}{
-		"source":      "telegram",
-		"chat_id":     strconv.FormatInt(chatID, 10),
-		"thread_id":   strconv.Itoa(threadID),
-		"message_id":  strconv.Itoa(msg.ID),
-		"from_user":   senderName,
-		"text":        text,
+		"source":     "telegram",
+		"chat_id":    strconv.FormatInt(chatID, 10),
+		"thread_id":  strconv.Itoa(threadID),
+		"message_id": strconv.Itoa(messageID),
+		"from_user":  sender,
+		"text":       text,
 	}
-
-	slog.Info("telegram: normalized event",
-		"event_id", evt.ID,
-		"session_key", evt.SessionKey,
-		"sender", senderName,
-	)
-
-	r.bus.Publish(context.Background(), evt)
-	return nil
+	return evt
 }
 
 // EnsureTopic creates a forum topic for the given session key if one doesn't exist.

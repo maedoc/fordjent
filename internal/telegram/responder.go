@@ -12,6 +12,8 @@ import (
 )
 
 // Responder delivers agent responses to Telegram topics.
+// NOTE: This is Phase 3 scaffolding. It will be wired into the agent's
+// ResponseWriter interface once that is implemented.
 type Responder struct {
 	bot    *tb.Bot
 	store  *MappingStore
@@ -23,6 +25,7 @@ func NewResponder(bot *tb.Bot, store *MappingStore) *Responder {
 }
 
 // Acknowledge sends a "thinking" indicator by posting a placeholder message.
+// TODO: respect ctx cancellation for graceful shutdown.
 func (r *Responder) Acknowledge(ctx context.Context, evt *event.Event) error {
 	mapping, err := r.store.GetBySessionKey(evt.SessionKey)
 	if err != nil || mapping == nil {
@@ -38,8 +41,9 @@ func (r *Responder) Acknowledge(ctx context.Context, evt *event.Event) error {
 	return nil
 }
 
-// Respond posts the agent's final response to the originating topic.
+// SendResponse posts the agent's final response to the originating topic.
 // Splits messages longer than 4000 characters into multiple parts.
+// TODO: respect ctx cancellation for graceful shutdown.
 func (r *Responder) SendResponse(ctx context.Context, evt *event.Event, msg string) error {
 	mapping, err := r.store.GetBySessionKey(evt.SessionKey)
 	if err != nil || mapping == nil {
@@ -61,6 +65,7 @@ func (r *Responder) SendResponse(ctx context.Context, evt *event.Event, msg stri
 }
 
 // Error posts an error message to the originating topic.
+// TODO: respect ctx cancellation for graceful shutdown.
 func (r *Responder) Error(ctx context.Context, evt *event.Event, agentErr error) error {
 	mapping, err := r.store.GetBySessionKey(evt.SessionKey)
 	if err != nil || mapping == nil {
