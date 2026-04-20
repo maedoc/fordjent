@@ -1,0 +1,77 @@
+# Fordjent Configuration
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+webhook:
+  secret: "change-me-in-production"
+
+forgejo:
+  url: "https://forgejo.example.com"
+  token: "${FORGEJO_TOKEN}"
+  # API rate limit (requests per minute)
+  rate_limit: 60
+
+agent:
+  # Maximum concurrent agent sessions
+  max_sessions: 10
+  # Idle timeout per session
+  idle_timeout: "4h"
+  # Working directory base for clones
+  workdir: "/tmp/fordjent/work"
+  # Maximum LLM turns per event
+  max_turns: 25
+  # Commit message prefix for agent commits
+  commit_prefix: "[agent-automation]"
+
+providers:
+  # Default provider (first listed)
+  - name: "openai"
+    api_base: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4o"
+    max_tokens: 16384
+
+  # Anthropic provider
+  # - name: "anthropic"
+  #   api_base: "https://api.anthropic.com/v1"
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   model: "claude-sonnet-4-20250514"
+  #   max_tokens: 16384
+
+  # Local/Ollama provider
+  # - name: "ollama"
+  #   api_base: "http://localhost:11434/v1"
+  #   api_key: "ollama"
+  #   model: "codellama"
+  #   max_tokens: 8192
+
+# Events that trigger agent sessions
+events:
+  - "issues"
+  - "issue_comment"
+  - "pull_request"
+  - "pull_request_review_comment"
+
+# Session affinity: events matching the same key route to same agent
+# Available template vars: {{.Repository}}, {{.IssueNumber}}, {{.PullRequestNumber}}
+session_key_template: "{{.Repository}}/issues/{{.IssueNumber}}"
+
+# Security
+security:
+  # Branch protection: agent cannot push directly to these branches
+  protected_branches:
+    - "main"
+    - "master"
+  # Agent workflow files must be PR'd
+  require_pr_for_workflows: true
+  # Reject events from the agent itself (loop prevention)
+  filter_agent_events: true
+
+# Memory: git log audit trail
+memory:
+  enabled: true
+  # Compaction schedule (cron)
+  compaction_cron: "0 2 * * *"
+  # Compaction output path within repo
+  compaction_path: "docs/issues"
