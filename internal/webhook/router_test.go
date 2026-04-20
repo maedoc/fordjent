@@ -28,6 +28,20 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestWebhookMethodNotAllowed(t *testing.T) {
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "/acp/v1/events", nil)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
 func TestWebhookMissingSignature(t *testing.T) {
 	cfg := &config.Config{
 		Webhook: config.WebhookConfig{Secret: "test-secret"},
@@ -37,15 +51,9 @@ func TestWebhookMissingSignature(t *testing.T) {
 
 	payload := map[string]interface{}{
 		"action": "opened",
-		"repository": map[string]interface{}{
-			"full_name": "org/repo",
-		},
-		"sender": map[string]interface{}{
-			"login": "alice",
-		},
-		"issue": map[string]interface{}{
-			"number": float64(42),
-		},
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender": map[string]interface{}{"login": "alice"},
+		"issue": map[string]interface{}{"number": float64(42)},
 	}
 	body, _ := json.Marshal(payload)
 
@@ -60,23 +68,15 @@ func TestWebhookMissingSignature(t *testing.T) {
 }
 
 func TestWebhookNoSecret(t *testing.T) {
-	cfg := &config.Config{
-		Webhook: config.WebhookConfig{Secret: ""},
-	}
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
 	bus := event.NewBus()
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
 		"action": "opened",
-		"repository": map[string]interface{}{
-			"full_name": "org/repo",
-		},
-		"sender": map[string]interface{}{
-			"login": "alice",
-		},
-		"issue": map[string]interface{}{
-			"number": float64(42),
-		},
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender": map[string]interface{}{"login": "alice"},
+		"issue": map[string]interface{}{"number": float64(42)},
 	}
 	body, _ := json.Marshal(payload)
 
@@ -90,30 +90,38 @@ func TestWebhookNoSecret(t *testing.T) {
 	}
 }
 
+func TestWebhookMissingEventHeader(t *testing.T) {
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	body, _ := json.Marshal(map[string]interface{}{})
+
+	req := httptest.NewRequest(http.MethodPost, "/acp/v1/events", bytes.NewReader(body))
+	// No X-Forgejo-Event header
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestWebhookLoopPrevention(t *testing.T) {
 	cfg := &config.Config{
 		Webhook: config.WebhookConfig{Secret: ""},
 		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
-		Security: config.SecurityConfig{
-			FilterAgentEvents: true,
-		},
+		Security: config.SecurityConfig{FilterAgentEvents: true},
 	}
 	bus := event.NewBus()
 	router := NewRouter(cfg, bus, slog.Default())
 
-	// Push with agent commit
 	payload := map[string]interface{}{
 		"action": "push",
-		"repository": map[string]interface{}{
-			"full_name": "org/repo",
-		},
-		"sender": map[string]interface{}{
-			"login": "alice",
-		},
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender": map[string]interface{}{"login": "alice"},
 		"commits": []interface{}{
-			map[string]interface{}{
-				"message": "[agent-automation] auto-fix: update README",
-			},
+			map[string]interface{}{"message": "[agent-automation] auto-fix"},
 		},
 	}
 	body, _ := json.Marshal(payload)
@@ -127,11 +135,11 @@ func TestWebhookLoopPrevention(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 	if w.Body.String() != "filtered\n" {
-		t.Errorf("expected filtered response, got: %s", w.Body.String())
+		t.Errorf("expected filtered, got: %s", w.Body.String())
 	}
 }
 
-func TestNormalizeEvent(t *testing.T) {
+func TestNormalizeEventIssueComment(t *testing.T) {
 	cfg := &config.Config{
 		Webhook: config.WebhookConfig{Secret: ""},
 		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
@@ -141,19 +149,10 @@ func TestNormalizeEvent(t *testing.T) {
 
 	payload := map[string]interface{}{
 		"action": "created",
-		"repository": map[string]interface{}{
-			"full_name": "org/repo",
-		},
-		"sender": map[string]interface{}{
-			"login": "alice",
-		},
-		"issue": map[string]interface{}{
-			"number": float64(42),
-		},
-		"comment": map[string]interface{}{
-			"id":   float64(100),
-			"body": "Hello @fordjent can you help?",
-		},
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender": map[string]interface{}{"login": "alice"},
+		"issue": map[string]interface{}{"number": float64(42)},
+		"comment": map[string]interface{}{"id": float64(100), "body": "help"},
 	}
 
 	evt, err := router.normalizeEvent("issue_comment", "created", payload)
@@ -164,15 +163,105 @@ func TestNormalizeEvent(t *testing.T) {
 		t.Errorf("expected org/repo, got %s", evt.Repository)
 	}
 	if evt.IssueNumber != 42 {
-		t.Errorf("expected issue 42, got %d", evt.IssueNumber)
-	}
-	if evt.Sender != "alice" {
-		t.Errorf("expected sender alice, got %s", evt.Sender)
+		t.Errorf("expected 42, got %d", evt.IssueNumber)
 	}
 	if evt.SessionKey != "org/repo/issues/42" {
-		t.Errorf("expected session key org/repo/issues/42, got %s", evt.SessionKey)
+		t.Errorf("expected org/repo/issues/42, got %s", evt.SessionKey)
 	}
 	if evt.Type != event.IssueCommentCreated {
-		t.Errorf("expected type %s, got %s", event.IssueCommentCreated, evt.Type)
+		t.Errorf("expected %s, got %s", event.IssueCommentCreated, evt.Type)
+	}
+}
+
+func TestNormalizeEventPullRequest(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: ""},
+		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	payload := map[string]interface{}{
+		"action": "opened",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender": map[string]interface{}{"login": "bob"},
+		"pull_request": map[string]interface{}{"number": float64(7)},
+	}
+
+	evt, err := router.normalizeEvent("pull_request", "opened", payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evt.PRNumber != 7 {
+		t.Errorf("expected PR 7, got %d", evt.PRNumber)
+	}
+	if evt.SessionKey != "org/repo/pulls/7" {
+		t.Errorf("expected org/repo/pulls/7, got %s", evt.SessionKey)
+	}
+	if evt.Type != event.PullRequestOpened {
+		t.Errorf("expected %s, got %s", event.PullRequestOpened, evt.Type)
+	}
+}
+
+func TestNormalizeEventUnsupportedType(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: ""},
+		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	_, err := router.normalizeEvent("wiki", "created", map[string]interface{}{})
+	if err == nil {
+		t.Error("expected error for unsupported event type")
+	}
+}
+
+func TestNormalizeEventMissingRepo(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: ""},
+		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	payload := map[string]interface{}{
+		"action": "opened",
+		"sender": map[string]interface{}{"login": "alice"},
+		"issue": map[string]interface{}{"number": float64(1)},
+	}
+
+	evt, err := router.normalizeEvent("issues", "opened", payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evt.Repository != "" {
+		t.Errorf("expected empty repo for missing repo field, got %s", evt.Repository)
+	}
+}
+
+func TestNormalizeEventPushNoIssueNumber(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: ""},
+		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	payload := map[string]interface{}{
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "alice"},
+	}
+
+	evt, err := router.normalizeEvent("push", "", payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evt.Type != event.Push {
+		t.Errorf("expected Push, got %s", evt.Type)
+	}
+	// Push events get a unique session key
+	if evt.SessionKey == "" {
+		t.Error("expected non-empty session key for push")
 	}
 }

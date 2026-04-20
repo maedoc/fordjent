@@ -7,23 +7,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 )
 
 // forgejoCommentTool posts comments on issues/PRs.
 type forgejoCommentTool struct {
-	client  *http.Client
-	baseURL string
-	token   string
+	adapter *ForgejoAdapter
 }
 
 func NewCommentTool(adapter *ForgejoAdapter) *forgejoCommentTool {
-	return &forgejoCommentTool{
-		client:  adapter.Client,
-		baseURL: adapter.BaseURL,
-		token:   adapter.Token,
-	}
+	return &forgejoCommentTool{adapter: adapter}
 }
 
 func (t *forgejoCommentTool) Name() string { return "forgejo_comment" }
@@ -63,45 +59,22 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/repos/%s/issues/%d/comments",
-		t.baseURL, params.Repository, params.IssueNumber)
-	payload := map[string]string{"body": params.Body}
-	body, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+		"issues", fmt.Sprintf("%d", params.IssueNumber), "comments")
+	_, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": params.Body})
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "token "+t.token)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	return "Comment posted successfully", nil
 }
 
 // forgejoListIssuesTool lists issues in a repository.
 type forgejoListIssuesTool struct {
-	client  *http.Client
-	baseURL string
-	token   string
+	adapter *ForgejoAdapter
 }
 
 func NewListIssuesTool(adapter *ForgejoAdapter) *forgejoListIssuesTool {
-	return &forgejoListIssuesTool{
-		client:  adapter.Client,
-		baseURL: adapter.BaseURL,
-		token:   adapter.Token,
-	}
+	return &forgejoListIssuesTool{adapter: adapter}
 }
 
 func (t *forgejoListIssuesTool) Name() string { return "forgejo_list_issues" }
@@ -147,41 +120,22 @@ func (t *forgejoListIssuesTool) Execute(ctx context.Context, args json.RawMessag
 		params.Limit = 20
 	}
 
-	url := fmt.Sprintf("%s/api/v1/repos/%s/issues?state=%s&limit=%d",
-		t.baseURL, params.Repository, params.State, params.Limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "token "+t.token)
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "issues")
+	query := url.Values{}
+	query.Set("state", params.State)
+	query.Set("limit", fmt.Sprintf("%d", params.Limit))
+	apiPath += "?" + query.Encode()
 
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return string(respBody), nil
+	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 }
 
 // forgejoGetIssueTool retrieves a single issue.
 type forgejoGetIssueTool struct {
-	client  *http.Client
-	baseURL string
-	token   string
+	adapter *ForgejoAdapter
 }
 
 func NewGetIssueTool(adapter *ForgejoAdapter) *forgejoGetIssueTool {
-	return &forgejoGetIssueTool{
-		client:  adapter.Client,
-		baseURL: adapter.BaseURL,
-		token:   adapter.Token,
-	}
+	return &forgejoGetIssueTool{adapter: adapter}
 }
 
 func (t *forgejoGetIssueTool) Name() string { return "forgejo_get_issue" }
@@ -216,43 +170,18 @@ func (t *forgejoGetIssueTool) Execute(ctx context.Context, args json.RawMessage)
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/repos/%s/issues/%d",
-		t.baseURL, params.Repository, params.IssueNumber)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "token "+t.token)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return string(respBody), nil
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+		"issues", fmt.Sprintf("%d", params.IssueNumber))
+	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 }
 
 // forgejoCreatePRTool creates a pull request.
 type forgejoCreatePRTool struct {
-	client            *http.Client
-	baseURL           string
-	token             string
-	protectedBranches []string
+	adapter *ForgejoAdapter
 }
 
-func NewCreatePRTool(adapter *ForgejoAdapter, protectedBranches []string) *forgejoCreatePRTool {
-	return &forgejoCreatePRTool{
-		client:            adapter.Client,
-		baseURL:           adapter.BaseURL,
-		token:             adapter.Token,
-		protectedBranches: protectedBranches,
-	}
+func NewCreatePRTool(adapter *ForgejoAdapter) *forgejoCreatePRTool {
+	return &forgejoCreatePRTool{adapter: adapter}
 }
 
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
@@ -302,49 +231,27 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/repos/%s/pulls", t.baseURL, params.Repository)
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "pulls")
 	payload := map[string]string{
 		"title": params.Title,
 		"body":  params.Body,
 		"head":  params.Head,
 		"base":  params.Base,
 	}
-	body, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "token "+t.token)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return fmt.Sprintf("Pull request created: %s", string(respBody)), nil
+	return fmt.Sprintf("Pull request created: %s", result), nil
 }
 
 // forgejoSearchCodeTool searches code in a repository.
 type forgejoSearchCodeTool struct {
-	client  *http.Client
-	baseURL string
-	token   string
+	adapter *ForgejoAdapter
 }
 
 func NewSearchCodeTool(adapter *ForgejoAdapter) *forgejoSearchCodeTool {
-	return &forgejoSearchCodeTool{
-		client:  adapter.Client,
-		baseURL: adapter.BaseURL,
-		token:   adapter.Token,
-	}
+	return &forgejoSearchCodeTool{adapter: adapter}
 }
 
 func (t *forgejoSearchCodeTool) Name() string { return "forgejo_search_code" }
@@ -379,41 +286,21 @@ func (t *forgejoSearchCodeTool) Execute(ctx context.Context, args json.RawMessag
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/repos/%s/code/search?q=%s",
-		t.baseURL, params.Repository, params.Query)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "token "+t.token)
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "code", "search")
+	query := url.Values{}
+	query.Set("q", params.Query)
+	apiPath += "?" + query.Encode()
 
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return string(respBody), nil
+	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 }
 
 // forgejoAddReactionTool adds an emoji reaction.
 type forgejoAddReactionTool struct {
-	client  *http.Client
-	baseURL string
-	token   string
+	adapter *ForgejoAdapter
 }
 
 func NewAddReactionTool(adapter *ForgejoAdapter) *forgejoAddReactionTool {
-	return &forgejoAddReactionTool{
-		client:  adapter.Client,
-		baseURL: adapter.BaseURL,
-		token:   adapter.Token,
-	}
+	return &forgejoAddReactionTool{adapter: adapter}
 }
 
 func (t *forgejoAddReactionTool) Name() string { return "forgejo_add_reaction" }
@@ -458,36 +345,19 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	var url string
+	var apiPath string
 	if params.CommentID > 0 {
-		url = fmt.Sprintf("%s/api/v1/repos/%s/issues/comments/%d/reactions",
-			t.baseURL, params.Repository, params.CommentID)
+		apiPath = path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+			"issues", "comments", fmt.Sprintf("%d", params.CommentID), "reactions")
 	} else {
-		url = fmt.Sprintf("%s/api/v1/repos/%s/issues/%d/reactions",
-			t.baseURL, params.Repository, params.IssueNumber)
+		apiPath = path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+			"issues", fmt.Sprintf("%d", params.IssueNumber), "reactions")
 	}
 
-	payload := map[string]string{"content": params.Reaction}
-	body, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	_, err := t.adapter.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"content": params.Reaction})
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "token "+t.token)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	return fmt.Sprintf("Reaction '%s' added", params.Reaction), nil
 }
 
@@ -504,4 +374,39 @@ func NewForgejoAdapter(baseURL, token string) *ForgejoAdapter {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 	}
+}
+
+// doRequest is a shared helper that handles auth, request construction, and error handling.
+func (a *ForgejoAdapter) doRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
+	var reqBody io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return "", fmt.Errorf("marshal body: %w", err)
+		}
+		reqBody = bytes.NewReader(data)
+	}
+
+	fullURL := a.BaseURL + apiPath
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "token "+a.Token)
+
+	resp, err := a.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
 }

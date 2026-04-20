@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -50,28 +52,51 @@ type User struct {
 
 func (u User) String() string { return u.Login }
 
-// GetIssue retrieves an issue by number.
-func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue, error) {
-	url := fmt.Sprintf("%s/api/v1/repos/%s/issues/%d", c.baseURL, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+// doRequest is a shared helper for Forgejo API calls.
+func (c *Client) doRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
+	var reqBody io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return "", fmt.Errorf("marshal body: %w", err)
+		}
+		reqBody = bytes.NewReader(data)
 	}
+
+	fullURL := c.baseURL + apiPath
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "token "+c.token)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// GetIssue retrieves an issue by number.
+func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue, error) {
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(repo), "issues", fmt.Sprintf("%d", number))
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	var issue Issue
-	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
+	if err := json.Unmarshal([]byte(result), &issue); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &issue, nil
@@ -79,22 +104,10 @@ func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue,
 
 // ListComments lists comments on an issue.
 func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
-	url := fmt.Sprintf("%s/api/v1/repos/%s/issues/%d/comments", c.baseURL, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	apiPath := path.Join("/api/v1/repos", url.PathEscape(repo), "issues", fmt.Sprintf("%d", number), "comments")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "token "+c.token)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	var rawComments []struct {
@@ -104,7 +117,7 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]C
 			Login string `json:"login"`
 		} `json:"user"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rawComments); err != nil {
+	if err := json.Unmarshal([]byte(result), &rawComments); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 
@@ -121,33 +134,15 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]C
 
 // AddReaction adds an emoji reaction to an issue/PR or comment.
 func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, commentID int, emoji string) error {
-	var url string
+	var apiPath string
 	if commentID > 0 {
-		url = fmt.Sprintf("%s/api/v1/repos/%s/issues/comments/%d/reactions", c.baseURL, repo, commentID)
+		apiPath = path.Join("/api/v1/repos", url.PathEscape(repo),
+			"issues", "comments", fmt.Sprintf("%d", commentID), "reactions")
 	} else {
-		url = fmt.Sprintf("%s/api/v1/repos/%s/issues/%d/reactions", c.baseURL, repo, issueNumber)
+		apiPath = path.Join("/api/v1/repos", url.PathEscape(repo),
+			"issues", fmt.Sprintf("%d", issueNumber), "reactions")
 	}
 
-	payload := map[string]string{"content": emoji}
-	body, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "token "+c.token)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
+	_, err := c.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"content": emoji})
+	return err
 }

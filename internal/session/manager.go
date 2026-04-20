@@ -319,13 +319,13 @@ func NewAgent(cfg *config.Config, sess *Session) *Agent {
 	registry.Register(tool.NewCommentTool(forgejoAdapter))
 	registry.Register(tool.NewListIssuesTool(forgejoAdapter))
 	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
-	registry.Register(tool.NewCreatePRTool(forgejoAdapter, cfg.Security.ProtectedBranches))
+	registry.Register(tool.NewCreatePRTool(forgejoAdapter))
 	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
 	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
 	registry.Register(tool.NewBashTool(sessionInfo))
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 	registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
-	registry.Register(tool.NewGitTool(sessionInfo, cfg))
+	registry.Register(tool.NewGitTool(sessionInfo))
 
 	return &Agent{
 		cfg:     cfg,

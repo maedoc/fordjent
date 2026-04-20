@@ -1,14 +1,15 @@
 package tool
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/fordjent/fordjent/internal/config"
 )
 
 // bashTool executes shell commands in the session's working directory.
@@ -128,23 +129,32 @@ func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		params.Limit = 2000
 	}
 
-	var cmdStr string
-	if params.Offset > 0 {
-		cmdStr = fmt.Sprintf("cat -n '%s' | tail -n +%d | head -n %d", params.Path, params.Offset, params.Limit)
-	} else {
-		cmdStr = fmt.Sprintf("cat -n '%s' | head -n %d", params.Path, params.Limit)
-	}
+	absPath := filepath.Join(t.repoDir, params.Path)
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "bash", "-c", cmdStr)
-	cmd.Dir = t.repoDir
-	out, err := cmd.CombinedOutput()
+	f, err := os.Open(absPath)
 	if err != nil {
-		return "", fmt.Errorf("read file: %s", string(out))
+		return "", fmt.Errorf("read file: %w", err)
 	}
-	return string(out), nil
+	defer f.Close()
+
+	var lines []string
+	lineNum := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lineNum++
+		if lineNum < params.Offset {
+			continue
+		}
+		if len(lines) >= params.Limit {
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%6d\t%s", lineNum, scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+
+	return strings.Join(lines, "\n"), nil
 }
 
 // writeFileTool writes content to a file in the repository.
@@ -192,18 +202,14 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	// Use a temp file to avoid heredoc escaping issues
-	tmpScript := fmt.Sprintf(`mkdir -p "$(dirname '%s')" && cat > '%s' << 'FORDJENT_EOF%d'
-%s
-FORDJENT_EOF%d`, params.Path, params.Path, time.Now().UnixNano(), params.Content, time.Now().UnixNano())
+	absPath := filepath.Join(t.repoDir, params.Path)
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
+		return "", fmt.Errorf("create directories: %w", err)
+	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", tmpScript)
-	cmd.Dir = t.repoDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("write file: %s: %s", err, string(out))
+	if err := os.WriteFile(absPath, []byte(params.Content), 0644); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
 	}
 
 	return fmt.Sprintf("Written %d bytes to %s", len(params.Content), params.Path), nil
@@ -211,21 +217,19 @@ FORDJENT_EOF%d`, params.Path, params.Path, time.Now().UnixNano(), params.Content
 
 // gitTool handles git operations in the session.
 type gitTool struct {
-	repoDir           string
-	protectedBranches []string
+	repoDir string
 }
 
-func NewGitTool(info SessionInfo, cfg *config.Config) *gitTool {
+func NewGitTool(info SessionInfo) *gitTool {
 	return &gitTool{
-		repoDir:           info.RepoDir(),
-		protectedBranches: cfg.Security.ProtectedBranches,
+		repoDir: info.RepoDir(),
 	}
 }
 
 func (t *gitTool) Name() string { return "git" }
 
 func (t *gitTool) Description() string {
-	return "Execute git operations in the repository: status, diff, add, commit, push, branch, checkout, log, fetch, pull."
+	return "Execute git operations in the repository: status, diff, add, commit, branch, checkout, log, fetch, pull. Note: push is blocked; use forgejo_create_pr tool instead."
 }
 
 func (t *gitTool) Parameters() map[string]interface{} {
@@ -249,15 +253,9 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	// Security: block direct push to protected branches
-	for _, branch := range t.protectedBranches {
-		lowerCmd := strings.ToLower(params.Command)
-		if strings.Contains(lowerCmd, "push") &&
-			strings.Contains(lowerCmd, strings.ToLower(branch)) &&
-			!strings.Contains(lowerCmd, "head:") {
-			return "", fmt.Errorf("direct push to protected branch '%s' is not allowed. "+
-				"Create a feature branch and submit a PR instead", branch)
-		}
+	// Security: block all push commands — agent must use forgejo_create_pr tool
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "push") {
+		return "", fmt.Errorf("git push is not allowed. Use the forgejo_create_pr tool to submit changes via pull request")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
