@@ -1,14 +1,4 @@
 // Fordjent — a Forgejo-driven agent harness.
-//
-// Architecture:
-//
-//	Forgejo ──webhook──▶ Router ──queue──▶ SessionManager ──spawn──▶ Agent
-//	                                                                   │
-//	Forgejo ◀──API────── Reaction ◀──────────────────────────────────┘
-//	                                        │
-//	                                   LLM Provider
-//	                                        │
-//	                                   Tool Execution
 package main
 
 import (
@@ -23,6 +13,7 @@ import (
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/session"
+	"github.com/fordjent/fordjent/internal/telegram"
 	"github.com/fordjent/fordjent/internal/webhook"
 )
 
@@ -45,6 +36,7 @@ func main() {
 	bus := event.NewBus()
 	mgr := session.NewManager(cfg, bus)
 
+	// Forgejo webhook router (always started)
 	router := webhook.NewRouter(cfg, bus, logger)
 
 	go func() {
@@ -56,12 +48,27 @@ func main() {
 		}
 	}()
 
+	// Session manager
 	go mgr.Run(ctx)
+
+	// Telegram bot (optional)
+	if cfg.Telegram.Enabled {
+		tgRouter, err := telegram.NewRouter(cfg, bus)
+		if err != nil {
+			slog.Error("failed to init telegram bot", "error", err)
+			os.Exit(1)
+		}
+		if tgRouter != nil {
+			go tgRouter.Start(ctx)
+			slog.Info("telegram bot started", "bot_user", tgRouter.Bot().Me.Username)
+		}
+	}
 
 	slog.Info("fordjent agent harness started",
 		"forgejo_url", cfg.Forgejo.URL,
 		"provider", cfg.DefaultProvider().Name,
 		"model", cfg.DefaultProvider().Model,
+		"telegram", cfg.Telegram.Enabled,
 	)
 
 	<-ctx.Done()

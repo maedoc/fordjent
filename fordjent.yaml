@@ -12,6 +12,21 @@ forgejo:
   # API rate limit (requests per minute)
   rate_limit: 60
 
+telegram:
+  enabled: false
+  token: "${TELEGRAM_BOT_TOKEN}"
+  # Long polling timeout in seconds
+  poll_timeout: 10
+  # Allowed chats (supergroup IDs). Empty = allow all.
+  allowed_chats: []
+  # Repository binding per chat
+  chat_bindings: {}
+  # Example:
+  # chat_bindings:
+  #   -1001234567890:
+  #     repository: "org/repo"
+  #     allowed_users: []
+
 agent:
   # Maximum concurrent agent sessions
   max_sessions: 10

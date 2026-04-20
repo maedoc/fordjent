@@ -1,0 +1,16 @@
+# Build artifacts
+fordjent
+*.exe
+
+# Test / temp
+/tmp/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

@@ -1,0 +1,24 @@
+services:
+  fordjent:
+    build: .
+    container_name: fordjent
+    restart: unless-stopped
+    ports:
+      - "${FORDJENT_PORT:-8080}:8080"
+    volumes:
+      - fordjent-data:/var/lib/fordjent
+      - ./fordjent.yaml:/etc/fordjent/fordjent.yaml:ro
+    environment:
+      - FORGEJO_TOKEN=${FORGEJO_TOKEN:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  fordjent-data:
+    driver: local
