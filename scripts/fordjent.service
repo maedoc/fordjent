@@ -1,0 +1,28 @@
+[Unit]
+Description=Fordjent Agent Harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fordjent
+Group=fordjent
+WorkingDirectory=/var/lib/fordjent
+ExecStart=/usr/local/bin/fordjent -config /etc/fordjent/fordjent.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fordjent
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fordjent
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
