@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fordjent/fordjent/internal/config"
@@ -136,6 +137,45 @@ func TestWebhookLoopPrevention(t *testing.T) {
 	}
 	if w.Body.String() != "filtered\n" {
 		t.Errorf("expected filtered, got: %s", w.Body.String())
+	}
+}
+
+func TestRouter_Ready(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: "test-secret"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "ready\n" {
+		t.Errorf("expected 'ready\\n', got: %s", w.Body.String())
+	}
+}
+
+func TestRouter_Metrics(t *testing.T) {
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{Secret: "test-secret"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "fordjent_events_total") {
+		t.Errorf("expected metrics to contain fordjent_events_total, got: %s", body)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/memory"
+	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
 	"github.com/fordjent/fordjent/internal/tool"
 )
@@ -188,6 +189,9 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 	m.sessions[evt.SessionKey] = sess
 
+	metrics.IncSessions()
+	metrics.SetActiveSessions(int64(len(m.sessions)))
+
 	go m.runSession(sessCtx, sess)
 
 	slog.Info("created new session",
@@ -253,6 +257,7 @@ func (m *Manager) reapIdle(ctx context.Context) {
 			slog.Info("reaping idle session", "session_key", key)
 			sess.Cancel()
 			delete(m.sessions, key)
+			metrics.SetActiveSessions(int64(len(m.sessions)))
 		}
 	}
 }
@@ -280,6 +285,7 @@ func (m *Manager) evictOldest() {
 			sess.Cancel()
 		}
 		delete(m.sessions, oldestKey)
+		metrics.SetActiveSessions(int64(len(m.sessions)))
 	}
 }
 
@@ -361,6 +367,8 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Update reaction to ⏳
 	a.addReaction(ctx, evt, "hourglass_flowing_sand")
 
+	metrics.IncLLMCalls()
+
 	for turn := 0; turn < a.cfg.Agent.MaxTurns; turn++ {
 		slog.Info("LLM turn",
 			"session_key", a.sess.Key,
@@ -404,6 +412,8 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 				"tool", tc.Function.Name,
 				"session_key", a.sess.Key,
 			)
+
+			metrics.IncToolCalls()
 
 			result, err := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {

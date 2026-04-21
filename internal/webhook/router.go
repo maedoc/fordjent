@@ -15,6 +15,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/metrics"
 )
 
 // Router receives Forgejo webhooks, validates them, normalizes events,
@@ -36,12 +37,19 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	}
 	r.mux.HandleFunc("/acp/v1/events", r.handleWebhook)
 	r.mux.HandleFunc("/healthz", r.handleHealth)
+	r.mux.HandleFunc("/readyz", r.handleReadyz)
+	r.mux.HandleFunc("/metrics", metrics.Handler())
 	return r
 }
 
 func (r *Router) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
+}
+
+func (r *Router) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, "ready")
 }
 
 func (r *Router) ListenAndServe(ctx context.Context, addr string) error {
@@ -116,7 +124,7 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Loop prevention: filter agent's own events
+	metrics.IncEvents()
 	if r.cfg.Security.FilterAgentEvents && r.isAgentEvent(payload) {
 		r.logger.Info("filtered agent-originated event", "event_id", evt.ID)
 		w.WriteHeader(http.StatusOK)
