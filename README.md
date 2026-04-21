@@ -7,9 +7,11 @@ A Forgejo-driven AI agent harness written in Go. Fordjent listens for Forgejo we
 - **Webhook-driven** — Receives Forgejo events via HMAC-validated HTTP webhooks
 - **Telegram interface** — Chat with the agent via Telegram forum topics mapped to issues/PRs
 - **Session affinity** — Events for the same issue/PR route to the same agent session for serial processing
+- **Crash recovery** — Session metadata persisted to SQLite; sessions survive restarts
 - **Tool calling** — 10 built-in tools (Forgejo API, bash, file I/O, git, code search, reactions)
 - **Loop prevention** — Multi-layer defense: commit prefix filtering, bot sender filtering, branch protection
 - **Memory system** — JSONL audit log + git notes for persistent agent reasoning traces
+- **Observability** — Prometheus `/metrics`, `/healthz`, and `/readyz` endpoints
 - **Single binary** — Pure Go, no CGO required (SQLite via modernc.org/sqlite)
 - **Docker-ready** — Multi-stage Dockerfile and Compose stack included
 
@@ -34,11 +36,13 @@ cp fordjent.yaml my-config.yaml
 
 ```bash
 cp .env.example .env
-# Edit .env with your tokens
+# Edit .env with your tokens and webhook secret
 
 # Edit fordjent.yaml to point at your Forgejo instance
 docker compose up -d
 ```
+
+The Compose stack binds to `127.0.0.1:8080` by default — put it behind a reverse proxy (Caddy, Traefik) or expose it directly if Forgejo is on the same host. See [`docs/deployment.md`](docs/deployment.md) for systemd and production options.
 
 ### Forgejo Setup
 
@@ -139,7 +143,7 @@ The agent uses Forgejo reactions to communicate status:
 
 ## Configuration
 
-Configuration is a single YAML file with environment variable expansion via `${VAR}` syntax.
+Configuration is a single YAML file with environment variable expansion via `${VAR}` syntax in **any** field.
 
 ```yaml
 server:
@@ -147,38 +151,54 @@ server:
   port: 8080
 
 webhook:
-  secret: "change-me-in-production"    # HMAC shared secret
+  secret: "${WEBHOOK_SECRET}"          # HMAC shared secret
 
 forgejo:
-  url: "https://forgejo.example.com"
+  url: "${FORGEJO_URL}"
   token: "${FORGEJO_TOKEN}"            # Repository-scoped token
-  rate_limit: 60                       # API requests per minute
+  rate_limit: 60
 
 telegram:
   enabled: false
   token: "${TELEGRAM_BOT_TOKEN}"
   poll_timeout: 10
-  allowed_chats: []                    # Supergroup IDs; empty = allow all
-  chat_bindings: {}                    # Maps chat IDs to repositories
+  allowed_chats: []
+  chat_bindings: {}
 
 agent:
-  max_sessions: 10                     # Concurrent agent sessions
-  idle_timeout: "4h"                   # Session reaper interval
-  workdir: "/tmp/fordjent/work"        # Base directory for clones
-  max_turns: 25                        # Max LLM turns per event
-  commit_prefix: "[agent-automation]"  # Prefix for agent commits
+  max_sessions: 10
+  idle_timeout: "4h"
+  workdir: "/var/lib/fordjent/work"    # Base directory for clones
+  max_turns: 25
+  commit_prefix: "[agent-automation]"
 
 providers:
   - name: "openai"
-    api_base: "https://api.openai.com/v1"
+    api_base: "${OPENAI_API_BASE:-https://api.openai.com/v1}"
     api_key: "${OPENAI_API_KEY}"
-    model: "gpt-4o"
+    model: "${OPENAI_MODEL:-gpt-4o-mini}"
     max_tokens: 16384
+
+events:
+  - "issues"
+  - "issue_comment"
+  - "pull_request"
+  - "pull_request_review_comment"
+
+session_key_template: "{{.Repository}}/issues/{{.IssueNumber}}"
 
 security:
   protected_branches: ["main", "master"]
   require_pr_for_workflows: true
   filter_agent_events: true
+
+memory:
+  enabled: true
+  compaction_cron: "0 2 * * *"
+  compaction_path: "docs/issues"
+
+database:
+  path: ""                            # Defaults to sessions.db next to workdir
 ```
 
 See [`fordjent.yaml`](fordjent.yaml) for the full reference with comments.
@@ -238,15 +258,19 @@ Fordjent can act as a Telegram bot, mapping forum topics to Forgejo issues and P
 fordjent/
 ├── cmd/fordjent/main.go              # Entry point — wires all components
 ├── fordjent.yaml                      # Reference configuration
-├── Dockerfile                         # Multi-stage Go build
+├── Dockerfile                         # Multi-stage Go build (pinned, non-root)
 ├── docker-compose.yaml                # Compose stack with env secrets
 ├── .env.example                       # Template for environment variables
+├── scripts/
+│   └── fordjent.service                 # systemd unit for bare-metal deploy
+├── .forgejo/workflows/ci.yaml         # Build, test, and Docker push CI
 ├── internal/
 │   ├── config/config.go               # YAML config with ${VAR} expansion
 │   ├── event/event.go                 # Event types, bus (fanout + backpressure)
-│   ├── webhook/router.go              # HTTP server, HMAC validation, normalization
+│   ├── webhook/router.go              # HTTP server, HMAC validation, /metrics, /readyz
 │   ├── session/
 │   │   ├── manager.go                 # Session lifecycle, key affinity, idle reaping
+│   │   ├── store.go                   # SQLite-backed session persistence
 │   │   └── agent.go                   # Agent loop — LLM turns, tool dispatch
 │   ├── provider/client.go             # OpenAI-compatible LLM client
 │   ├── forgejo/client.go              # Forgejo REST API client
@@ -255,12 +279,14 @@ fordjent/
 │   │   ├── adapter.go                 # Session info and agent config adapters
 │   │   ├── forgejo_tools.go           # Forgejo API tools (6 tools)
 │   │   └── local_tools.go             # Shell, file, git tools (4 tools)
+│   ├── metrics/metrics.go             # Prometheus text-format metrics
 │   ├── memory/memory.go               # JSONL log + git notes memory
 │   └── telegram/
 │       ├── router.go                  # Long polling, message→event normalization
 │       ├── topics.go                  # SQLite-backed topic↔session mapping store
-│       └── responder.go              # Message splitting, acknowledge/error (Phase 3)
+│       └── responder.go              # Message splitting, acknowledge/error
 ├── docs/
+│   ├── deployment.md                  # Docker, systemd, backup, monitoring
 │   └── telegram-plan.md               # Telegram integration design notes
 └── DESIGN.md                          # Detailed architecture document
 ```
@@ -313,7 +339,7 @@ go test -race -count=1 ./...
 go test -v -race ./internal/session/...
 ```
 
-The test suite includes **105 tests** covering all packages with `-race` clean.
+The test suite includes **108 tests** covering all packages with `-race` clean.
 
 ### Adding a Tool
 
@@ -337,6 +363,8 @@ func (t *myTool) Execute(ctx context.Context, params map[string]interface{}, inf
 
 ### Running with Docker
 
+The image is built from a pinned `golang:1.25-alpine` base, runs as a non-root `fordjent` user, and stores state in `/var/lib/fordjent`.
+
 ```bash
 # Build and start
 docker compose up -d
@@ -346,14 +374,35 @@ docker compose logs -f
 
 # Health check
 curl http://localhost:8080/healthz
+
+# Metrics
+curl http://localhost:8080/metrics
 ```
+
+## Monitoring & Operations
+
+Fordjent exposes three HTTP endpoints on the configured port:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/healthz` | Liveness probe — returns `ok` |
+| `/readyz` | Readiness probe — returns `ready` |
+| `/metrics` | Prometheus text-format metrics (`fordjent_events_total`, `fordjent_sessions_active`, etc.) |
+
+### Deployment
+
+See [`docs/deployment.md`](docs/deployment.md) for:
+- Docker Compose setup with reverse-proxy notes
+- systemd installation and hardening
+- Backup strategy (`/var/lib/fordjent/work`)
+- Monitoring endpoint usage
 
 ## Roadmap
 
 - [ ] **Phase 2** — Auto-create Telegram topics when issues/PRs open; `ResponseWriter` interface for dual output
 - [ ] **Phase 3** — Topic lifecycle (close/reopen with issues), streaming responses, rate limiting
-- [ ] **Observability** — Prometheus metrics, OpenTelemetry tracing, structured log file output
-- [ ] **Persistence** — SQLite-backed session state for crash recovery
+- [x] **Observability** — Prometheus metrics, `/readyz`, structured logging
+- [x] **Persistence** — SQLite-backed session state for crash recovery
 - [ ] **Scale** — Redis event bus for multi-node, Forgejo runner integration
 - [ ] **Intelligence** — Subagent orchestration, plan mode, context compaction via summarization
 
