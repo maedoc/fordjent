@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,6 +96,8 @@ func TestDefaultValues(t *testing.T) {
 	cfgPath := filepath.Join(dir, "test.yaml")
 
 	content := `
+webhook:
+  secret: "test-secret"
 forgejo:
   url: "https://forgejo.example.com"
   token: "test-token"
@@ -133,6 +136,8 @@ func TestTelegramConfigDefaults(t *testing.T) {
 	cfgPath := filepath.Join(dir, "test.yaml")
 
 	content := `
+webhook:
+  secret: "test-secret"
 forgejo:
   url: "https://forgejo.example.com"
   token: "test-token"
@@ -161,6 +166,8 @@ func TestRepositoryForChat(t *testing.T) {
 	cfgPath := filepath.Join(dir, "test.yaml")
 
 	content := `
+webhook:
+  secret: "test-secret"
 forgejo:
   url: "https://forgejo.example.com"
   token: "test-token"
@@ -205,6 +212,8 @@ func TestIsChatAllowed(t *testing.T) {
 	cfgPath := filepath.Join(dir, "test.yaml")
 
 	content := `
+webhook:
+  secret: "test-secret"
 forgejo:
   url: "https://forgejo.example.com"
   token: "test-token"
@@ -286,6 +295,8 @@ func TestEnvExpansion(t *testing.T) {
 	cfgPath := filepath.Join(dir, "test.yaml")
 
 	content := `
+webhook:
+  secret: "test-secret"
 forgejo:
   url: "https://forgejo.example.com"
   token: "${TEST_FORGEJO_TOKEN}"
@@ -309,5 +320,102 @@ providers:
 	}
 	if cfg.Providers[0].APIKey != "env-key-456" {
 		t.Errorf("expected env-expanded key, got %s", cfg.Providers[0].APIKey)
+	}
+}
+
+func TestLoad_ExpandsAllEnvVars(t *testing.T) {
+	os.Setenv("TEST_SERVER_HOST", "1.2.3.4")
+	os.Setenv("TEST_WEBHOOK_SECRET", "wh-secret")
+	os.Setenv("TEST_FORGEJO_URL", "https://forgejo.env.example.com")
+	os.Setenv("TEST_AGENT_PREFIX", "[env-prefix]")
+	os.Setenv("TEST_LOG_LEVEL", "debug")
+	defer func() {
+		os.Unsetenv("TEST_SERVER_HOST")
+		os.Unsetenv("TEST_WEBHOOK_SECRET")
+		os.Unsetenv("TEST_FORGEJO_URL")
+		os.Unsetenv("TEST_AGENT_PREFIX")
+		os.Unsetenv("TEST_LOG_LEVEL")
+	}()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "test.yaml")
+
+	content := `
+server:
+  host: "${TEST_SERVER_HOST}"
+  port: 9090
+webhook:
+  secret: "${TEST_WEBHOOK_SECRET}"
+forgejo:
+  url: "${TEST_FORGEJO_URL}"
+  token: "test-token"
+providers:
+  - name: "openai"
+    api_base: "https://api.openai.com/v1"
+    api_key: "test-key"
+    model: "gpt-4o"
+agent:
+  commit_prefix: "${TEST_AGENT_PREFIX}"
+log_level: "${TEST_LOG_LEVEL}"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Server.Host != "1.2.3.4" {
+		t.Errorf("expected server host '1.2.3.4', got %s", cfg.Server.Host)
+	}
+	if cfg.Webhook.Secret != "wh-secret" {
+		t.Errorf("expected webhook secret 'wh-secret', got %s", cfg.Webhook.Secret)
+	}
+	if cfg.Forgejo.URL != "https://forgejo.env.example.com" {
+		t.Errorf("expected forgejo url 'https://forgejo.env.example.com', got %s", cfg.Forgejo.URL)
+	}
+	if cfg.Agent.CommitPrefix != "[env-prefix]" {
+		t.Errorf("expected commit prefix '[env-prefix]', got %s", cfg.Agent.CommitPrefix)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("expected log level 'debug', got %s", cfg.LogLevel)
+	}
+}
+
+func TestLoad_ValidatesWebhookSecret(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "test.yaml")
+
+	cases := []struct {
+		name   string
+		secret string
+	}{
+		{"empty", ""},
+		{"default", "change-me-in-production"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := fmt.Sprintf(`
+webhook:
+  secret: %q
+forgejo:
+  url: "https://forgejo.example.com"
+  token: "test-token"
+providers:
+  - name: "openai"
+    api_base: "https://api.openai.com/v1"
+    api_key: "test-key"
+    model: "gpt-4o"
+`, tc.secret)
+			if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			_, err := Load(cfgPath)
+			if err == nil {
+				t.Errorf("expected error for webhook secret %q", tc.secret)
+			}
+		})
 	}
 }

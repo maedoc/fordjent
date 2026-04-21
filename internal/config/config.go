@@ -3,22 +3,24 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Webhook  WebhookConfig  `yaml:"webhook"`
-	Forgejo  ForgejoConfig  `yaml:"forgejo"`
-	Telegram TelegramConfig `yaml:"telegram"`
-	Agent    AgentConfig    `yaml:"agent"`
+	Server   ServerConfig     `yaml:"server"`
+	Webhook  WebhookConfig    `yaml:"webhook"`
+	Forgejo  ForgejoConfig    `yaml:"forgejo"`
+	Telegram TelegramConfig   `yaml:"telegram"`
+	Agent    AgentConfig      `yaml:"agent"`
 	Providers []ProviderConfig `yaml:"providers"`
-	Events   []string       `yaml:"events"`
+	Events   []string         `yaml:"events"`
 	SessionKeyTemplate string `yaml:"session_key_template"`
-	Security SecurityConfig `yaml:"security"`
-	Memory   MemoryConfig   `yaml:"memory"`
+	Security SecurityConfig   `yaml:"security"`
+	Memory   MemoryConfig     `yaml:"memory"`
+	LogLevel string           `yaml:"log_level"`
 }
 
 type ServerConfig struct {
@@ -83,6 +85,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	// Expand environment variables in the raw YAML before parsing.
+	expanded := os.ExpandEnv(string(data))
+
 	cfg := &Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0",
@@ -110,14 +115,12 @@ func Load(path string) (*Config, error) {
 			CompactionCron: "0 2 * * *",
 			CompactionPath: "docs/issues",
 		},
+		LogLevel: "info",
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-
-	// Expand environment variables in sensitive fields
-	cfg.expandEnv()
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
@@ -126,23 +129,18 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-func (c *Config) expandEnv() {
-	c.Webhook.Secret = os.ExpandEnv(c.Webhook.Secret)
-	c.Forgejo.Token = os.ExpandEnv(c.Forgejo.Token)
-	c.Forgejo.URL = os.ExpandEnv(c.Forgejo.URL)
-	c.Telegram.Token = os.ExpandEnv(c.Telegram.Token)
-	for i := range c.Providers {
-		c.Providers[i].APIKey = os.ExpandEnv(c.Providers[i].APIKey)
-		c.Providers[i].APIBase = os.ExpandEnv(c.Providers[i].APIBase)
-	}
-}
-
 func (c *Config) validate() error {
 	if c.Forgejo.URL == "" {
 		return fmt.Errorf("forgejo.url is required")
 	}
+	if !strings.HasPrefix(c.Forgejo.URL, "http://") && !strings.HasPrefix(c.Forgejo.URL, "https://") {
+		return fmt.Errorf("forgejo.url must start with http:// or https://")
+	}
 	if c.Forgejo.Token == "" {
 		return fmt.Errorf("forgejo.token is required")
+	}
+	if c.Webhook.Secret == "" || c.Webhook.Secret == "change-me-in-production" {
+		return fmt.Errorf("webhook.secret is required and must not be the default value")
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("at least one provider is required")
