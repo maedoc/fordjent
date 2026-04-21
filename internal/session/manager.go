@@ -127,6 +127,19 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	}
 }
 
+func buildCloneURL(baseURL, token, repo string) string {
+	if token == "" {
+		return fmt.Sprintf("%s/%s.git", baseURL, repo)
+	}
+	if strings.HasPrefix(baseURL, "https://") {
+		return fmt.Sprintf("https://%s@%s/%s.git", token, strings.TrimPrefix(baseURL, "https://"), repo)
+	}
+	if strings.HasPrefix(baseURL, "http://") {
+		return fmt.Sprintf("http://%s@%s/%s.git", token, strings.TrimPrefix(baseURL, "http://"), repo)
+	}
+	return fmt.Sprintf("%s/%s.git", baseURL, repo)
+}
+
 func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[evt.SessionKey]
@@ -162,7 +175,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 	// Clone the repository if not already cloned
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
-		cloneURL := fmt.Sprintf("%s/%s.git", m.cfg.Forgejo.URL, evt.Repository)
+		cloneURL := buildCloneURL(m.cfg.Forgejo.URL, m.cfg.Forgejo.Token, evt.Repository)
 		slog.Info("cloning repository", "url", cloneURL, "dir", repoDir)
 		cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "50", cloneURL, repoDir)
 		cmd.Env = append(os.Environ(),

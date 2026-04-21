@@ -224,3 +224,20 @@ func TestManagerConcurrentAccess(t *testing.T) {
 		t.Errorf("expected 20 sessions, got %d", count)
 	}
 }
+
+func TestBuildCloneURL(t *testing.T) {
+	tests := []struct {
+		base, token, repo string
+		want              string
+	}{
+		{"https://git.example.com", "tok", "org/repo", "https://tok@git.example.com/org/repo.git"},
+		{"http://localhost:3000", "", "org/repo", "http://localhost:3000/org/repo.git"},
+		{"https://git.example.com", "tok", "user/repo", "https://tok@git.example.com/user/repo.git"},
+	}
+	for _, tt := range tests {
+		got := buildCloneURL(tt.base, tt.token, tt.repo)
+		if got != tt.want {
+			t.Errorf("buildCloneURL(%q,%q,%q) = %q, want %q", tt.base, tt.token, tt.repo, got, tt.want)
+		}
+	}
+}
