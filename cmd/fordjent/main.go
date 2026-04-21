@@ -40,7 +40,11 @@ func main() {
 	defer cancel()
 
 	bus := event.NewBus()
-	mgr := session.NewManager(cfg, bus)
+	mgr, err := session.NewManager(cfg, bus)
+	if err != nil {
+		slog.Error("failed to create session manager", "error", err)
+		os.Exit(1)
+	}
 
 	// Forgejo webhook router (always started)
 	router := webhook.NewRouter(cfg, bus, logger)

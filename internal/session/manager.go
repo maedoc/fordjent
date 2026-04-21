@@ -63,14 +63,65 @@ type Manager struct {
 	bus      *event.Bus
 	sessions map[string]*Session
 	mu       sync.RWMutex
+	store    *Store
 }
 
-func NewManager(cfg *config.Config, bus *event.Bus) *Manager {
-	return &Manager{
+func resolveDBPath(cfgPath, workDir string) string {
+	if cfgPath != "" {
+		return cfgPath
+	}
+	return filepath.Join(filepath.Dir(workDir), "sessions.db")
+}
+
+func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
+	dbPath := resolveDBPath(cfg.Database.Path, cfg.Agent.WorkDir)
+	store, err := NewStore(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	m := &Manager{
 		cfg:      cfg,
 		bus:      bus,
 		sessions: make(map[string]*Session),
+		store:    store,
 	}
+
+	if err := m.restoreSessions(); err != nil {
+		slog.Warn("failed to restore sessions from database", "error", err)
+	}
+
+	return m, nil
+}
+
+func (m *Manager) restoreSessions() error {
+	records, err := m.store.ListAll()
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		if _, err := os.Stat(rec.WorkDir); err != nil {
+			slog.Warn("skipping restored session, workdir missing", "session_key", rec.SessionKey)
+			m.store.Delete(rec.SessionKey)
+			continue
+		}
+		sessCtx, cancel := context.WithCancel(context.Background())
+		sess := &Session{
+			Key:         rec.SessionKey,
+			Repository:  rec.Repository,
+			IssueNumber: rec.IssueNumber,
+			PRNumber:    rec.PRNumber,
+			WorkDir:     rec.WorkDir,
+			RepoDir:     rec.RepoDir,
+			LastActive:  rec.LastActive,
+			Cancel:      cancel,
+			events:      make(chan *event.Event, 64),
+		}
+		m.sessions[rec.SessionKey] = sess
+		go m.runSession(sessCtx, sess)
+		slog.Info("restored session from database", "session_key", rec.SessionKey, "last_active", rec.LastActive)
+	}
+	return nil
 }
 
 // Run starts the session manager event loop.
@@ -202,6 +253,20 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 	m.sessions[evt.SessionKey] = sess
 
+	rec := &SessionRecord{
+		SessionKey:  sess.Key,
+		Repository:  sess.Repository,
+		IssueNumber: sess.IssueNumber,
+		PRNumber:    sess.PRNumber,
+		WorkDir:     sess.WorkDir,
+		RepoDir:     sess.RepoDir,
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	if err := m.store.Create(rec); err != nil {
+		slog.Warn("failed to persist session", "error", err, "session_key", sess.Key)
+	}
+
 	metrics.IncSessions()
 	metrics.SetActiveSessions(int64(len(m.sessions)))
 
@@ -270,6 +335,7 @@ func (m *Manager) reapIdle(ctx context.Context) {
 			slog.Info("reaping idle session", "session_key", key)
 			sess.Cancel()
 			delete(m.sessions, key)
+			m.store.Delete(key)
 			metrics.SetActiveSessions(int64(len(m.sessions)))
 		}
 	}
@@ -298,6 +364,7 @@ func (m *Manager) evictOldest() {
 			sess.Cancel()
 		}
 		delete(m.sessions, oldestKey)
+		m.store.Delete(oldestKey)
 		metrics.SetActiveSessions(int64(len(m.sessions)))
 	}
 }

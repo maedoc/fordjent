@@ -20,6 +20,7 @@ type Config struct {
 	SessionKeyTemplate string `yaml:"session_key_template"`
 	Security SecurityConfig   `yaml:"security"`
 	Memory   MemoryConfig     `yaml:"memory"`
+	Database DatabaseConfig   `yaml:"database"`
 	LogLevel string           `yaml:"log_level"`
 }
 
@@ -64,6 +65,10 @@ type MemoryConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	CompactionCron string `yaml:"compaction_cron"`
 	CompactionPath string `yaml:"compaction_path"`
+}
+
+type DatabaseConfig struct {
+	Path string `yaml:"path"`
 }
 
 type TelegramConfig struct {
@@ -115,6 +120,7 @@ func Load(path string) (*Config, error) {
 			CompactionCron: "0 2 * * *",
 			CompactionPath: "docs/issues",
 		},
+		Database: DatabaseConfig{Path: ""},
 		LogLevel: "info",
 	}
 

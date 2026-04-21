@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,12 +14,13 @@ import (
 func TestManagerCreatesSession(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 10,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  10,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -26,7 +28,10 @@ func TestManagerCreatesSession(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	evt.SessionKey = "org/repo/issues/42"
@@ -49,12 +54,13 @@ func TestManagerCreatesSession(t *testing.T) {
 func TestManagerSessionAffinity(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 10,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  10,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -62,7 +68,10 @@ func TestManagerSessionAffinity(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	evt1 := event.NewEvent(event.IssueCommentCreated, "org/repo", 42, 0, "alice", "created")
 	evt1.SessionKey = "org/repo/issues/42"
@@ -81,12 +90,13 @@ func TestManagerSessionAffinity(t *testing.T) {
 func TestManagerDifferentSessions(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 10,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  10,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -94,7 +104,10 @@ func TestManagerDifferentSessions(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	evt1 := event.NewEvent(event.IssueOpened, "org/repo", 1, 0, "alice", "opened")
 	evt1.SessionKey = "org/repo/issues/1"
@@ -113,12 +126,13 @@ func TestManagerDifferentSessions(t *testing.T) {
 func TestManagerMaxSessionsEnforced(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 2,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  2,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -126,7 +140,10 @@ func TestManagerMaxSessionsEnforced(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	// Create 2 sessions (max)
 	for i := 1; i <= 3; i++ {
@@ -156,12 +173,13 @@ func TestManagerMaxSessionsEnforced(t *testing.T) {
 func TestManagerShutdownAll(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 10,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  10,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -169,7 +187,10 @@ func TestManagerShutdownAll(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	for i := 1; i <= 3; i++ {
 		evt := event.NewEvent(event.IssueOpened, "org/repo", i, 0, "alice", "opened")
@@ -190,12 +211,13 @@ func TestManagerShutdownAll(t *testing.T) {
 func TestManagerConcurrentAccess(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{
-			MaxSessions: 100,
-			IdleTimeout: 4 * time.Hour,
-			WorkDir:     t.TempDir(),
+			MaxSessions:  100,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      t.TempDir(),
 			CommitPrefix: "[agent-automation]",
 		},
-		Forgejo:  config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Database:  config.DatabaseConfig{Path: ""},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
 		Providers: []config.ProviderConfig{
 			{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100},
 		},
@@ -203,7 +225,10 @@ func TestManagerConcurrentAccess(t *testing.T) {
 		Security: config.SecurityConfig{FilterAgentEvents: false},
 	}
 	bus := event.NewBus()
-	mgr := NewManager(cfg, bus)
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -239,5 +264,59 @@ func TestBuildCloneURL(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("buildCloneURL(%q,%q,%q) = %q, want %q", tt.base, tt.token, tt.repo, got, tt.want)
 		}
+	}
+}
+
+func TestManager_RestoreSessions(t *testing.T) {
+	workDir := t.TempDir()
+	dbPath := filepath.Join(workDir, "sessions.db")
+
+	cfg1 := &config.Config{
+		Agent: config.AgentConfig{
+			MaxSessions:  10,
+			IdleTimeout:  4 * time.Hour,
+			WorkDir:      filepath.Join(workDir, "work"),
+			CommitPrefix: "[agent-automation]",
+		},
+		Database:  config.DatabaseConfig{Path: dbPath},
+		Forgejo:   config.ForgejoConfig{URL: "https://example.com", Token: "fake"},
+		Providers: []config.ProviderConfig{{Name: "test", APIBase: "https://example.com/v1", APIKey: "fake", Model: "test", MaxTokens: 100}},
+		Memory:   config.MemoryConfig{Enabled: false, CompactionPath: "docs/issues"},
+		Security: config.SecurityConfig{FilterAgentEvents: false},
+	}
+	bus1 := event.NewBus()
+	mgr1, err := NewManager(cfg1, bus1)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
+	evt.SessionKey = "org/repo/issues/42"
+	sess1, err := mgr1.getOrCreate(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	mgr1.shutdownAll()
+
+	cfg2 := *cfg1
+	bus2 := event.NewBus()
+	mgr2, err := NewManager(&cfg2, bus2)
+	if err != nil {
+		t.Fatalf("new manager 2: %v", err)
+	}
+	defer mgr2.store.Close()
+
+	mgr2.mu.RLock()
+	restored, ok := mgr2.sessions["org/repo/issues/42"]
+	mgr2.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected session to be restored from SQLite")
+	}
+	if restored.Key != sess1.Key {
+		t.Errorf("key mismatch: got %q, want %q", restored.Key, sess1.Key)
+	}
+	if restored.Repository != sess1.Repository {
+		t.Errorf("repo mismatch")
 	}
 }
