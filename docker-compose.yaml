@@ -4,14 +4,19 @@ services:
     container_name: fordjent
     restart: unless-stopped
     ports:
-      - "${FORDJENT_PORT:-8080}:8080"
+      - "127.0.0.1:${FORDJENT_PORT:-8080}:8080"
     volumes:
       - fordjent-data:/var/lib/fordjent
       - ./fordjent.yaml:/etc/fordjent/fordjent.yaml:ro
     environment:
+      - FORGEJO_URL=${FORGEJO_URL:-}
       - FORGEJO_TOKEN=${FORGEJO_TOKEN:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - LOG_LEVEL=${LOG_LEVEL:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 30s

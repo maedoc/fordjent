@@ -33,7 +33,7 @@ agent:
   # Idle timeout per session
   idle_timeout: "4h"
   # Working directory base for clones
-  workdir: "/tmp/fordjent/work"
+  workdir: "/var/lib/fordjent/work"
   # Maximum LLM turns per event
   max_turns: 25
   # Commit message prefix for agent commits
