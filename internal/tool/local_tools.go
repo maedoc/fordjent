@@ -12,13 +12,13 @@ import (
 	"time"
 )
 
-// bashTool executes shell commands in the session's working directory.
+// bashTool executes shell commands in the repository root directory.
 type bashTool struct {
-	workDir string
+	repoDir string
 }
 
 func NewBashTool(info SessionInfo) *bashTool {
-	return &bashTool{workDir: info.WorkDir()}
+	return &bashTool{repoDir: info.RepoDir()}
 }
 
 func (t *bashTool) Name() string { return "bash" }
@@ -61,7 +61,7 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", params.Command)
-	cmd.Dir = t.workDir
+	cmd.Dir = t.repoDir
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -130,6 +130,24 @@ func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 
 	absPath := filepath.Join(t.repoDir, params.Path)
+
+	// Sanitize: if model passed an absolute path containing repoDir, extract the relative part.
+	if strings.HasPrefix(params.Path, t.repoDir) {
+		rel, err := filepath.Rel(t.repoDir, params.Path)
+		if err == nil {
+			absPath = filepath.Join(t.repoDir, rel)
+		}
+	}
+
+	// Sanitize: if model passed "repo/<file>" and repoDir already ends with "repo", strip the prefix.
+	relClean := strings.TrimPrefix(params.Path, "repo/")
+	relClean = strings.TrimPrefix(relClean, "/")
+	if relClean != params.Path {
+		candidate := filepath.Join(t.repoDir, relClean)
+		if _, err := os.Stat(candidate); err == nil {
+			absPath = candidate
+		}
+	}
 
 	f, err := os.Open(absPath)
 	if err != nil {
@@ -229,7 +247,7 @@ func NewGitTool(info SessionInfo) *gitTool {
 func (t *gitTool) Name() string { return "git" }
 
 func (t *gitTool) Description() string {
-	return "Execute git operations in the repository: status, diff, add, commit, branch, checkout, log, fetch, pull. Note: push is blocked; use forgejo_create_pr tool instead."
+	return "Execute git operations in the repository: status, diff, add, commit, branch, checkout, log, fetch, pull, rebase. Note: push is blocked; use forgejo_create_pr tool instead. IMPORTANT: before creating a PR, run 'git fetch origin' then 'git rebase origin/main' (two separate calls)."
 }
 
 func (t *gitTool) Parameters() map[string]interface{} {
@@ -258,10 +276,18 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		return "", fmt.Errorf("git push is not allowed. Use the forgejo_create_pr tool to submit changes via pull request")
 	}
 
+	// Sanitize: replace newlines in commit messages with spaces to avoid shell
+	// treating them as argument separators
+	cmdStr := params.Command
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(cmdStr)), "commit") {
+		cmdStr = strings.ReplaceAll(cmdStr, "\\n", " ")
+		cmdStr = strings.ReplaceAll(cmdStr, "\n", " ")
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	parts := strings.Fields(params.Command)
+	parts := strings.Fields(cmdStr)
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
@@ -272,6 +298,21 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("git error: %s\n%s", err, string(out)), nil
+	}
+
+	// Auto-push after successful commit so forgejo_create_pr never sees a
+	// missing remote branch. Use -u origin HEAD to always push current branch.
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "commit") {
+		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer pushCancel()
+		pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
+		pushCmd.Dir = t.repoDir
+		pushOut, pushErr := pushCmd.CombinedOutput()
+		if pushErr != nil {
+			// Push failure is non-fatal — upstream may not be configured yet
+			_ = pushErr
+			_ = pushOut
+		}
 	}
 
 	return string(out), nil

@@ -10,7 +10,7 @@ import (
 
 func TestGetIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/api/v1/repos/org%2Frepo/issues/42" {
+		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/issues/42" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		if r.Method != http.MethodGet {
@@ -61,7 +61,7 @@ func TestGetIssueNotFound(t *testing.T) {
 
 func TestListComments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/api/v1/repos/org%2Frepo/issues/42/comments" {
+		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/issues/42/comments" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		json.NewEncoder(w).Encode([]map[string]interface{}{
@@ -113,10 +113,10 @@ func TestAddReactionToIssue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedMethod != http.MethodPut {
-		t.Errorf("expected PUT, got %s", receivedMethod)
+	if receivedMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", receivedMethod)
 	}
-	if receivedPath != "/api/v1/repos/org%2Frepo/issues/42/reactions" {
+	if receivedPath != "/api/v1/repos/org/repo/issues/42/reactions" {
 		t.Errorf("unexpected path: %s", receivedPath)
 	}
 	if receivedBody["content"] != "eyes" {
@@ -139,7 +139,7 @@ func TestAddReactionToComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedPath != "/api/v1/repos/org%2Frepo/issues/comments/100/reactions" {
+	if receivedPath != "/api/v1/repos/org/repo/issues/comments/100/reactions" {
 		t.Errorf("unexpected path: %s", receivedPath)
 	}
 }
@@ -161,9 +161,9 @@ func TestURLPathEscaping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// url.PathEscape("org/repo-with/slashes") = "org%2Frepo-with%2Fslashes"
-	expected := "/api/v1/repos/org%2Frepo-with%2Fslashes/issues/1"
+	// escapeRepoPath("org/repo-with/slashes") = "org/repo-with/slashes"
+	expected := "/api/v1/repos/org/repo-with/slashes/issues/1"
 	if receivedPath != expected {
-		t.Errorf("expected escaped path %s, got %s", expected, receivedPath)
+		t.Errorf("expected path %s, got %s", expected, receivedPath)
 	}
 }

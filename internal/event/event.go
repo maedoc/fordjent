@@ -18,6 +18,7 @@ const (
 	IssueCommentEdited       Type = "issue_comment.edited"
 	PullRequestOpened        Type = "pull_request.opened"
 	PullRequestClosed        Type = "pull_request.closed"
+	PullRequestMerged        Type = "pull_request.merged"
 	PullRequestSync          Type = "pull_request.synchronize"
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
 	Push                     Type = "push"

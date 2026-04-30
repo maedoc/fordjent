@@ -4,18 +4,21 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/metrics"
+	_ "modernc.org/sqlite"
 )
 
 // Router receives Forgejo webhooks, validates them, normalizes events,
@@ -39,6 +42,8 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/healthz", r.handleHealth)
 	r.mux.HandleFunc("/readyz", r.handleReadyz)
 	r.mux.HandleFunc("/metrics", metrics.Handler())
+	r.mux.HandleFunc("/status", r.handleStatus)
+
 	return r
 }
 
@@ -50,6 +55,98 @@ func (r *Router) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (r *Router) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ready")
+}
+
+func (r *Router) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	resp := map[string]interface{}{"now": time.Now().UTC().Format(time.RFC3339)}
+
+	if r.cfg.Agent.WorkDir != "" {
+		// Cost summary
+		costDB := filepath.Join(r.cfg.Agent.WorkDir, "costs.db")
+		if data, err := queryCostDB(costDB); err == nil {
+			resp["costs"] = data
+		}
+
+		// Lifecycle summary
+		lifecycleDB := filepath.Join(r.cfg.Agent.WorkDir, "lifecycle.db")
+		if data, err := queryLifecycleDB(lifecycleDB); err == nil {
+			resp["lifecycle"] = data
+		}
+	}
+
+	resp["metrics"] = metrics.Snapshot()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func queryCostDB(dbPath string) (map[string]interface{}, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	result := map[string]interface{}{}
+	var totalSessions int
+	_ = db.QueryRow("SELECT COUNT(DISTINCT session_key) FROM usage").Scan(&totalSessions)
+	result["total_sessions"] = totalSessions
+
+	var totalTokens, totalCost int64
+	_ = db.QueryRow("SELECT COALESCE(SUM(input_tokens),0)+COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd*1000000),0) FROM usage").Scan(&totalTokens, &totalCost)
+	result["total_tokens"] = totalTokens
+	result["total_cost_usd"] = float64(totalCost) / 1e6
+
+	recent := []map[string]interface{}{}
+	rows, err := db.Query("SELECT session_key, provider, model, input_tokens, output_tokens, cost_usd, timestamp FROM usage ORDER BY timestamp DESC LIMIT 20")
+	if err == nil && rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var s, p, m string
+			var it, ot int
+			var cost float64
+			var ts string
+			_ = rows.Scan(&s, &p, &m, &it, &ot, &cost, &ts)
+			recent = append(recent, map[string]interface{}{
+				"session_key": s, "provider": p, "model": m,
+				"input_tokens": it, "output_tokens": ot, "cost_usd": cost, "timestamp": ts,
+			})
+		}
+	}
+	result["recent_records"] = recent
+
+	return result, nil
+}
+
+func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	result := map[string]interface{}{}
+	var active, failed int
+	_ = db.QueryRow("SELECT COUNT(*) FROM session_transitions WHERE to_state = 'working'").Scan(&active)
+	_ = db.QueryRow("SELECT COUNT(*) FROM session_transitions WHERE to_state LIKE 'failed%'").Scan(&failed)
+	result["active_sessions"] = active
+	result["failed_sessions"] = failed
+
+	recent := []map[string]interface{}{}
+	rows, err := db.Query("SELECT session_key, from_state, to_state, occurred_at FROM session_transitions ORDER BY occurred_at DESC LIMIT 20")
+	if err == nil && rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var s, fromSt, toSt, ts string
+			_ = rows.Scan(&s, &fromSt, &toSt, &ts)
+			recent = append(recent, map[string]interface{}{
+				"session_key": s, "from_state": fromSt, "to_state": toSt, "timestamp": ts,
+			})
+		}
+	}
+	result["recent_transitions"] = recent
+	return result, nil
 }
 
 func (r *Router) ListenAndServe(ctx context.Context, addr string) error {
@@ -206,6 +303,15 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 	issueNum := extractIssueNum()
 	prNum := extractPRNum()
 
+	// Detect merged PRs: Forgejo sends action="closed" with merged=true in the payload
+	if eventType == "pull_request" && action == "closed" {
+		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+			if merged, ok := pr["merged"].(bool); ok && merged {
+				action = "merged"
+			}
+		}
+	}
+
 	var typ event.Type
 	switch eventType {
 	case "issues":
@@ -238,8 +344,12 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 }
 
 // isAgentEvent detects events originating from the agent itself by checking
-// commit message prefixes or sender identity.
+// commit message prefixes, sender identity, or a hidden HTML comment marker
+// in the body of comments, issues, or PRs. This prevents infinite loops where
+// the agent responds to its own comments.
 func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
+	marker := "<!-- ford -->"
+
 	// Check commits in push events
 	if commits, ok := payload["commits"].([]interface{}); ok {
 		for _, c := range commits {
@@ -252,6 +362,7 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 			}
 		}
 	}
+
 	// Check sender (agent bot user)
 	if sender, ok := payload["sender"].(map[string]interface{}); ok {
 		if login, ok := sender["login"].(string); ok {
@@ -260,5 +371,33 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 			}
 		}
 	}
+
+	// Check comment body for the hidden agent marker (prevent self-comment loops)
+	if comment, ok := payload["comment"].(map[string]interface{}); ok {
+		if body, ok := comment["body"].(string); ok {
+			if strings.Contains(body, marker) {
+				return true
+			}
+		}
+	}
+
+	// Check issue body for the hidden agent marker
+	if issue, ok := payload["issue"].(map[string]interface{}); ok {
+		if body, ok := issue["body"].(string); ok {
+			if strings.Contains(body, marker) {
+				return true
+			}
+		}
+	}
+
+	// Check pull_request body for the hidden agent marker
+	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+		if body, ok := pr["body"].(string); ok {
+			if strings.Contains(body, marker) {
+				return true
+			}
+		}
+	}
+
 	return false
 }

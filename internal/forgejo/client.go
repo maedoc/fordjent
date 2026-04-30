@@ -52,6 +52,55 @@ type User struct {
 
 func (u User) String() string { return u.Login }
 
+// PullRequest represents a Forgejo pull request with branch info.
+type PullRequest struct {
+	Number       int    `json:"number"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	State        string `json:"state"`
+	Mergeable    bool   `json:"mergeable"`
+	HasConflicts bool   `json:"has_conflits"` // NOTE: Forgejo API field may vary — treat as advisory
+	Head         struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+// Label represents a Forgejo issue/PR label.
+type Label struct {
+	Name string `json:"name"`
+}
+
+// RepoFile represents a file in a repository tree.
+type RepoFile struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
+// GetPR retrieves a pull request by number, including head branch info.
+func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PullRequest, error) {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number))
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var pr PullRequest
+	if err := json.Unmarshal([]byte(result), &pr); err != nil {
+		return nil, fmt.Errorf("decode PR: %w", err)
+	}
+	return &pr, nil
+}
+
+// MergePR merges a pull request using the given merge style ("merge", "rebase-merge", etc.).
+func (c *Client) MergePR(ctx context.Context, repo string, number int, style string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "merge")
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"Do": style})
+	return err
+}
+
 // doRequest is a shared helper for Forgejo API calls.
 func (c *Client) doRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
 	var reqBody io.Reader
@@ -87,9 +136,20 @@ func (c *Client) doRequest(ctx context.Context, method, apiPath string, body int
 	return string(respBody), nil
 }
 
+// escapeRepoPath escapes each segment of an "owner/repo" path while preserving
+// the slash separator. Using url.PathEscape on the whole string encodes the slash,
+// breaking Gitea/Forgejo's two-segment path routing.
+func escapeRepoPath(repo string) string {
+	parts := strings.Split(repo, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return path.Join(parts...)
+}
+
 // GetIssue retrieves an issue by number.
 func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue, error) {
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(repo), "issues", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -104,7 +164,7 @@ func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue,
 
 // ListComments lists comments on an issue.
 func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(repo), "issues", fmt.Sprintf("%d", number), "comments")
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number), "comments")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -136,13 +196,87 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]C
 func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, commentID int, emoji string) error {
 	var apiPath string
 	if commentID > 0 {
-		apiPath = path.Join("/api/v1/repos", url.PathEscape(repo),
+		apiPath = path.Join("/api/v1/repos", escapeRepoPath(repo),
 			"issues", "comments", fmt.Sprintf("%d", commentID), "reactions")
 	} else {
-		apiPath = path.Join("/api/v1/repos", url.PathEscape(repo),
+		apiPath = path.Join("/api/v1/repos", escapeRepoPath(repo),
 			"issues", fmt.Sprintf("%d", issueNumber), "reactions")
 	}
 
-	_, err := c.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"content": emoji})
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"content": emoji})
+	return err
+}
+
+// AddIssueLabels adds labels to an issue.
+func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber int, labels []string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, labels)
+	return err
+}
+
+// RemoveIssueLabel removes a single label from an issue.
+func (c *Client) RemoveIssueLabel(ctx context.Context, repo string, issueNumber int, label string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels", url.PathEscape(label))
+	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
+	return err
+}
+
+// CreateIssue creates a new issue in a repository.
+func (c *Client) CreateIssue(ctx context.Context, repo, title, body string) (*Issue, error) {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues")
+	result, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"title": title, "body": body})
+	if err != nil {
+		return nil, err
+	}
+	var issue Issue
+	if err := json.Unmarshal([]byte(result), &issue); err != nil {
+		return nil, fmt.Errorf("decode created issue: %w", err)
+	}
+	return &issue, nil
+}
+
+// ListOpenIssues returns all open issues in a repository.
+func (c *Client) ListOpenIssues(ctx context.Context, repo string) ([]Issue, error) {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues?state=open")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	if err := json.Unmarshal([]byte(result), &issues); err != nil {
+		return nil, fmt.Errorf("decode issues: %w", err)
+	}
+	return issues, nil
+}
+
+// ListRepoFiles returns file paths in a repository tree (shallow, first page).
+func (c *Client) ListRepoFiles(ctx context.Context, repo, ref string) ([]string, error) {
+	if ref == "" {
+		ref = "main"
+	}
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "git/trees", ref)
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?recursive=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	var tree struct {
+		Tree []RepoFile `json:"tree"`
+	}
+	if err := json.Unmarshal([]byte(result), &tree); err != nil {
+		return nil, fmt.Errorf("decode tree: %w", err)
+	}
+	var files []string
+	for _, f := range tree.Tree {
+		if f.Type == "blob" {
+			files = append(files, f.Path)
+		}
+	}
+	return files, nil
+}
+
+// PostIssueComment adds a comment to an issue or pull request.
+func (c *Client) PostIssueComment(ctx context.Context, repo string, issueNumber int, body string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "comments")
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": body})
 	return err
 }

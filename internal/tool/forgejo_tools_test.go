@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ func TestCommentToolExecute(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.EscapedPath() != "/api/v1/repos/org%2Frepo/issues/42/comments" {
+		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/issues/42/comments" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		if r.Header.Get("Authorization") != "token test-token" {
@@ -42,8 +43,8 @@ func TestCommentToolExecute(t *testing.T) {
 	if result != "Comment posted successfully" {
 		t.Errorf("unexpected result: %s", result)
 	}
-	if receivedBody["body"] != "Hello world" {
-		t.Errorf("expected body 'Hello world', got %s", receivedBody["body"])
+	if !strings.HasPrefix(receivedBody["body"], "Hello world") {
+		t.Errorf("expected body starting with 'Hello world', got %s", receivedBody["body"])
 	}
 }
 
@@ -52,7 +53,7 @@ func TestGetIssueToolExecute(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if r.URL.EscapedPath() != "/api/v1/repos/org%2Frepo/issues/42" {
+		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/issues/42" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -99,7 +100,7 @@ func TestCreatePRToolExecute(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.EscapedPath() != "/api/v1/repos/org%2Frepo/pulls" {
+		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/pulls" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		json.NewDecoder(r.Body).Decode(&receivedBody)
@@ -107,7 +108,7 @@ func TestCreatePRToolExecute(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := NewCreatePRTool(newTestAdapter(server))
+	tool := NewCreatePRTool(newTestAdapter(server), nil, "")
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"repository": "org/repo",
 		"title": "Fix bug",
@@ -165,7 +166,7 @@ func TestAddReactionToolOnIssue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedPath != "/api/v1/repos/org%2Frepo/issues/42/reactions" {
+	if receivedPath != "/api/v1/repos/org/repo/issues/42/reactions" {
 		t.Errorf("unexpected path: %s", receivedPath)
 	}
 	if receivedBody["content"] != "eyes" {
@@ -195,7 +196,7 @@ func TestAddReactionToolOnComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedPath != "/api/v1/repos/org%2Frepo/issues/comments/100/reactions" {
+	if receivedPath != "/api/v1/repos/org/repo/issues/comments/100/reactions" {
 		t.Errorf("unexpected path: %s", receivedPath)
 	}
 }

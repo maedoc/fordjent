@@ -11,7 +11,17 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/stalegate"
 )
+
+func escapeRepoPath(repo string) string {
+	parts := strings.Split(repo, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return path.Join(parts...)
+}
 
 // forgejoCommentTool posts comments on issues/PRs.
 type forgejoCommentTool struct {
@@ -49,6 +59,10 @@ func (t *forgejoCommentTool) Parameters() map[string]interface{} {
 	}
 }
 
+// agentCommentMarker is appended to all agent comments so the webhook router
+// can detect self-originated events and break infinite comment loops.
+const agentCommentMarker = "\n\n<!-- ford -->"
+
 func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Repository  string `json:"repository"`
@@ -59,9 +73,12 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+	// Append hidden marker so webhook router can filter self-generated comments
+	body := params.Body + agentCommentMarker
+
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber), "comments")
-	_, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": params.Body})
+	_, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": body})
 	if err != nil {
 		return "", err
 	}
@@ -120,7 +137,7 @@ func (t *forgejoListIssuesTool) Execute(ctx context.Context, args json.RawMessag
 		params.Limit = 20
 	}
 
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "issues")
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
 	query := url.Values{}
 	query.Set("state", params.State)
 	query.Set("limit", fmt.Sprintf("%d", params.Limit))
@@ -170,24 +187,32 @@ func (t *forgejoGetIssueTool) Execute(ctx context.Context, args json.RawMessage)
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber))
 	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
+}
+
+// MergeGate is implemented by the merge-queue system. It checks whether a PR
+// would conflict with already open PRs before creation.
+type MergeGate interface {
+	CheckGate(ctx context.Context, repo, headBranch, baseBranch string) (blocked bool, message string, err error)
 }
 
 // forgejoCreatePRTool creates a pull request.
 type forgejoCreatePRTool struct {
 	adapter *ForgejoAdapter
+	mq      MergeGate
+	repoDir string
 }
 
-func NewCreatePRTool(adapter *ForgejoAdapter) *forgejoCreatePRTool {
-	return &forgejoCreatePRTool{adapter: adapter}
+func NewCreatePRTool(adapter *ForgejoAdapter, mq MergeGate, repoDir string) *forgejoCreatePRTool {
+	return &forgejoCreatePRTool{adapter: adapter, mq: mq, repoDir: repoDir}
 }
 
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
 
 func (t *forgejoCreatePRTool) Description() string {
-	return "Create a pull request from a head branch to a base branch. Use for submitting code changes for review."
+	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead."
 }
 
 func (t *forgejoCreatePRTool) Parameters() map[string]interface{} {
@@ -231,10 +256,29 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "pulls")
+	// Stale gate: if origin/main has moved ahead of this branch, block
+	if t.repoDir != "" {
+		stale, msg, err := stalegate.IsStale(t.repoDir, params.Base)
+		if err == nil && stale {
+			return "Stale branch: " + msg, nil
+		}
+	}
+
+	// Merge-queue file gate: if any open PR touches the same files, block
+	if t.mq != nil {
+		blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
+		if err == nil && blocked {
+			return fmt.Sprintf("Merge-queue block: %s", msg), nil
+		}
+	}
+
+	// Append hidden marker so webhook router can filter self-generated PRs
+	body := params.Body + agentCommentMarker
+
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls")
 	payload := map[string]string{
 		"title": params.Title,
-		"body":  params.Body,
+		"body":  body,
 		"head":  params.Head,
 		"base":  params.Base,
 	}
@@ -286,7 +330,7 @@ func (t *forgejoSearchCodeTool) Execute(ctx context.Context, args json.RawMessag
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", url.PathEscape(params.Repository), "code", "search")
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "code", "search")
 	query := url.Values{}
 	query.Set("q", params.Query)
 	apiPath += "?" + query.Encode()
@@ -347,10 +391,10 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 
 	var apiPath string
 	if params.CommentID > 0 {
-		apiPath = path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+		apiPath = path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 			"issues", "comments", fmt.Sprintf("%d", params.CommentID), "reactions")
 	} else {
-		apiPath = path.Join("/api/v1/repos", url.PathEscape(params.Repository),
+		apiPath = path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 			"issues", fmt.Sprintf("%d", params.IssueNumber), "reactions")
 	}
 
@@ -359,6 +403,78 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 		return "", err
 	}
 	return fmt.Sprintf("Reaction '%s' added", params.Reaction), nil
+}
+
+// --- forgejo_merge_pr ---
+
+type forgejoMergePRTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewMergePRTool(adapter *ForgejoAdapter) *forgejoMergePRTool {
+	return &forgejoMergePRTool{adapter: adapter}
+}
+
+func (t *forgejoMergePRTool) Name() string        { return "forgejo_merge_pr" }
+func (t *forgejoMergePRTool) Description() string {
+	return "Merge an existing pull request. Only call this after pushing fixes to a PR branch and confirming it has no conflicts."
+}
+func (t *forgejoMergePRTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"pr_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "Pull request number to merge",
+			},
+			"style": map[string]interface{}{
+				"type":        "string",
+				"description": "Merge style: merge, rebase-merge, squash-merge",
+			},
+		},
+		"required": []string{"repository", "pr_number", "style"},
+	}
+}
+
+func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		PRNumber   int    `json:"pr_number"`
+		Style      string `json:"style"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	// Fetch PR details to check mergeable status (advisory, Forgejo may return mergeable).
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber))
+	result, err := t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return "", fmt.Errorf("get PR details: %w", err)
+	}
+	var pr struct {
+		Mergeable    bool `json:"mergeable"`
+		HasConflicts bool `json:"has_conflits"`
+	}
+	_ = json.Unmarshal([]byte(result), &pr)
+
+	if pr.HasConflicts {
+		return "", fmt.Errorf("PR #%d has conflicts — please resolve before merging", params.PRNumber)
+	}
+	if !pr.Mergeable {
+		return "", fmt.Errorf("PR #%d is not mergeable yet — check status requirements", params.PRNumber)
+	}
+
+	mergePath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber), "merge")
+	_, err = t.adapter.doRequest(ctx, http.MethodPost, mergePath, map[string]string{"Do": params.Style})
+	if err != nil {
+		return "", fmt.Errorf("merge PR #%d: %w", params.PRNumber, err)
+	}
+	return fmt.Sprintf("PR #%d merged successfully using '%s'", params.PRNumber, params.Style), nil
 }
 
 // ForgejoAdapter holds shared HTTP client and credentials for Forgejo API tools.

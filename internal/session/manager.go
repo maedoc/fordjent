@@ -11,13 +11,18 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"github.com/fordjent/fordjent/internal/agent"
 	"github.com/fordjent/fordjent/internal/config"
+	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/lifecycle"
+	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/memory"
+	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
+	"github.com/fordjent/fordjent/internal/scheduler"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -56,14 +61,17 @@ func (a *agentConfigAdapter) ProtectedBranches() []string { return a.cfg.Securit
 func (a *agentConfigAdapter) RequirePRForWorkflows() bool { return a.cfg.Security.RequirePRForWorkflows }
 
 // Manager manages agent session lifecycle.
-// Events with the same session key are routed to the same agent session.
-// Concurrent events queue and are processed serially.
 type Manager struct {
-	cfg      *config.Config
-	bus      *event.Bus
-	sessions map[string]*Session
-	mu       sync.RWMutex
-	store    *Store
+	cfg        *config.Config
+	bus        *event.Bus
+	sessions   map[string]*Session
+	mu         sync.RWMutex
+	store      *Store
+	forgejoClient *forgejo.Client
+	lc            *lifecycle.Lifecycle
+	mqClient   *mergequeue.Client
+	scheduler  *scheduler.Scheduler
+	costTracker *cost.Tracker
 }
 
 func resolveDBPath(cfgPath, workDir string) string {
@@ -80,12 +88,43 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 		return nil, err
 	}
 
-	m := &Manager{
-		cfg:      cfg,
-		bus:      bus,
-		sessions: make(map[string]*Session),
-		store:    store,
+	// Initialize cost tracker (persisted in work dir)
+	costDBPath := ""
+	if cfg.Agent.WorkDir != "" {
+		costDBPath = filepath.Join(cfg.Agent.WorkDir, "costs.db")
+		_ = os.MkdirAll(cfg.Agent.WorkDir, 0755)
 	}
+	costTracker, err := cost.NewTracker(costDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("init cost tracker: %w", err)
+	}
+
+	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
+
+	// Initialize lifecycle tracker
+	lifecycleDBPath := ""
+	if cfg.Agent.WorkDir != "" {
+		lifecycleDBPath = filepath.Join(cfg.Agent.WorkDir, "lifecycle.db")
+	}
+	lc, err := lifecycle.New(lifecycleDBPath, forgejoClient)
+	if err != nil {
+		return nil, fmt.Errorf("init lifecycle tracker: %w", err)
+	}
+
+	m := &Manager{
+		cfg:           cfg,
+		bus:           bus,
+		sessions:      make(map[string]*Session),
+		store:         store,
+		costTracker:   costTracker,
+		forgejoClient: forgejoClient,
+		lc:            lc,
+	}
+
+	// Wire merge queue and scheduler (both need Forgejo API access)
+	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
+	m.mqClient = mergequeue.NewClient(forgejoAdapter)
+	m.scheduler = scheduler.New(forgejoAdapter)
 
 	if err := m.restoreSessions(); err != nil {
 		slog.Warn("failed to restore sessions from database", "error", err)
@@ -153,6 +192,29 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
+	// If a PR was merged, notify the scheduler to unblock dependent issues
+	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
+		go func() {
+			schedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := m.scheduler.OnPRMerged(schedCtx, evt.Repository, evt.PRNumber); err != nil {
+				slog.Warn("scheduler: failed to process merged PR", "error", err, "pr", evt.PRNumber, "repo", evt.Repository)
+			}
+		}()
+	}
+
+	// Scaffold detection: on new issues for empty repos, create/block
+	if m.cfg.Agent.EnableScaffoldDetection && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+		blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber)
+		if err != nil {
+			slog.Warn("scaffold detection failed", "error", err, "repo", evt.Repository, "issue", evt.IssueNumber)
+		}
+		if blocked {
+			slog.Info("scaffold: blocked issue on empty repo", "repo", evt.Repository, "issue", evt.IssueNumber)
+			return
+		}
+	}
+
 	if evt.SessionKey == "" {
 		slog.Warn("event with empty session key, dropping", "event_id", evt.ID)
 		return
@@ -283,7 +345,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 // runSession is the per-session event loop. It processes events serially.
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
-	agent := NewAgent(m.cfg, sess)
+	agent := NewAgent(m.cfg, sess, m.mqClient, m.costTracker)
 
 	for {
 		select {
@@ -304,12 +366,24 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				"type", evt.Type,
 			)
 
+			// Only record start if this is the first event in the session
+			if state, _ := m.lc.GetState(ctx, sess.Key); state == "" {
+				m.lc.OnSessionStart(ctx, sess.Key)
+			}
+
 			if err := agent.ProcessEvent(ctx, evt); err != nil {
-				slog.Error("agent processing failed",
-					"error", err,
-					"event_id", evt.ID,
-					"session_key", sess.Key,
-				)
+				if strings.Contains(err.Error(), "max turns") {
+					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key)
+				} else {
+					slog.Error("agent processing failed",
+						"error", err,
+						"event_id", evt.ID,
+						"session_key", sess.Key,
+					)
+					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err)
+				}
+			} else {
+				m.lc.OnSessionComplete(ctx, sess.Key)
 			}
 
 			sess.mu.Lock()
@@ -382,15 +456,17 @@ func (m *Manager) shutdownAll() {
 
 // Agent is the per-session agent that processes events via LLM + tools.
 type Agent struct {
-	cfg     *config.Config
-	sess    *Session
-	forgejo *forgejo.Client
-	llm     *provider.Client
-	tools   *tool.Registry
-	mem     *memory.Memory
+	cfg         *config.Config
+	sess        *Session
+	forgejo     *forgejo.Client
+	llm         *provider.Client
+	tools       *tool.Registry
+	mem         *memory.Memory
+	costTracker *cost.Tracker
+	executor    *agent.TurnExecutor
 }
 
-func NewAgent(cfg *config.Config, sess *Session) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.DefaultProvider()
 	llmClient := provider.NewClient(prov)
@@ -405,25 +481,30 @@ func NewAgent(cfg *config.Config, sess *Session) *Agent {
 	registry.Register(tool.NewCommentTool(forgejoAdapter))
 	registry.Register(tool.NewListIssuesTool(forgejoAdapter))
 	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
-	registry.Register(tool.NewCreatePRTool(forgejoAdapter))
+	registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
 	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
 	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
+	registry.Register(tool.NewMergePRTool(forgejoAdapter))
 	registry.Register(tool.NewBashTool(sessionInfo))
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 	registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
 	registry.Register(tool.NewGitTool(sessionInfo))
 
+	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
+
 	return &Agent{
-		cfg:     cfg,
-		sess:    sess,
-		forgejo: forgejoClient,
-		llm:     llmClient,
-		tools:   registry,
-		mem:     mem,
+		cfg:         cfg,
+		sess:        sess,
+		forgejo:     forgejoClient,
+		llm:         llmClient,
+		tools:       registry,
+		mem:         mem,
+		costTracker: ct,
+		executor:    executor,
 	}
 }
 
-// ProcessEvent handles a single event: builds context, runs LLM loop, executes tools.
+// ProcessEvent handles a single event: builds context, runs LLM loop with compaction/retry/cost tracking, executes tools.
 func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Step 1: Acknowledge with 👀 reaction
 	a.addReaction(ctx, evt, "eyes")
@@ -435,10 +516,34 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		slog.Warn("failed to build full context", "error", err)
 	}
 
-	// Step 3: Build the user message from the event
+	// Step 3: If this is a PR review comment, fetch PR and checkout its branch
+	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
+		pr, err := a.forgejo.GetPR(ctx, evt.Repository, evt.PRNumber)
+		if err == nil && pr.Head.Ref != "" {
+			repoDir := a.sess.RepoDir
+			fetchCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin", pr.Head.Ref)
+			if _, err := fetchCmd.CombinedOutput(); err != nil {
+				slog.Warn("failed to fetch PR branch", "branch", pr.Head.Ref, "error", err)
+			}
+			checkoutCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "checkout", "-B", pr.Head.Ref, "origin/"+pr.Head.Ref)
+			if _, err := checkoutCmd.CombinedOutput(); err != nil {
+				slog.Warn("failed to checkout PR branch", "branch", pr.Head.Ref, "error", err)
+			}
+			slog.Info("checked out PR branch for review", "branch", pr.Head.Ref, "session_key", a.sess.Key)
+			contextMessages = append(contextMessages, provider.Message{
+				Role: "user",
+				Content: fmt.Sprintf("[Context] Responding to review on PR #%d '%s'. You are now on branch '%s'. Make changes on this branch, commit, and push to it. Do NOT create a new PR.",
+					pr.Number, pr.Title, pr.Head.Ref),
+			})
+		} else if err != nil {
+			slog.Warn("failed to get PR details", "pr", evt.PRNumber, "error", err)
+		}
+	}
+
+	// Step 4: Build the user message from the event
 	userMessage := a.eventToUserMessage(evt)
 
-	// Step 4: LLM loop (max turns)
+	// Step 5: LLM loop (max turns)
 	messages := append(contextMessages, provider.Message{
 		Role:    "user",
 		Content: userMessage,
@@ -447,34 +552,42 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Update reaction to ⏳
 	a.addReaction(ctx, evt, "hourglass_flowing_sand")
 
-	metrics.IncLLMCalls()
-
 	for turn := 0; turn < a.cfg.Agent.MaxTurns; turn++ {
-		slog.Info("LLM turn",
+		slog.Info("LLM turn begin",
 			"session_key", a.sess.Key,
 			"turn", turn,
 			"messages", len(messages),
 		)
 
-		response, err := a.llm.Chat(ctx, systemPrompt, messages, a.tools.Tools())
+		result, updatedMessages, err := a.executor.Run(ctx, systemPrompt, messages)
+		messages = updatedMessages
+
 		if err != nil {
+			slog.Error("LLM turn failed", "session_key", a.sess.Key, "turn", turn, "error", err)
 			a.addReaction(ctx, evt, "x")
-			return fmt.Errorf("LLM call failed: %w", err)
+			return fmt.Errorf("turn %d failed: %w", turn, err)
+		}
+
+		// Track metrics
+		metrics.IncLLMCalls()
+		if result.Usage != nil {
+			metrics.AddTokens(int64(result.Usage.PromptTokens), int64(result.Usage.CompletionTokens))
+		}
+		if result.CostUSD > 0 {
+			metrics.AddCost(result.CostUSD)
 		}
 
 		// If no tool calls, we're done
-		if len(response.ToolCalls) == 0 {
+		if len(result.Response.ToolCalls) == 0 {
 			messages = append(messages, provider.Message{
 				Role:    "assistant",
-				Content: response.Content,
+				Content: result.Response.Content,
 			})
 
-			// Record to memory
 			if a.cfg.Memory.Enabled {
-				a.mem.Record(ctx, evt, response.Content, turn)
+				a.mem.Record(ctx, evt, result.Response.Content, turn)
 			}
 
-			// Mark complete with ✅
 			a.addReaction(ctx, evt, "white_check_mark")
 			return nil
 		}
@@ -482,12 +595,12 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		// Add assistant message with tool calls
 		messages = append(messages, provider.Message{
 			Role:      "assistant",
-			Content:   response.Content,
-			ToolCalls: response.ToolCalls,
+			Content:   result.Response.Content,
+			ToolCalls: result.Response.ToolCalls,
 		})
 
 		// Execute tool calls
-		for _, tc := range response.ToolCalls {
+		for _, tc := range result.Response.ToolCalls {
 			slog.Info("executing tool",
 				"tool", tc.Function.Name,
 				"session_key", a.sess.Key,
@@ -495,20 +608,20 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 
 			metrics.IncToolCalls()
 
-			result, err := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
-			if err != nil {
-				slog.Error("tool execution failed", "tool", tc.Function.Name, "error", err)
-				result = fmt.Sprintf("Error: %s", err)
+			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			if terr != nil {
+				slog.Error("tool execution failed", "tool", tc.Function.Name, "error", terr)
+				res = fmt.Sprintf("Error: %s", terr)
 			}
 
 			if a.cfg.Memory.Enabled {
-				a.mem.RecordToolCall(ctx, evt, tc.Function.Name, tc.Function.Arguments, result)
+				a.mem.RecordToolCall(ctx, evt, tc.Function.Name, tc.Function.Arguments, res)
 			}
 
 			messages = append(messages, provider.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    result,
+				Content:    res,
 			})
 		}
 	}
@@ -534,6 +647,23 @@ func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string)
 func (a *Agent) buildSystemPrompt(evt *event.Event) string {
 	toolsDesc := a.tools.Descriptions()
 
+	var modeInstructions string
+	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
+		modeInstructions = `
+## PR Review Mode (IMPORTANT)
+You are responding to a review comment on an existing pull request.
+- You are already on the PR branch (check git status if unsure).
+- Make your fixes directly on this branch.
+- After fixing, commit and push to the SAME branch.
+- Do NOT create a new PR — the PR already exists.
+- Post a comment confirming which issues were fixed.
+- If the PR is mergeable with no conflicts, you may call forgejo_merge_pr to merge it automatically.`
+	} else if evt.PRNumber > 0 {
+		modeInstructions = `
+## PR Context
+You are working on a pull request. Create a feature branch, implement the changes, push the branch, and then use forgejo_create_pr to open the PR.`
+	}
+
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
 
 ## Current Context
@@ -541,6 +671,7 @@ func (a *Agent) buildSystemPrompt(evt *event.Event) string {
 - Event: %s (action: %s)
 - Sender: @%s
 - Target: %s
+%s
 
 ## Your Capabilities
 You have access to the following tools:
@@ -554,6 +685,8 @@ You have access to the following tools:
 5. Workflow file changes (.forgejo/workflows/) MUST go through PRs.
 6. When done, post a summary comment on the issue/PR.
 7. Be helpful, concise, and correct.
+8. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
+9. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
 
 ## Response Format
 Respond in plain text. Use tools to interact with the repository and Forgejo API.`,
@@ -562,6 +695,7 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		evt.Action,
 		evt.Sender,
 		a.targetDescription(evt),
+		modeInstructions,
 		toolsDesc,
 		a.cfg.Agent.CommitPrefix,
 		strings.Join(a.cfg.Security.ProtectedBranches, ", "),

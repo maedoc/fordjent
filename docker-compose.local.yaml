@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9
+    container_name: forgejo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - forgejo-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__server__ROOT_URL=http://localhost:3000/
+      - FORGEJO__server__HTTP_PORT=3000
+      - FORGEJO__service__DISABLE_REGISTRATION=false
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=*
+    networks:
+      - fordjent-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    runtime: nvidia
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    networks:
+      - fordjent-net
+
+  fordjent:
+    build: .
+    container_name: fordjent
+    restart: unless-stopped
+    depends_on:
+      - forgejo
+      - ollama
+    ports:
+      - "127.0.0.1:${FORDJENT_PORT:-8080}:8080"
+    volumes:
+      - fordjent-data:/var/lib/fordjent
+      - ./fordjent.local.yaml:/etc/fordjent/fordjent.yaml:ro
+    environment:
+      - FORGEJO_URL=${FORGEJO_URL:-http://forgejo:3000}
+      - FORGEJO_TOKEN=${FORGEJO_TOKEN:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    networks:
+      - fordjent-net
+
+volumes:
+  forgejo-data:
+  ollama-data:
+  fordjent-data:
+
+networks:
+  fordjent-net:
+    driver: bridge

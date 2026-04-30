@@ -15,6 +15,7 @@ type Config struct {
 	Forgejo  ForgejoConfig    `yaml:"forgejo"`
 	Telegram TelegramConfig   `yaml:"telegram"`
 	Agent    AgentConfig      `yaml:"agent"`
+	Budget   BudgetConfig     `yaml:"budget"`
 	Providers []ProviderConfig `yaml:"providers"`
 	Events   []string         `yaml:"events"`
 	SessionKeyTemplate string `yaml:"session_key_template"`
@@ -40,19 +41,37 @@ type ForgejoConfig struct {
 }
 
 type AgentConfig struct {
-	MaxSessions  int           `yaml:"max_sessions"`
-	IdleTimeout  time.Duration `yaml:"idle_timeout"`
-	WorkDir      string        `yaml:"workdir"`
-	MaxTurns     int           `yaml:"max_turns"`
-	CommitPrefix string        `yaml:"commit_prefix"`
+	MaxSessions             int           `yaml:"max_sessions"`
+	IdleTimeout             time.Duration `yaml:"idle_timeout"`
+	WorkDir                 string        `yaml:"workdir"`
+	MaxTurns                int           `yaml:"max_turns"`
+	CommitPrefix            string        `yaml:"commit_prefix"`
+	ContextWindow           int           `yaml:"context_window"`
+	CompactionThreshold     float64       `yaml:"compaction_threshold"`
+	CompactionKeepTurns     int           `yaml:"compaction_keep_turns"`
+	EnableLifecycle         bool          `yaml:"enable_lifecycle"`
+	EnableStaleGate         bool          `yaml:"enable_stale_gate"`
+	EnableScaffoldDetection bool          `yaml:"enable_scaffold_detection"`
+}
+
+type BudgetConfig struct {
+	Enabled        bool    `yaml:"enabled"`
+	MaxSessionCost float64 `yaml:"max_session_cost"`
+	MaxMonthlyCost float64 `yaml:"max_monthly_cost"`
 }
 
 type ProviderConfig struct {
-	Name      string `yaml:"name"`
-	APIBase   string `yaml:"api_base"`
-	APIKey    string `yaml:"api_key"`
-	Model     string `yaml:"model"`
-	MaxTokens int    `yaml:"max_tokens"`
+	Name                  string  `yaml:"name"`
+	APIBase               string  `yaml:"api_base"`
+	APIKey                string  `yaml:"api_key"`
+	Model                 string  `yaml:"model"`
+	MaxTokens             int     `yaml:"max_tokens"`
+	RequestTimeout        time.Duration `yaml:"request_timeout"`
+	MaxRetries            int     `yaml:"max_retries"`
+	RetryBaseDelay        time.Duration `yaml:"retry_base_delay"`
+	RetryMaxDelay         time.Duration `yaml:"retry_max_delay"`
+	CostPer1MInputTokens  float64 `yaml:"cost_per_1m_input_tokens"`
+	CostPer1MOutputTokens float64 `yaml:"cost_per_1m_output_tokens"`
 }
 
 type SecurityConfig struct {
@@ -99,11 +118,22 @@ func Load(path string) (*Config, error) {
 			Port: 8080,
 		},
 		Agent: AgentConfig{
-			MaxSessions:  10,
-			IdleTimeout:  4 * time.Hour,
-			WorkDir:      "/tmp/fordjent/work",
-			MaxTurns:     25,
-			CommitPrefix: "[agent-automation]",
+			MaxSessions:             10,
+			IdleTimeout:             4 * time.Hour,
+			WorkDir:                 "/tmp/fordjent/work",
+			MaxTurns:                25,
+			CommitPrefix:            "[agent-automation]",
+			ContextWindow:           128000,
+			CompactionThreshold:     0.80,
+			CompactionKeepTurns:     8,
+			EnableLifecycle:         true,
+			EnableStaleGate:         true,
+			EnableScaffoldDetection: true,
+		},
+		Budget: BudgetConfig{
+			Enabled:        false,
+			MaxSessionCost: 0,
+			MaxMonthlyCost: 0,
 		},
 		Forgejo: ForgejoConfig{
 			RateLimit: 60,

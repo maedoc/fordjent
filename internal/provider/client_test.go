@@ -52,7 +52,7 @@ func TestChatNoToolCalls(t *testing.T) {
 	}
 
 	client := NewClient(cfg)
-	resp, err := client.Chat(context.Background(), "You are a helpful assistant.", []Message{
+	resp, _, err := client.Chat(context.Background(), "You are a helpful assistant.", []Message{
 		{Role: "user", Content: "Hello"},
 	}, nil)
 
@@ -114,7 +114,7 @@ func TestChatWithToolCalls(t *testing.T) {
 	}
 
 	client := NewClient(cfg)
-	resp, err := client.Chat(context.Background(), "system", []Message{
+	resp, _, err := client.Chat(context.Background(), "system", []Message{
 		{Role: "user", Content: "comment on the issue"},
 	}, []ToolDef{
 		{
@@ -154,7 +154,7 @@ func TestChatAPIError(t *testing.T) {
 	}
 
 	client := NewClient(cfg)
-	_, err := client.Chat(context.Background(), "system", []Message{
+	_, _, err := client.Chat(context.Background(), "system", []Message{
 		{Role: "user", Content: "hello"},
 	}, nil)
 

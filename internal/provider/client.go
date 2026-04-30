@@ -15,10 +15,10 @@ import (
 
 // Message represents a chat message in the LLM conversation.
 type Message struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall represents a tool call from the LLM.
@@ -36,8 +36,8 @@ type FunctionCall struct {
 
 // ToolDef defines a tool for the LLM.
 type ToolDef struct {
-	Type     string       `json:"type"`
-	Function FunctionDef  `json:"function"`
+	Type     string      `json:"type"`
+	Function FunctionDef `json:"function"`
 }
 
 // FunctionDef defines a function tool.
@@ -52,6 +52,20 @@ type Response struct {
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls"`
 	StopReason string     `json:"stop_reason"`
+}
+
+// Usage tracks token consumption from the LLM API.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// Cost returns the estimated cost in USD for this usage.
+func (u *Usage) Cost(cfg *config.ProviderConfig) float64 {
+	inputCost := float64(u.PromptTokens) / 1_000_000 * cfg.CostPer1MInputTokens
+	outputCost := float64(u.CompletionTokens) / 1_000_000 * cfg.CostPer1MOutputTokens
+	return inputCost + outputCost
 }
 
 // openAIRequest is the OpenAI-compatible chat completion request.
@@ -71,8 +85,8 @@ type messageJSON struct {
 }
 
 type toolJSON struct {
-	Type     string        `json:"type"`
-	Function functionJSON  `json:"function"`
+	Type     string       `json:"type"`
+	Function functionJSON `json:"function"`
 }
 
 type functionJSON struct {
@@ -113,19 +127,68 @@ type openAIResponse struct {
 type Client struct {
 	cfg    *config.ProviderConfig
 	client *http.Client
+	retry  RetryPolicy
 }
 
+// NewClient creates a new provider client with retry support.
 func NewClient(cfg *config.ProviderConfig) *Client {
+	retry := DefaultRetryPolicy()
+	if cfg.MaxRetries > 0 {
+		retry.MaxRetries = cfg.MaxRetries
+	}
+	if cfg.RetryBaseDelay > 0 {
+		retry.BaseDelay = cfg.RetryBaseDelay
+	}
+	if cfg.RetryMaxDelay > 0 {
+		retry.MaxDelay = cfg.RetryMaxDelay
+	}
+
+	timeout := 120 * time.Second
+	if cfg.RequestTimeout > 0 {
+		timeout = cfg.RequestTimeout
+	}
+
 	return &Client{
 		cfg: cfg,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: timeout,
 		},
+		retry: retry,
 	}
 }
 
-// Chat sends a chat completion request to the LLM.
-func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, error) {
+// Cfg returns the provider configuration.
+func (c *Client) Cfg() *config.ProviderConfig { return c.cfg }
+
+// setRequestTimeout creates a child context with the configured timeout.
+func (c *Client) setRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := c.client.Timeout
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// Chat sends a chat completion request to the LLM. It retries on transient errors.
+func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, *Usage, error) {
+	var resp *Response
+	var usage *Usage
+
+	err := c.retry.Retry(ctx, func() error {
+		reqCtx, cancel := c.setRequestTimeout(ctx)
+		defer cancel()
+
+		r, u, err := c.chatOnce(reqCtx, systemPrompt, messages, tools)
+		resp = r
+		usage = u
+		return err
+	})
+
+	return resp, usage, err
+}
+
+// chatOnce makes a single API call (no retry).
+func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, *Usage, error) {
 	// Build request messages
 	var reqMessages []messageJSON
 	reqMessages = append(reqMessages, messageJSON{
@@ -179,39 +242,43 @@ func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Messa
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	url := strings.TrimRight(c.cfg.APIBase, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
-	resp, err := c.client.Do(req)
+	respHTTP, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		return nil, nil, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer respHTTP.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	respBody, err := io.ReadAll(io.LimitReader(respHTTP.Body, 10<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, nil, fmt.Errorf("read response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM API error (%d): %s", resp.StatusCode, string(respBody))
+	if respHTTP.StatusCode != http.StatusOK {
+		return nil, nil, &HTTPError{
+			StatusCode: respHTTP.StatusCode,
+			Body:       string(respBody),
+			Err:        fmt.Errorf("LLM API error (%d): %s", respHTTP.StatusCode, string(respBody)),
+		}
 	}
 
 	var openaiResp openAIResponse
 	if err := json.Unmarshal(respBody, &openaiResp); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if len(openaiResp.Choices) == 0 {
-		return nil, fmt.Errorf("no choices in response")
+		return nil, nil, fmt.Errorf("no choices in response")
 	}
 
 	choice := openaiResp.Choices[0]
@@ -231,5 +298,11 @@ func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Messa
 		})
 	}
 
-	return result, nil
+	usage := &Usage{
+		PromptTokens:     openaiResp.Usage.PromptTokens,
+		CompletionTokens: openaiResp.Usage.CompletionTokens,
+		TotalTokens:      openaiResp.Usage.TotalTokens,
+	}
+
+	return result, usage, nil
 }
