@@ -60,7 +60,11 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", params.Command)
+	shell := "bash"
+	if _, lookErr := exec.LookPath("bash"); lookErr != nil {
+		shell = "sh"
+	}
+	cmd := exec.CommandContext(ctx, shell, "-c", params.Command)
 	cmd.Dir = t.repoDir
 
 	var stdout, stderr strings.Builder
@@ -272,14 +276,18 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	}
 
 	// Security: block all push commands — agent must use forgejo_create_pr tool
-	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "push") {
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "push") ||
+		strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "git push") {
 		return "", fmt.Errorf("git push is not allowed. Use the forgejo_create_pr tool to submit changes via pull request")
 	}
 
+	cmdStr := params.Command
+	cmdLower := strings.TrimSpace(strings.ToLower(cmdStr))
+	isCommit := strings.HasPrefix(cmdLower, "commit") || strings.HasPrefix(cmdLower, "git commit")
+
 	// Sanitize: replace newlines in commit messages with spaces to avoid shell
 	// treating them as argument separators
-	cmdStr := params.Command
-	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(cmdStr)), "commit") {
+	if isCommit {
 		cmdStr = strings.ReplaceAll(cmdStr, "\\n", " ")
 		cmdStr = strings.ReplaceAll(cmdStr, "\n", " ")
 	}
@@ -292,6 +300,11 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		return "", fmt.Errorf("empty command")
 	}
 
+	// If the LLM included 'git' as the first token, strip it so we don't double-invoke
+	if strings.ToLower(parts[0]) == "git" {
+		parts = parts[1:]
+	}
+
 	cmd := exec.CommandContext(ctx, "git", parts...)
 	cmd.Dir = t.repoDir
 
@@ -302,17 +315,16 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 
 	// Auto-push after successful commit so forgejo_create_pr never sees a
 	// missing remote branch. Use -u origin HEAD to always push current branch.
-	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "commit") {
+	if isCommit {
 		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer pushCancel()
 		pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
 		pushCmd.Dir = t.repoDir
 		pushOut, pushErr := pushCmd.CombinedOutput()
 		if pushErr != nil {
-			// Push failure is non-fatal — upstream may not be configured yet
-			_ = pushErr
-			_ = pushOut
+			return fmt.Sprintf("%s\n[auto-push warning] %s\n%s", string(out), pushErr, string(pushOut)), nil
 		}
+		out = append(out, []byte(fmt.Sprintf("\n[auto-push] %s", strings.TrimSpace(string(pushOut))))...)
 	}
 
 	return string(out), nil

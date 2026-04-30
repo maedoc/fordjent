@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"github.com/fordjent/fordjent/internal/provider"
 	"github.com/fordjent/fordjent/internal/tool"
 )
+
+// ErrMaxTurnsReached is returned when the agent exhausts its turn budget.
+var ErrMaxTurnsReached = errors.New("max turns reached")
 
 // TurnResult captures the outcome of a single LLM turn.
 type TurnResult struct {

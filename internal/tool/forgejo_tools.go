@@ -85,6 +85,61 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 	return "Comment posted successfully", nil
 }
 
+// forgejoCreateIssueTool creates a new issue.
+type forgejoCreateIssueTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewCreateIssueTool(adapter *ForgejoAdapter) *forgejoCreateIssueTool {
+	return &forgejoCreateIssueTool{adapter: adapter}
+}
+
+func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
+
+func (t *forgejoCreateIssueTool) Description() string {
+	return "Create a new issue in the repository. Use this to break down large tasks into smaller tracked issues. Title should be concise; body should describe the specific sub-task or requirement."
+}
+
+func (t *forgejoCreateIssueTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"title": map[string]interface{}{
+				"type":        "string",
+				"description": "Issue title",
+			},
+			"body": map[string]interface{}{
+				"type":        "string",
+				"description": "Issue body in Markdown describing the sub-task",
+			},
+		},
+		"required": []string{"repository", "title", "body"},
+	}
+}
+
+func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		Title      string `json:"title"`
+		Body       string `json:"body"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
+	payload := map[string]string{"title": params.Title, "body": params.Body}
+	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Issue created: %s", result), nil
+}
+
 // forgejoListIssuesTool lists issues in a repository.
 type forgejoListIssuesTool struct {
 	adapter *ForgejoAdapter
@@ -398,7 +453,7 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 			"issues", fmt.Sprintf("%d", params.IssueNumber), "reactions")
 	}
 
-	_, err := t.adapter.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"content": params.Reaction})
+	_, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"content": params.Reaction})
 	if err != nil {
 		return "", err
 	}

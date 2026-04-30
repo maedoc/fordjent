@@ -31,7 +31,7 @@ func setupTestRepo(t *testing.T) string {
 
 func TestBashToolSuccess(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "ls hello.txt"}`))
 	if err != nil {
@@ -44,7 +44,7 @@ func TestBashToolSuccess(t *testing.T) {
 
 func TestBashToolStderr(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "echo err >&2 && echo out"}`))
 	if err != nil {
@@ -57,7 +57,7 @@ func TestBashToolStderr(t *testing.T) {
 
 func TestBashToolExitError(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "exit 1"}`))
 	if err != nil {

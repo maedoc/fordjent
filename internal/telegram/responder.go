@@ -33,6 +33,11 @@ func (r *Responder) Acknowledge(ctx context.Context, evt *event.Event) error {
 	}
 
 	chat := &tb.Chat{ID: mapping.ChatID}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	_, err = r.bot.Send(chat, "⏳ Thinking...",
 		&tb.SendOptions{ThreadID: mapping.ThreadID})
 	if err != nil {
@@ -53,9 +58,16 @@ func (r *Responder) SendResponse(ctx context.Context, evt *event.Event, msg stri
 	chat := &tb.Chat{ID: mapping.ChatID}
 	opts := &tb.SendOptions{ThreadID: mapping.ThreadID}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Split long messages
 	parts := splitMessage(msg, 4000)
 	for _, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := r.bot.Send(chat, part, opts); err != nil {
 			slog.Error("telegram respond failed", "error", err, "session_key", evt.SessionKey)
 			return fmt.Errorf("telegram respond: %w", err)
@@ -73,6 +85,11 @@ func (r *Responder) Error(ctx context.Context, evt *event.Event, agentErr error)
 	}
 
 	chat := &tb.Chat{ID: mapping.ChatID}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	errMsg := fmt.Sprintf("❌ Agent error: %s", agentErr.Error())
 	if len(errMsg) > 4000 {
 		errMsg = errMsg[:4000]
