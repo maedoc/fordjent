@@ -60,16 +60,17 @@ func (a *agentConfigAdapter) RequirePRForWorkflows() bool { return a.cfg.Securit
 
 // Manager manages agent session lifecycle.
 type Manager struct {
-	cfg        *config.Config
-	bus        *event.Bus
-	sessions   map[string]*Session
-	mu         sync.RWMutex
-	store      *Store
+	cfg           *config.Config
+	bus           *event.Bus
+	sessions      map[string]*Session
+	mu            sync.RWMutex
+	store         *Store
 	forgejoClient *forgejo.Client
 	lc            *lifecycle.Lifecycle
-	mqClient   *mergequeue.Client
-	scheduler  *scheduler.Scheduler
-	costTracker *cost.Tracker
+	mqClient      *mergequeue.Client
+	scheduler     *scheduler.Scheduler
+	costTracker   *cost.Tracker
+	labelBoot     sync.Map // repo → bool, tracks which repos have had labels ensured
 }
 
 func resolveDBPath(cfgPath, workDir string) string {
@@ -190,6 +191,18 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
+	// Bootstrap scheduler/lifecycle/scaffold labels once per repo
+	if _, ok := m.labelBoot.Load(evt.Repository); !ok {
+		m.labelBoot.Store(evt.Repository, true)
+		go func() {
+			lbCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := m.forgejoClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
+				slog.Warn("failed to ensure repo labels", "repo", evt.Repository, "error", err)
+			}
+		}()
+	}
+
 	// If a PR was merged, notify the scheduler to unblock dependent issues
 	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
 		go func() {

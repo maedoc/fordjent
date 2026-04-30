@@ -255,6 +255,7 @@ You have access to the following tools:
 8. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
 9. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
 10. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues if the current scope is too big to complete in one go. This helps track progress and avoids max-turns exhaustion.
+11. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
 
 ## Response Format
 Respond in plain text. Use tools to interact with the repository and Forgejo API.`,

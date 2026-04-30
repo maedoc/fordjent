@@ -280,3 +280,34 @@ func (c *Client) PostIssueComment(ctx context.Context, repo string, issueNumber 
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": body})
 	return err
 }
+
+// CreateLabel creates a new label in a repository.
+func (c *Client) CreateLabel(ctx context.Context, repo, name, color string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "labels")
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"name": name, "color": color})
+	return err
+}
+
+// EnsureLabels creates labels that Fordjent scheduler/lifecycle/scaffold depend on.
+func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
+	labels := []struct {
+		Name  string
+		Color string
+	}{
+		{"blocked", "d93f0b"},
+		{"ready", "0e8a16"},
+		{"scaffold", "fbca04"},
+		{"fordjent/failed:max-turns", "b60205"},
+		{"fordjent/failed:error", "5319e7"},
+	}
+	for _, l := range labels {
+		if err := c.CreateLabel(ctx, repo, l.Name, l.Color); err != nil {
+			// Ignore conflict (label already exists)
+			if strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			return fmt.Errorf("create label %q: %w", l.Name, err)
+		}
+	}
+	return nil
+}

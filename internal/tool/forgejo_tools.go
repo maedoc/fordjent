@@ -97,7 +97,7 @@ func NewCreateIssueTool(adapter *ForgejoAdapter) *forgejoCreateIssueTool {
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
 
 func (t *forgejoCreateIssueTool) Description() string {
-	return "Create a new issue in the repository. Use this to break down large tasks into smaller tracked issues. Title should be concise; body should describe the specific sub-task or requirement."
+	return "Create a new issue in the repository. Use this to break down large tasks into smaller tracked issues. Before creating, call forgejo_list_issues to verify a similar issue does not already exist. Title should be concise; body should describe the specific sub-task or requirement."
 }
 
 func (t *forgejoCreateIssueTool) Parameters() map[string]interface{} {
