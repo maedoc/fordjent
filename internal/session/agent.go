@@ -45,7 +45,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 
 	// Register tools
 	registry.Register(tool.NewCommentTool(forgejoAdapter))
-	registry.Register(tool.NewCreateIssueTool(forgejoAdapter))
+	registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
 	registry.Register(tool.NewListIssuesTool(forgejoAdapter))
 	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
 	registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
@@ -76,14 +76,17 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Step 1: Acknowledge with 👀 reaction
 	a.addReaction(ctx, evt, "eyes")
 
-	// Step 2: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(evt)
+	// Step 2: Detect analysis-only mode
+	analysisMode := a.detectAnalysisMode(ctx, evt)
+
+	// Step 3: Build context for the LLM
+	systemPrompt := a.buildSystemPrompt(evt, analysisMode)
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
 	}
 
-	// Step 3: If this is a PR review comment, fetch PR and checkout its branch
+	// Step 4: If this is a PR review comment, fetch PR and checkout its branch
 	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
 		pr, err := a.forgejo.GetPR(ctx, evt.Repository, evt.PRNumber)
 		if err == nil && pr.Head.Ref != "" {
@@ -107,10 +110,10 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		}
 	}
 
-	// Step 4: Build the user message from the event
+	// Step 5: Build the user message from the event
 	userMessage := a.eventToUserMessage(evt)
 
-	// Step 5: LLM loop (max turns)
+	// Step 6: LLM loop (max turns)
 	messages := append(contextMessages, provider.Message{
 		Role:    "user",
 		Content: userMessage,
@@ -168,6 +171,17 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 
 		// Execute tool calls
 		for _, tc := range result.Response.ToolCalls {
+			// Analysis mode: block implementation tools
+			if analysisMode && isImplementationTool(tc.Function.Name) {
+				slog.Info("blocked implementation tool in analysis mode", "tool", tc.Function.Name, "session_key", a.sess.Key)
+				messages = append(messages, provider.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    "Error: Analysis mode is active. You may only use planning tools (read_file, bash ls/cat, forgejo_list_issues, forgejo_create_issue, forgejo_comment). Please post your analysis and decomposition plan as a comment instead.",
+				})
+				continue
+			}
+
 			slog.Info("executing tool",
 				"tool", tc.Function.Name,
 				"session_key", a.sess.Key,
@@ -211,7 +225,7 @@ func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string)
 	}
 }
 
-func (a *Agent) buildSystemPrompt(evt *event.Event) string {
+func (a *Agent) buildSystemPrompt(evt *event.Event, analysisMode bool) string {
 	toolsDesc := a.tools.Descriptions()
 
 	var modeInstructions string
@@ -229,6 +243,20 @@ You are responding to a review comment on an existing pull request.
 		modeInstructions = `
 ## PR Context
 You are working on a pull request. Create a feature branch, implement the changes, push the branch, and then use forgejo_create_pr to open the PR.`
+	}
+
+	if analysisMode {
+		modeInstructions += `
+
+## ANALYSIS-ONLY MODE (STRICT)
+This issue is tagged for analysis only. You MUST NOT write any files, create branches, run git commands, or create pull requests. Your job is to:
+- Read and understand the codebase thoroughly.
+- Propose a concrete implementation plan.
+- Break the task into specific sub-issues using forgejo_create_issue.
+- Post a comprehensive summary comment with your plan.
+- STOP after posting the comment.
+
+All implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this mode.`
 	}
 
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
@@ -350,4 +378,42 @@ func (a *Agent) eventToUserMessage(evt *event.Event) string {
 	}
 
 	return sb.String()
+}
+
+// detectAnalysisMode checks whether this issue is flagged for planning-only work.
+func (a *Agent) detectAnalysisMode(ctx context.Context, evt *event.Event) bool {
+	if evt.IssueNumber == 0 {
+		return false
+	}
+	issue, err := a.forgejo.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+	if err != nil {
+		return false
+	}
+
+	// Check title for [analyze-only] or [plan-only]
+	titleLower := strings.ToLower(issue.Title)
+	if strings.Contains(titleLower, "[analyze-only]") || strings.Contains(titleLower, "[plan-only]") {
+		slog.Info("analysis mode detected from title", "title", issue.Title, "session_key", a.sess.Key)
+		return true
+	}
+
+	// Check labels for analyze-only / plan-only
+	for _, l := range issue.Labels {
+		name := strings.ToLower(l.Name)
+		if name == "analyze-only" || name == "plan-only" {
+			slog.Info("analysis mode detected from label", "label", l.Name, "session_key", a.sess.Key)
+			return true
+		}
+	}
+
+	return false
+}
+
+// isImplementationTool returns true for tools that write code or create PRs.
+func isImplementationTool(name string) bool {
+	switch name {
+	case "write_file", "git", "forgejo_create_pr", "forgejo_merge_pr":
+		return true
+	}
+	return false
 }

@@ -30,11 +30,12 @@ func NewClient(baseURL, token string) *Client {
 
 // Issue represents a Forgejo issue.
 type Issue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	State  string `json:"state"`
-	User   User   `json:"user"`
+	Number int     `json:"number"`
+	Title  string  `json:"title"`
+	Body   string  `json:"body"`
+	State  string  `json:"state"`
+	User   User    `json:"user"`
+	Labels []Label `json:"labels"`
 }
 
 // Comment represents a Forgejo issue/PR comment.

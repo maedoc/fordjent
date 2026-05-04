@@ -19,6 +19,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "fordjent.yaml", "path to config file")
+	cleanFlag := flag.Bool("clean", false, "clear all persistent sessions on startup")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -44,6 +45,14 @@ func main() {
 	if err != nil {
 		slog.Error("failed to create session manager", "error", err)
 		os.Exit(1)
+	}
+
+	if *cleanFlag {
+		if err := mgr.CleanSessions(ctx); err != nil {
+			slog.Warn("failed to clean sessions", "error", err)
+		} else {
+			slog.Info("cleaned all persistent sessions")
+		}
 	}
 
 	// Forgejo webhook router (always started)

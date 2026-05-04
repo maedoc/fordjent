@@ -87,11 +87,12 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 
 // forgejoCreateIssueTool creates a new issue.
 type forgejoCreateIssueTool struct {
-	adapter *ForgejoAdapter
+	adapter        *ForgejoAdapter
+	parentIssueNum int
 }
 
-func NewCreateIssueTool(adapter *ForgejoAdapter) *forgejoCreateIssueTool {
-	return &forgejoCreateIssueTool{adapter: adapter}
+func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int) *forgejoCreateIssueTool {
+	return &forgejoCreateIssueTool{adapter: adapter, parentIssueNum: parentIssueNum}
 }
 
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
@@ -131,8 +132,13 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
+	body := params.Body
+	if t.parentIssueNum > 0 {
+		body += fmt.Sprintf("\n\nDepends on: #%d", t.parentIssueNum)
+	}
+
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
-	payload := map[string]string{"title": params.Title, "body": params.Body}
+	payload := map[string]string{"title": params.Title, "body": body}
 	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
 	if err != nil {
 		return "", err

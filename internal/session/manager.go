@@ -465,3 +465,9 @@ func (m *Manager) shutdownAll() {
 	}
 }
 
+// CleanSessions wipes all persistent session records from the database.
+// Does not affect in-memory sessions — call before Run().
+func (m *Manager) CleanSessions(_ context.Context) error {
+	return m.store.DeleteAll()
+}
+
