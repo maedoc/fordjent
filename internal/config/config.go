@@ -70,6 +70,7 @@ type ProviderConfig struct {
 	MaxRetries            int     `yaml:"max_retries"`
 	RetryBaseDelay        time.Duration `yaml:"retry_base_delay"`
 	RetryMaxDelay         time.Duration `yaml:"retry_max_delay"`
+	MaxConcurrentLLMCalls int           `yaml:"max_concurrent_llm_calls"`
 	CostPer1MInputTokens  float64 `yaml:"cost_per_1m_input_tokens"`
 	CostPer1MOutputTokens float64 `yaml:"cost_per_1m_output_tokens"`
 }

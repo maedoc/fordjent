@@ -128,6 +128,7 @@ type Client struct {
 	cfg    *config.ProviderConfig
 	client *http.Client
 	retry  RetryPolicy
+	sema   chan struct{} // limits concurrent LLM calls
 }
 
 // NewClient creates a new provider client with retry support.
@@ -148,12 +149,18 @@ func NewClient(cfg *config.ProviderConfig) *Client {
 		timeout = cfg.RequestTimeout
 	}
 
+	concurrent := cfg.MaxConcurrentLLMCalls
+	if concurrent <= 0 {
+		concurrent = 3
+	}
+
 	return &Client{
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: timeout,
 		},
 		retry: retry,
+		sema:  make(chan struct{}, concurrent),
 	}
 }
 
@@ -171,6 +178,15 @@ func (c *Client) setRequestTimeout(ctx context.Context) (context.Context, contex
 
 // Chat sends a chat completion request to the LLM. It retries on transient errors.
 func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, *Usage, error) {
+	// Acquire concurrent-call semaphore to avoid provider rate limits
+	select {
+	case c.sema <- struct{}{}:
+		// acquired
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	defer func() { <-c.sema }()
+
 	var resp *Response
 	var usage *Usage
 
