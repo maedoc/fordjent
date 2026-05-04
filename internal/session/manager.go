@@ -356,7 +356,9 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 // runSession is the per-session event loop. It processes events serially.
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
-	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker)
+	// Detect role from issue or PR title/labels before agent construction
+	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
+	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, role)
 
 	for {
 		select {
@@ -471,3 +473,70 @@ func (m *Manager) CleanSessions(_ context.Context) error {
 	return m.store.DeleteAll()
 }
 
+
+// detectRoleFromSession inspects the issue or PR associated with this session
+// and returns a role label (pm, reviewer, devops, tester, implementer).
+func detectRoleFromSession(ctx context.Context, client *forgejo.Client, sess *Session) string {
+	if sess.IssueNumber > 0 {
+		issue, err := client.GetIssue(ctx, sess.Repository, sess.IssueNumber)
+		if err == nil && issue != nil {
+			role := detectRoleFromIssue(issue)
+			if role != "" {
+				return role
+			}
+		}
+	}
+	if sess.PRNumber > 0 {
+		pr, err := client.GetPR(ctx, sess.Repository, sess.PRNumber)
+		if err == nil && pr != nil {
+			role := detectRoleFromTitle(pr.Title)
+			if role != "" {
+				return role
+			}
+		}
+	}
+	return "implementer"
+}
+
+func detectRoleFromIssue(issue *forgejo.Issue) string {
+	if issue == nil {
+		return ""
+	}
+	role := detectRoleFromTitle(issue.Title)
+	if role != "" {
+		return role
+	}
+	for _, label := range issue.Labels {
+		name := strings.ToLower(label.Name)
+		switch name {
+		case "role:pm", "role:project-manager":
+			return "pm"
+		case "role:reviewer", "role:code-reviewer":
+			return "reviewer"
+		case "role:devops", "role:infra":
+			return "devops"
+		case "role:tester", "role:test-engineer":
+			return "tester"
+		case "role:implementer", "role:developer":
+			return "implementer"
+		}
+	}
+	return ""
+}
+
+func detectRoleFromTitle(title string) string {
+	lower := strings.ToLower(title)
+	if strings.Contains(lower, "[pm]") || strings.Contains(lower, "[project manager]") || strings.Contains(lower, "[decompose]") {
+		return "pm"
+	}
+	if strings.Contains(lower, "[review]") || strings.Contains(lower, "[code review]") || strings.Contains(lower, "[reviewer]") {
+		return "reviewer"
+	}
+	if strings.Contains(lower, "[devops]") || strings.Contains(lower, "[infra]") || strings.Contains(lower, "[ci/cd]") || strings.Contains(lower, "[docker]") {
+		return "devops"
+	}
+	if strings.Contains(lower, "[test]") || strings.Contains(lower, "[tester]") || strings.Contains(lower, "[testing]") || strings.Contains(lower, "[qa]") {
+		return "tester"
+	}
+	return ""
+}

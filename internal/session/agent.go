@@ -30,32 +30,20 @@ type Agent struct {
 	mem         *memory.Memory
 	costTracker *cost.Tracker
 	executor    *agent.TurnExecutor
+	role        string // pm, reviewer, devops, tester, implementer
 }
 
-func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, role string) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.DefaultProvider()
 	llmClient := provider.NewClient(prov)
 	mem := memory.New(cfg, sess.WorkDir, forgejoClient)
 
-	registry := tool.NewRegistry()
 	sessionInfo := &sessionInfoAdapter{workDir: sess.WorkDir, repoDir: sess.RepoDir}
 	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	agentCfg := &agentConfigAdapter{cfg: cfg}
 
-	// Register tools
-	registry.Register(tool.NewCommentTool(forgejoAdapter))
-	registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
-	registry.Register(tool.NewListIssuesTool(forgejoAdapter))
-	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
-	registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
-	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
-	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
-	registry.Register(tool.NewMergePRTool(forgejoAdapter))
-	registry.Register(tool.NewBashTool(sessionInfo))
-	registry.Register(tool.NewReadFileTool(sessionInfo))
-	registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
-	registry.Register(tool.NewGitTool(sessionInfo))
+	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role)
 
 	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
 
@@ -68,6 +56,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		mem:         mem,
 		costTracker: ct,
 		executor:    executor,
+		role:        role,
 	}
 }
 
@@ -80,7 +69,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	analysisMode := a.detectAnalysisMode(ctx, evt)
 
 	// Step 3: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(evt, analysisMode)
+	systemPrompt := a.buildSystemPrompt(evt, analysisMode, a.role)
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
@@ -225,7 +214,7 @@ func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string)
 	}
 }
 
-func (a *Agent) buildSystemPrompt(evt *event.Event, analysisMode bool) string {
+func (a *Agent) buildSystemPrompt(evt *event.Event, analysisMode bool, role string) string {
 	toolsDesc := a.tools.Descriptions()
 
 	var modeInstructions string
@@ -257,6 +246,48 @@ This issue is tagged for analysis only. You MUST NOT write any files, create bra
 - STOP after posting the comment.
 
 All implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this mode.`
+	}
+
+		switch role {
+	case "pm":
+		modeInstructions += `
+
+## ROLE: Project Manager
+You are in PM mode. You do NOT write code. Your job is:
+- Understand the request and the existing codebase.
+- Decompose the work into specific, trackable sub-issues.
+- Use forgejo_create_issue to file each sub-issue.
+- Post a summary comment with your decomposition plan.
+- STOP after posting the comment. Do not implement.`
+	case "reviewer":
+		modeInstructions += `
+
+## ROLE: Code Reviewer
+You are in Code Review mode. You do NOT write code. Your job is:
+- Read the PR diff carefully.
+- Check for correctness, style, test coverage, and edge cases.
+- Leave specific, actionable review comments.
+- If satisfied and the PR is mergeable, call forgejo_merge_pr.
+- If issues found, request changes via comment.`
+	case "devops":
+		modeInstructions += `
+
+## ROLE: DevOps / Infrastructure
+You are in DevOps mode. Your focus is deployment, CI/CD, and operational concerns:
+- Read existing infrastructure configs.
+- Propose minimal, correct changes to Docker, CI, or deploy scripts.
+- Prefer changes under docker/, .forgejo/workflows/, scripts/.
+- Create PRs with infrastructure-only changes.`
+	case "tester":
+		modeInstructions += `
+
+## ROLE: Test Engineer
+You are in Test Engineering mode. Your focus is test quality and coverage:
+- Read existing code and current tests.
+- Write comprehensive tests for new or existing functionality.
+- Run tests and report results.
+- Identify edge cases and failure modes.
+- Create PRs with test-only changes.`
 	}
 
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
@@ -416,4 +447,45 @@ func isImplementationTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// buildRoleRegistry constructs a tool registry filtered to the agent's role.
+func buildRoleRegistry(
+	forgejoAdapter *tool.ForgejoAdapter,
+	mq *mergequeue.Client,
+	sess *Session,
+	sessionInfo tool.SessionInfo,
+	agentCfg tool.AgentConfig,
+	role string,
+) *tool.Registry {
+	registry := tool.NewRegistry()
+
+	// Common tools: every role gets these
+	registry.Register(tool.NewCommentTool(forgejoAdapter))
+	registry.Register(tool.NewListIssuesTool(forgejoAdapter))
+	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
+	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
+	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
+	registry.Register(tool.NewBashTool(sessionInfo))
+	registry.Register(tool.NewReadFileTool(sessionInfo))
+
+	// Role-specific tools
+	switch role {
+	case "pm":
+		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
+		// PM cannot write code, create PRs, or merge
+	case "reviewer":
+		registry.Register(tool.NewMergePRTool(forgejoAdapter))
+		// Reviewer can read, search, comment, and merge — but not write code or create PRs
+	case "devops", "tester", "implementer":
+		fallthrough
+	default:
+		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
+		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
+		registry.Register(tool.NewGitTool(sessionInfo))
+		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
+		registry.Register(tool.NewMergePRTool(forgejoAdapter))
+	}
+
+	return registry
 }
