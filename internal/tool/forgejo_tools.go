@@ -132,6 +132,27 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
+	// Deduplication check: query open issues for similar titles
+	listPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues") + "?state=open&limit=50"
+	listResult, listErr := t.adapter.doRequest(ctx, http.MethodGet, listPath, nil)
+	if listErr == nil {
+		var existingIssues []struct {
+			Number int    `json:"number"`
+			Title  string `json:"title"`
+		}
+		_ = json.Unmarshal([]byte(listResult), &existingIssues)
+		titleLower := strings.ToLower(params.Title)
+		for _, ex := range existingIssues {
+			existingLower := strings.ToLower(ex.Title)
+			// Require substantial overlap (≥50% of words or substring containment)
+			if existingLower == titleLower ||
+				(strings.Contains(existingLower, titleLower) && len(titleLower) > 8) ||
+				(strings.Contains(titleLower, existingLower) && len(existingLower) > 8) {
+				return fmt.Sprintf("Similar issue already exists: #%d '%s' — no new issue created. Use the existing issue instead.", ex.Number, ex.Title), nil
+			}
+		}
+	}
+
 	body := params.Body
 	if t.parentIssueNum > 0 {
 		body += fmt.Sprintf("\n\nDepends on: #%d", t.parentIssueNum)
