@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -346,11 +347,53 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
+	// Verify branch exists on remote before gating / PR creation.
+	// Forgejo can lag behind the push, so retry up to 5× with 1s sleep.
+	if t.repoDir != "" {
+		found := false
+		for i := 0; i < 5; i++ {
+			out, err := exec.CommandContext(ctx, "git", "-C", t.repoDir, "ls-remote", "origin", params.Head).CombinedOutput()
+			if err == nil && strings.Contains(string(out), params.Head) {
+				found = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("branch %q not found on remote after 5 retries — did you push?", params.Head)
+		}
+	}
+
 	// Merge-queue file gate: if any open PR touches the same files, block
+	// Retry on transient "bad revision" errors (branch indexing lag) with exponential backoff.
 	if t.mq != nil {
-		blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
-		if err == nil && blocked {
-			return fmt.Sprintf("Merge-queue block: %s", msg), nil
+		var mqErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
+			if err == nil {
+				if blocked {
+					return fmt.Sprintf("Merge-queue block: %s", msg), nil
+				}
+				break
+			}
+			mqErr = err
+			if strings.Contains(err.Error(), "bad revision") {
+				delay := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(delay):
+					continue
+				}
+			}
+			return "", err // Non-retryable error
+		}
+		if mqErr != nil {
+			return "", mqErr
 		}
 	}
 
@@ -364,11 +407,27 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		"head":  params.Head,
 		"base":  params.Base,
 	}
-	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
-	if err != nil {
+
+	// Retry PR creation on transient errors (bad revision, 500)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
+		if err == nil {
+			return fmt.Sprintf("Pull request created: %s", result), nil
+		}
+		lastErr = err
+		if strings.Contains(err.Error(), "bad revision") || strings.Contains(err.Error(), "500") {
+			delay := time.Duration(1<<attempt) * time.Second
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+				continue
+			}
+		}
 		return "", err
 	}
-	return fmt.Sprintf("Pull request created: %s", result), nil
+	return "", lastErr
 }
 
 // forgejoSearchCodeTool searches code in a repository.

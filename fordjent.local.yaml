@@ -14,7 +14,7 @@ telegram:
   enabled: false
 
 agent:
-  max_sessions: 10
+  max_sessions: 25
   idle_timeout: "4h"
   workdir: "/var/lib/fordjent/work"
   max_turns: 75
