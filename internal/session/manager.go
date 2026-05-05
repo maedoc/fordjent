@@ -21,6 +21,7 @@ import (
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/scheduler"
+	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -191,16 +192,14 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
-	// Bootstrap scheduler/lifecycle/scaffold labels once per repo
+	// Bootstrap scheduler/lifecycle/scaffold labels once per repo (sync to avoid races)
 	if _, ok := m.labelBoot.Load(evt.Repository); !ok {
 		m.labelBoot.Store(evt.Repository, true)
-		go func() {
-			lbCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := m.forgejoClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
-				slog.Warn("failed to ensure repo labels", "repo", evt.Repository, "error", err)
-			}
-		}()
+		lbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := m.forgejoClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
+			slog.Warn("failed to ensure repo labels", "repo", evt.Repository, "error", err)
+		}
+		cancel()
 	}
 
 	// If a PR was merged, notify the scheduler to unblock dependent issues
@@ -385,7 +384,10 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			}
 
 			if err := agt.ProcessEvent(ctx, evt); err != nil {
-				if errors.Is(err, agent.ErrMaxTurnsReached) {
+				if errors.Is(err, sentinel.ErrBlocked) {
+					slog.Info("session blocked by merge queue", "session_key", sess.Key)
+					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key)
+				} else if errors.Is(err, agent.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key)
 				} else {
 					slog.Error("agent processing failed",

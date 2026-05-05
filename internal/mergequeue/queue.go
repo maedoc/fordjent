@@ -6,6 +6,7 @@ package mergequeue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,9 @@ func NewClient(adapter *tool.ForgejoAdapter) *Client {
 		HTTP:    adapter.Client,
 	}
 }
+
+// ErrBlocked is returned when a PR creation is blocked by the merge queue.
+var ErrBlocked = errors.New("blocked by merge queue")
 
 // ChangedFile mirrors the minimal file entry returned by the Forgejo
 // /pulls/{index}/files endpoint.
@@ -120,17 +124,25 @@ func (c *Client) compareBranchFiles(ctx context.Context, repo, base, head string
 	}
 
 	var result struct {
-		Files []struct {
-			Filename string `json:"filename"`
-		} `json:"files"`
+		Commits []struct {
+			Files []struct {
+				Filename string `json:"filename"`
+			} `json:"files"`
+		} `json:"commits"`
 	}
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		return nil, fmt.Errorf("unmarshal compare: %w", err)
 	}
 
-	files := make([]string, 0, len(result.Files))
-	for _, f := range result.Files {
-		files = append(files, f.Filename)
+	fileSet := make(map[string]struct{})
+	for _, commit := range result.Commits {
+		for _, f := range commit.Files {
+			fileSet[f.Filename] = struct{}{}
+		}
+	}
+	files := make([]string, 0, len(fileSet))
+	for name := range fileSet {
+		files = append(files, name)
 	}
 	return files, nil
 }

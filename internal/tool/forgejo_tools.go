@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/stalegate"
 )
 
@@ -376,7 +378,14 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 			blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
 			if err == nil {
 				if blocked {
-					return fmt.Sprintf("Merge-queue block: %s", msg), nil
+					// Clean up dangling branch so the repo doesn't accumulate stale branches
+					if t.repoDir != "" {
+						cmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "push", "--delete", "origin", params.Head)
+						if out, err := cmd.CombinedOutput(); err != nil {
+							slog.Warn("mergequeue: failed to clean up blocked branch", "branch", params.Head, "error", err, "output", string(out))
+						}
+					}
+					return "", fmt.Errorf("%w: %s", sentinel.ErrBlocked, msg)
 				}
 				break
 			}

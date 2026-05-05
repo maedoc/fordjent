@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
+	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -180,6 +182,14 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
 			if terr != nil {
+				if errors.Is(terr, sentinel.ErrBlocked) {
+					// Merge queue block signals the session should stop cleanly.
+					body := fmt.Sprintf("This issue is blocked by the merge queue. %v\n\n<!-- ford -->", terr)
+					_ = a.forgejo.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, body)
+					_ = a.forgejo.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"blocked"})
+					a.addReaction(ctx, evt, "no_entry_sign")
+					return fmt.Errorf("merge queue block: %w", sentinel.ErrBlocked)
+				}
 				slog.Error("tool execution failed", "tool", tc.Function.Name, "error", terr)
 				res = fmt.Sprintf("Error: %s", terr)
 			}

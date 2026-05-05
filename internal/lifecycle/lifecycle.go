@@ -20,6 +20,7 @@ const (
 	StateCreated        = "created"
 	StateWorking        = "working"
 	StatePRCreated      = "pr_created"
+	StateBlocked        = "blocked"
 	StateCompleted      = "completed"
 	StateFailedMaxTurns = "failed_max_turns"
 	StateFailedError    = "failed_error"
@@ -91,6 +92,17 @@ func (l *Lifecycle) OnSessionStart(ctx context.Context, sessionKey string) {
 // OnPRCreated records that a PR was created for this session.
 func (l *Lifecycle) OnPRCreated(ctx context.Context, sessionKey string, prNumber int) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StatePRCreated, fmt.Sprintf("pr #%d created", prNumber))
+}
+
+// OnSessionBlocked records that the session was blocked by the merge queue
+// and labels the issue accordingly.
+func (l *Lifecycle) OnSessionBlocked(ctx context.Context, repo string, issueNumber int, sessionKey string) {
+	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateBlocked, "merge queue blocked")
+
+	if l.forgejo == nil || issueNumber <= 0 {
+		return
+	}
+	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 }
 
 // OnSessionComplete records a successful completion.

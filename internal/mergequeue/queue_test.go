@@ -19,8 +19,10 @@ func TestCheckGate_NoConflicts(t *testing.T) {
 		switch {
 		case strings.Contains(path, "/compare/"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"files": []map[string]string{
-					{"filename": "internal/command/config.go"},
+				"commits": []map[string]interface{}{
+					{"files": []map[string]string{
+						{"filename": "internal/command/config.go"},
+					}},
 				},
 			})
 		case path == "/api/v1/repos/fjadmin/gogit/pulls" && strings.Contains(q, "state=open"):
@@ -61,8 +63,10 @@ func TestCheckGate_WithConflict(t *testing.T) {
 		switch {
 		case strings.Contains(path, "/compare/"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"files": []map[string]string{
-					{"filename": "cmd/gogit/main.go"},
+				"commits": []map[string]interface{}{
+					{"files": []map[string]string{
+						{"filename": "cmd/gogit/main.go"},
+					}},
 				},
 			})
 		case path == "/api/v1/repos/fjadmin/gogit/pulls" && strings.Contains(q, "state=open"):
@@ -110,8 +114,10 @@ func TestCheckGate_SelfBranch(t *testing.T) {
 		switch {
 		case strings.Contains(path, "/compare/"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"files": []map[string]string{
-					{"filename": "internal/command/config.go"},
+				"commits": []map[string]interface{}{
+					{"files": []map[string]string{
+						{"filename": "internal/command/config.go"},
+					}},
 				},
 			})
 		case path == "/api/v1/repos/fjadmin/gogit/pulls" && strings.Contains(q, "state=open"):
