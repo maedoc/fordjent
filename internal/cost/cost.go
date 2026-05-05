@@ -127,6 +127,11 @@ func (t *Tracker) GetMonthlyCost() float64 {
 	return totalCost.Float64
 }
 
+// Close closes the underlying database connection.
+func (t *Tracker) Close() error {
+	return t.db.Close()
+}
+
 // CheckBudget returns true if the session and monthly budgets are still within limits.
 func (t *Tracker) CheckBudget(sessionKey string, budgetEnabled bool, maxSessionCost, maxMonthlyCost float64) (allowed bool, reason string) {
 	if !budgetEnabled {
@@ -150,7 +155,43 @@ func (t *Tracker) CheckBudget(sessionKey string, budgetEnabled bool, maxSessionC
 	return true, ""
 }
 
-// Close closes the database.
-func (t *Tracker) Close() error {
-	return t.db.Close()
+// TokenMinute aggregates input/output tokens for a single minute.
+type TokenMinute struct {
+	Minute       string `json:"minute"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	Calls        int64  `json:"calls"`
+}
+
+// GetPerMinuteTokens aggregates token usage by minute for the last N hours.
+func (t *Tracker) GetPerMinuteTokens(hours int) ([]TokenMinute, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour).Format("2006-01-02 15:04:05")
+	rows, err := t.db.Query(`
+		SELECT strftime('%Y-%m-%d %H:%M', created_at) as minute,
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COUNT(*)
+		FROM usage
+		WHERE created_at >= ?
+		GROUP BY minute
+		ORDER BY minute DESC
+		LIMIT 500
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("query per-minute tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TokenMinute
+	for rows.Next() {
+		var m TokenMinute
+		_ = rows.Scan(&m.Minute, &m.InputTokens, &m.OutputTokens, &m.TotalTokens, &m.Calls)
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }

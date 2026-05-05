@@ -52,6 +52,8 @@ type AgentConfig struct {
 	EnableLifecycle         bool          `yaml:"enable_lifecycle"`
 	EnableStaleGate         bool          `yaml:"enable_stale_gate"`
 	EnableScaffoldDetection bool          `yaml:"enable_scaffold_detection"`
+	EnableSessionRecovery   bool          `yaml:"enable_session_recovery"`
+	EnableContextInjection  bool          `yaml:"enable_context_injection"`
 }
 
 type BudgetConfig struct {
@@ -130,6 +132,8 @@ func Load(path string) (*Config, error) {
 			EnableLifecycle:         true,
 			EnableStaleGate:         true,
 			EnableScaffoldDetection: true,
+			EnableSessionRecovery:   true,
+			EnableContextInjection:  true,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

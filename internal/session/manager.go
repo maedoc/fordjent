@@ -225,6 +225,19 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// Session recovery: if a scheduler unblocks an issue whose session died, re-trigger.
+	if m.cfg.Agent.EnableSessionRecovery && evt.Type == event.IssueCommentCreated && evt.IssueNumber > 0 {
+		body := ""
+		if comment, ok := evt.Payload["comment"].(map[string]interface{}); ok {
+			if b, ok := comment["body"].(string); ok {
+				body = b
+			}
+		}
+		if strings.Contains(body, "is now merged") && strings.Contains(body, "unblocked") {
+			slog.Info("scheduler unblock comment detected, recovery session will be created", "session_key", evt.SessionKey, "issue", evt.IssueNumber)
+		}
+	}
+
 	if evt.SessionKey == "" {
 		slog.Warn("event with empty session key, dropping", "event_id", evt.ID)
 		return

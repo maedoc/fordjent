@@ -101,7 +101,7 @@ func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int) *forgejoCre
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
 
 func (t *forgejoCreateIssueTool) Description() string {
-	return "Create a new issue in the repository. Use this to break down large tasks into smaller tracked issues. Before creating, call forgejo_list_issues to verify a similar issue does not already exist. Title should be concise; body should describe the specific sub-task or requirement."
+	return "Create a new issue in the repository. Use this to break down large tasks into smaller tracked issues. Before creating, call forgejo_list_issues to verify a similar issue does not already exist. Title should be concise; body should describe the specific sub-task or requirement. When created from another issue (parent), the new issue is automatically tagged 'blocked'."
 }
 
 func (t *forgejoCreateIssueTool) Parameters() map[string]interface{} {
@@ -159,6 +159,10 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	body := params.Body
 	if t.parentIssueNum > 0 {
 		body += fmt.Sprintf("\n\nDepends on: #%d", t.parentIssueNum)
+		body += "\n\n## Context\n"
+		body += fmt.Sprintf("This issue depends on parent issue #%d. ", t.parentIssueNum)
+		body += "The code this issue works with will be available in the repository once the parent PR is merged. "
+		body += "Wait for the 'ready' label before starting implementation.\n"
 	}
 
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
@@ -167,6 +171,19 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	if err != nil {
 		return "", err
 	}
+
+	// If this issue has a parent, auto-tag with 'blocked' label
+	if t.parentIssueNum > 0 {
+		var created struct {
+			Number int `json:"number"`
+		}
+		_ = json.Unmarshal([]byte(result), &created)
+		if created.Number > 0 {
+			labelPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues", fmt.Sprintf("%d", created.Number), "labels")
+			_, _ = t.adapter.doRequest(ctx, http.MethodPost, labelPath, map[string]interface{}{"labels": []string{"blocked"}})
+		}
+	}
+
 	return fmt.Sprintf("Issue created: %s", result), nil
 }
 
@@ -297,7 +314,7 @@ func NewCreatePRTool(adapter *ForgejoAdapter, mq MergeGate, repoDir string) *for
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
 
 func (t *forgejoCreatePRTool) Description() string {
-	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead."
+	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead. IMPORTANT: This tool will verify that go build and go test pass before creating the PR. If tests fail, the PR will be blocked and you must fix the failures."
 }
 
 func (t *forgejoCreatePRTool) Parameters() map[string]interface{} {
@@ -404,6 +421,25 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		if mqErr != nil {
 			return "", mqErr
 		}
+	}
+
+	// Verify gate: enforce compilation and tests pass before PR creation.
+	// The agent must produce working code before claiming "done".
+	if t.repoDir != "" {
+		buildCmd := exec.CommandContext(ctx, "go", "build", "./...")
+		buildCmd.Dir = t.repoDir
+		buildOut, buildErr := buildCmd.CombinedOutput()
+		if buildErr != nil {
+			return "", fmt.Errorf("go build failed — fix compilation errors before creating PR:\n%s", string(buildOut))
+		}
+
+		testCmd := exec.CommandContext(ctx, "go", "test", "./...", "-count=1")
+		testCmd.Dir = t.repoDir
+		testOut, testErr := testCmd.CombinedOutput()
+		if testErr != nil {
+			return "", fmt.Errorf("go test failed — all tests must pass before creating PR:\n%s", string(testOut))
+		}
+		slog.Info("verify gate passed", "repo_dir", t.repoDir)
 	}
 
 	// Append hidden marker so webhook router can filter self-generated PRs

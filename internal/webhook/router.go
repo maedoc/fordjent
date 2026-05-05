@@ -12,12 +12,14 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/metrics"
+	"github.com/fordjent/fordjent/internal/webui"
 	_ "modernc.org/sqlite"
 )
 
@@ -43,6 +45,9 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/readyz", r.handleReadyz)
 	r.mux.HandleFunc("/metrics", metrics.Handler())
 	r.mux.HandleFunc("/status", r.handleStatus)
+	r.mux.HandleFunc("/tokens-per-minute", r.handleTokensPerMinute)
+	r.mux.Handle("/admin", webui.Handler(cfg))
+	r.mux.Handle("/admin/", webui.Handler(cfg))
 
 	return r
 }
@@ -81,6 +86,25 @@ func (r *Router) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (r *Router) handleTokensPerMinute(w http.ResponseWriter, _ *http.Request) {
+	resp := map[string]interface{}{"now": time.Now().UTC().Format(time.RFC3339)}
+
+	if r.cfg.Agent.WorkDir != "" {
+		costDB := filepath.Join(r.cfg.Agent.WorkDir, "costs.db")
+		if data, err := queryTokensPerMinute(costDB); err == nil {
+			resp["data"] = data
+		} else {
+			resp["error"] = err.Error()
+		}
+	} else {
+		resp["error"] = "WorkDir not configured"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
 func queryCostDB(dbPath string) (map[string]interface{}, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -99,7 +123,7 @@ func queryCostDB(dbPath string) (map[string]interface{}, error) {
 	result["total_cost_usd"] = float64(totalCost) / 1e6
 
 	recent := []map[string]interface{}{}
-	rows, err := db.Query("SELECT session_key, provider, model, input_tokens, output_tokens, cost_usd, timestamp FROM usage ORDER BY timestamp DESC LIMIT 20")
+	rows, err := db.Query("SELECT session_key, provider, model, input_tokens, output_tokens, cost_usd, created_at FROM usage ORDER BY created_at DESC LIMIT 20")
 	if err == nil && rows != nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -149,6 +173,80 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 	return result, nil
 }
 
+func queryTokensPerMinute(dbPath string) ([]map[string]interface{}, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	// Read raw rows — SQLite strftime can't parse Go RFC3339Nano timestamps.
+	// We parse and group in Go.
+	rows, err := db.Query(`
+		SELECT created_at, input_tokens, output_tokens, total_tokens
+		FROM usage
+		ORDER BY created_at DESC
+		LIMIT 5000
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type agg struct {
+		inputTokens  int64
+		outputTokens int64
+		totalTokens  int64
+		calls        int64
+	}
+	buckets := make(map[string]*agg)
+
+	for rows.Next() {
+		var tsStr string
+		var inTok, outTok, totalTok int64
+		_ = rows.Scan(&tsStr, &inTok, &outTok, &totalTok)
+		ts, err := time.Parse(time.RFC3339Nano, tsStr)
+		if err != nil {
+			continue
+		}
+		minute := ts.UTC().Format("2006-01-02 15:04")
+		b := buckets[minute]
+		if b == nil {
+			b = &agg{}
+			buckets[minute] = b
+		}
+		b.inputTokens += inTok
+		b.outputTokens += outTok
+		b.totalTokens += totalTok
+		b.calls++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Sort minutes descending
+	var minutes []string
+	for m := range buckets {
+		minutes = append(minutes, m)
+	}
+	sort.Strings(minutes)
+	for i, j := 0, len(minutes)-1; i < j; i, j = i+1, j-1 {
+		minutes[i], minutes[j] = minutes[j], minutes[i]
+	}
+
+	var out []map[string]interface{}
+	for _, m := range minutes {
+		b := buckets[m]
+		out = append(out, map[string]interface{}{
+			"minute":        m,
+			"input_tokens":  b.inputTokens,
+			"output_tokens": b.outputTokens,
+			"total_tokens":  b.totalTokens,
+			"calls":         b.calls,
+		})
+	}
+	return out, nil
+}
 func (r *Router) ListenAndServe(ctx context.Context, addr string) error {
 	r.server = &http.Server{
 		Addr:              addr,
@@ -347,6 +445,10 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 // commit message prefixes, sender identity, or a hidden HTML comment marker
 // in the body of comments, issues, or PRs. This prevents infinite loops where
 // the agent responds to its own comments.
+//
+// IMPORTANT: Bot-created issues (issues.* events without a comment key) are NOT
+// filtered by sender, because the agent legitimately creates sub-issues that
+// need downstream sessions spawned.
 func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	marker := "<!-- ford -->"
 
@@ -363,38 +465,41 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 		}
 	}
 
-	// Check sender (agent bot user)
-	if sender, ok := payload["sender"].(map[string]interface{}); ok {
-		if login, ok := sender["login"].(string); ok {
-			if login == "fordjent[bot]" || login == "fordjent-bot" {
-				return true
-			}
-		}
-	}
-
-	// Check comment body for the hidden agent marker (prevent self-comment loops)
+	// Comment events (issue_comment, pull_request_review_comment):
+	// filter by body marker AND sender to prevent self-comment loops.
 	if comment, ok := payload["comment"].(map[string]interface{}); ok {
 		if body, ok := comment["body"].(string); ok {
 			if strings.Contains(body, marker) {
 				return true
 			}
 		}
+		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			if login, ok := sender["login"].(string); ok {
+				if login == "fordjent[bot]" || login == "fordjent-bot" {
+					return true
+				}
+			}
+		}
 	}
 
-	// Check issue body for the hidden agent marker
-	if issue, ok := payload["issue"].(map[string]interface{}); ok {
-		if body, ok := issue["body"].(string); ok {
+	// PR events: filter by marker in PR body only.
+	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+		if body, ok := pr["body"].(string); ok {
 			if strings.Contains(body, marker) {
 				return true
 			}
 		}
 	}
 
-	// Check pull_request body for the hidden agent marker
-	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-		if body, ok := pr["body"].(string); ok {
-			if strings.Contains(body, marker) {
-				return true
+	// Issue events WITHOUT a comment key: these are issues.* (opened, closed, etc.)
+	// Bot-created sub-issues must pass through so downstream sessions spawn.
+	// Only filter if the issue body itself contains the hidden agent marker.
+	if issue, ok := payload["issue"].(map[string]interface{}); ok {
+		if _, isCommentEvent := payload["comment"]; !isCommentEvent {
+			if body, ok := issue["body"].(string); ok {
+				if strings.Contains(body, marker) {
+					return true
+				}
 			}
 		}
 	}
