@@ -99,14 +99,68 @@ func (l *Lifecycle) OnPRCreated(ctx context.Context, sessionKey string, prNumber
 }
 
 // OnSessionBlocked records that the session was blocked by the merge queue
-// and labels the issue accordingly.
-func (l *Lifecycle) OnSessionBlocked(ctx context.Context, repo string, issueNumber int, sessionKey string) {
+// and labels the issue accordingly. Also saves the blocked branch for auto-requeue.
+func (l *Lifecycle) OnSessionBlocked(ctx context.Context, repo string, issueNumber int, sessionKey string, branch string) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateBlocked, "merge queue blocked")
+
+	if l.db != nil && branch != "" {
+		_, _ = l.db.ExecContext(ctx, `
+			INSERT INTO blocked_branches (repo, branch, issue_number, session_key, status, created_at)
+			VALUES (?, ?, ?, ?, 'blocked', ?)
+			ON CONFLICT(repo, branch) DO UPDATE SET
+				status = 'blocked',
+				created_at = excluded.created_at,
+				resolved_at = NULL
+		`, repo, branch, issueNumber, sessionKey, time.Now().UTC())
+	}
 
 	if l.forgejo == nil || issueNumber <= 0 {
 		return
 	}
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
+}
+
+// BlockedBranch represents a queued branch waiting for merge-gate clearance.
+type BlockedBranch struct {
+	Repo        string    `json:"repo"`
+	Branch      string    `json:"branch"`
+	IssueNumber int       `json:"issue_number"`
+	SessionKey  string    `json:"session_key"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ListBlockedBranches returns all currently blocked branches for a repo.
+func (l *Lifecycle) ListBlockedBranches(ctx context.Context, repo string) ([]BlockedBranch, error) {
+	rows, err := l.db.QueryContext(ctx, `
+		SELECT repo, branch, issue_number, session_key, status, created_at
+		FROM blocked_branches
+		WHERE repo = ? AND status = 'blocked'
+		ORDER BY created_at DESC
+	`, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BlockedBranch
+	for rows.Next() {
+		var b BlockedBranch
+		var t time.Time
+		_ = rows.Scan(&b.Repo, &b.Branch, &b.IssueNumber, &b.SessionKey, &b.Status, &t)
+		b.CreatedAt = t
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// ResolveBlockedBranch marks a branch as resolved.
+func (l *Lifecycle) ResolveBlockedBranch(ctx context.Context, repo, branch string) error {
+	_, _ = l.db.ExecContext(ctx, `
+		UPDATE blocked_branches
+		SET status = 'resolved', resolved_at = ?
+		WHERE repo = ? AND branch = ?
+	`, time.Now().UTC(), repo, branch)
+	return nil
 }
 
 // OnSessionComplete records a successful completion.
@@ -208,6 +262,18 @@ func initSchema(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_transitions_session ON session_transitions(session_key);
 		CREATE INDEX IF NOT EXISTS idx_transitions_time    ON session_transitions(occurred_at);
+
+		CREATE TABLE IF NOT EXISTS blocked_branches (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo         TEXT NOT NULL,
+			branch       TEXT NOT NULL,
+			issue_number INTEGER NOT NULL DEFAULT 0,
+			session_key  TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'blocked',
+			created_at   DATETIME NOT NULL,
+			resolved_at  DATETIME
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_blocked_branch ON blocked_branches(repo, branch);
 	`)
 	return err
 }

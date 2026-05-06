@@ -211,6 +211,32 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			if err := m.scheduler.OnPRMerged(schedCtx, evt.Repository, evt.PRNumber); err != nil {
 				slog.Warn("scheduler: failed to process merged PR", "error", err, "pr", evt.PRNumber, "repo", evt.Repository)
 			}
+			// Auto-requeue any blocked branches whose merge-gate may now be clear.
+			if m.mqClient != nil && m.lc != nil {
+				time.Sleep(2 * time.Second) // let Forgejo update file indices
+				blocked, err := m.lc.ListBlockedBranches(schedCtx, evt.Repository)
+				if err != nil {
+					slog.Warn("lifecycle: failed to list blocked branches", "error", err)
+					return
+				}
+				for _, b := range blocked {
+					cleared, msg, err := m.mqClient.CheckGate(schedCtx, evt.Repository, b.Branch, "main")
+					if err != nil {
+						slog.Warn("merge queue: re-check failed", "error", err, "branch", b.Branch)
+						continue
+					}
+					if cleared {
+						slog.Info("merge gate cleared for blocked branch, posting unblock nudge", "branch", b.Branch, "issue", b.IssueNumber)
+						if m.forgejoClient != nil {
+							body := "The merge gate is now clear after conflicting PRs were merged. You may retry creating the PR."
+							_ = m.forgejoClient.PostIssueComment(schedCtx, evt.Repository, b.IssueNumber, body)
+						}
+						_ = m.lc.ResolveBlockedBranch(schedCtx, evt.Repository, b.Branch)
+					} else {
+						slog.Info("merge gate still blocked for branch", "branch", b.Branch, "reason", msg)
+					}
+				}
+			}
 		}()
 	}
 
@@ -442,7 +468,14 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			if err := agt.ProcessEvent(ctx, evt); err != nil {
 				if errors.Is(err, sentinel.ErrBlocked) {
 					slog.Info("session blocked by merge queue", "session_key", sess.Key)
-					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key)
+					branch := ""
+					if sess.RepoDir != "" {
+						branchCmd := exec.CommandContext(ctx, "git", "-C", sess.RepoDir, "rev-parse", "--abbrev-ref", "HEAD")
+						if out, bErr := branchCmd.CombinedOutput(); bErr == nil {
+							branch = strings.TrimSpace(string(out))
+						}
+					}
+					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
 				} else if errors.Is(err, agent.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key)
 				} else {
