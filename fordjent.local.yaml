@@ -27,6 +27,7 @@ agent:
   enable_scaffold_detection: true
   enable_session_recovery: true
   enable_context_injection: true
+  enable_auto_collaborator: true
 
 budget:
   enabled: true
