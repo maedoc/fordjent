@@ -142,6 +142,9 @@ Examples:
 }
 
 func getClient() *forgejo.Client {
+	// Load .fj config file FIRST, before applying defaults
+	loadConfig()
+
 	url := forgejoURL
 	if url == "" {
 		url = os.Getenv("FORGEJO_URL")
@@ -153,20 +156,6 @@ func getClient() *forgejo.Client {
 	token := os.Getenv("FORGEJO_TOKEN")
 	user := os.Getenv("FORGEJO_USER")
 	password := os.Getenv("FORGEJO_PASSWORD")
-
-	// Try to load from .fj config file
-	loadConfig()
-
-	// Override from environment if set
-	if token == "" {
-		token = os.Getenv("FORGEJO_TOKEN")
-	}
-	if user == "" {
-		user = os.Getenv("FORGEJO_USER")
-	}
-	if password == "" {
-		password = os.Getenv("FORGEJO_PASSWORD")
-	}
 
 	if token != "" {
 		return forgejo.NewClient(url, token)
