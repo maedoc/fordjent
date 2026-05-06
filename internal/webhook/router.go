@@ -678,6 +678,13 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 // filtered by sender, because the agent legitimately creates sub-issues that
 // need downstream sessions spawned.
 func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
+	// NEVER filter push events — they represent actual code changes
+	// that the scheduler and scaffold systems need to process.
+	if _, hasRef := payload["ref"]; hasRef {
+		if _, hasCommits := payload["commits"]; hasCommits {
+			return false // git push — always pass through
+		}
+	}
 	// NEVER filter pull_request closed events that represent a merge — the
 	// scheduler depends on seeing these.
 	if action, ok := payload["action"].(string); ok && action == "closed" {
@@ -689,19 +696,6 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	}
 
 	marker := "<!-- ford -->"
-
-	// Check commits in push events
-	if commits, ok := payload["commits"].([]interface{}); ok {
-		for _, c := range commits {
-			if commit, ok := c.(map[string]interface{}); ok {
-				if msg, ok := commit["message"].(string); ok {
-					if strings.HasPrefix(msg, r.cfg.Agent.CommitPrefix) {
-						return true
-					}
-				}
-			}
-		}
-	}
 
 	// Comment events (issue_comment, pull_request_review_comment):
 	// Filter ONLY by body marker. Do NOT filter by sender, because the
