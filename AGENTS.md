@@ -938,3 +938,53 @@ Added `GET /status` handler to the webhook router. Returns JSON with:
 
 
 
+
+---
+
+## Wave10–12 Testing Round (May 6, 2026)
+
+### What Was Tested
+End-to-end autonomous agent loop across three waves, with progressive fixes:
+- **Wave10**: PM→implementer→PR→review pipeline. Found push-to-main bug, 405 merge bug, PR comment routing bug.
+- **Wave11**: 6 PRs created and merged autonomously. Validated PR-based workflow, protected branch blocking, and auto-merge.
+- **Wave12**: Tested wafer provider (Qwen3.5 + GLM-5.1). Found JSON Schema validation issue, rate limiting, and unrelated-histories merge conflict.
+
+### Bugs Fixed in This Session
+
+| # | Bug | Severity | Fix |
+|---|-----|----------|-----|
+| 1 | Push events filtered by `isAgentEvent()` | Critical | Push events now always pass through |
+| 2 | PM sessions blocked by scaffold on empty repos | Medium | `[pm]`/`[decompose]` titles skip scaffold blocking |
+| 3 | PR comments routed to `issues/N` instead of `pulls/N` | Critical | Detect `issue.is_pull_request` in webhook payload |
+| 4 | Bot PRs blocked by human approval gate | High | `forgejo_merge_pr` auto-bypasses for fordjent-bot |
+| 5 | Agents pushed to main instead of feature branches | High | Hard-block `git commit`/`git push` on protected branches; scaffold sessions bypass |
+| 6 | Auto-push in `forgejo_create_pr` — branch not found | Medium | Auto-push before `ls-remote` check |
+| 7 | PM didn't include `Depends on: #N` in sub-issues | Medium | Added to PM system prompt |
+| 8 | `fj` CLI ignored `.fj` config file | Low | `loadConfig()` before fallback defaults |
+| 9 | Wafer rejected tool schemas with `"items": "string"` | High | Fixed to `"items": {"type": "string"}` |
+| 10 | `reasoning_content` from GLM-5.1 discarded | Medium | Added field to response struct; fallback logic |
+| 11 | Forgejo merge 405/409 for unrelated histories | High | `MergePR()` passes `allow_unrelated_histories: true` |
+| 12 | SQLite BUSY errors with concurrent sessions | Low | Non-fatal — lifecycle transitions are logging only |
+
+### Architecture Changes
+
+| Feature | Description |
+|---------|-------------|
+| **Protected branch blocking** | `bash` tool blocks `git push origin main`; `git` tool blocks commits on protected branches. Scaffold sessions bypass via `AllowProtectedPush()` |
+| **Auto-bypass approval for bot PRs** | `forgejo_merge_pr` checks PR author; fordjent-bot PRs skip approval |
+| **Push event passthrough** | `isAgentEvent()` never filters push events |
+| **PR comment routing** | PR comments (with `is_pull_request: true`) route to `pulls/N` sessions |
+| **Wafer provider support** | Qwen3.5 + GLM-5.1 via wafer.ai with `reasoning_content` handling |
+| **Session issue title** | `Session.IssueTitle` from webhook payload for role detection |
+| **Auto-push in PR creation** | `forgejo_create_pr` pushes branch before checking remote |
+| **Scaffold blocking skip for PM** | `[pm]`/`[decompose]` issues skip empty-repo blocking |
+
+### Provider Configuration
+
+| Role | Model | Provider | Latency |
+|------|-------|----------|--------|
+| All (current) | minimax-m2.5 | ollama-cloud | 35–90s/turn |
+| (Future) | Qwen3.5-397B-A17B | wafer | ~4–7s/turn |
+| (Future) | GLM-5.1 | wafer | ~6–10s/turn |
+
+Wafer providers are configured in YAML. Switch by changing `role_providers`. Rate-limited to 2 concurrent calls.
