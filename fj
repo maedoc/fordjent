@@ -1,0 +1,945 @@
+#!/usr/bin/env python3
+"""
+Forgejo CLI - Common Forgejo API operations without curl.
+Reads credentials from environment or .env file.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+# Global state for URL override
+_url_override = None
+_json_output = False
+_detected_repo = None  # Cached detected repo
+
+
+def detect_repo():
+    """Detect repository from git remote. Returns 'owner/repo' or None."""
+    global _detected_repo
+    
+    if _detected_repo is not None:
+        return _detected_repo if _detected_repo else None
+    
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, cwd=os.getcwd()
+        )
+        if result.returncode != 0:
+            _detected_repo = ""
+            return None
+        
+        url = result.stdout.strip()
+        
+        # Parse various URL formats:
+        # SSH:     git@forgejo-local:duke/repo.git
+        # SSH:     git@10.67.121.201:duke/repo.git  
+        # HTTPS:   https://forgejo-local/duke/repo.git
+        # HTTPS:   http://localhost:3000/duke/repo.git
+        # HTTPS:   https://host/git/duke/repo.git (gitea-style path)
+        
+        import re
+        
+        # SSH format: user@host:owner/repo.git
+        ssh_match = re.match(r'git@[^:]+:([^/]+)/([^/]+?)(?:\.git)?$', url)
+        if ssh_match:
+            _detected_repo = f"{ssh_match.group(1)}/{ssh_match.group(2)}"
+            return _detected_repo
+        
+        # HTTPS format: https://host/.../owner/repo.git
+        # Extract last two path segments as owner/repo
+        https_match = re.match(r'https?://[^/]+/(.+?)(?:\.git)?$', url)
+        if https_match:
+            path = https_match.group(1)
+            parts = path.rstrip('/').split('/')
+            if len(parts) >= 2:
+                _detected_repo = f"{parts[-2]}/{parts[-1]}"
+                return _detected_repo
+        
+        _detected_repo = ""
+        return None
+    except Exception:
+        _detected_repo = ""
+        return None
+
+
+def get_repo(repo_arg):
+    """Get repo from arg or detect from git remote."""
+    if repo_arg:
+        return repo_arg
+    detected = detect_repo()
+    if not detected:
+        print("Error: No repository specified and couldn't detect from git remote.", file=sys.stderr)
+        print("Specify with 'owner/repo' or run from inside a git repository.", file=sys.stderr)
+        sys.exit(1)
+    return detected
+
+# Try to load python-dotenv if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
+
+def load_config():
+    """Load config from .fj file in current directory or parents."""
+    global _url_override, _detected_repo
+    # Check for .fj config file (like .git) - walk up directories
+    cwd = Path.cwd()
+    for p in [cwd] + list(cwd.parents):
+        cfg_file = p / ".fj"
+        if cfg_file.exists():
+            try:
+                import configparser
+                config = configparser.ConfigParser()
+                config.read(cfg_file)
+                if 'forgejo' in config:
+                    if 'url' in config['forgejo'] and not _url_override:
+                        _url_override = config['forgejo']['url']
+                    if 'token' in config['forgejo']:
+                        os.environ.setdefault('FORGEJO_TOKEN', config['forgejo']['token'])
+                    if 'user' in config['forgejo']:
+                        os.environ.setdefault('FORGEJO_USER', config['forgejo']['user'])
+                    if 'password' in config['forgejo']:
+                        os.environ.setdefault('FORGEJO_PASSWORD', config['forgejo']['password'])
+                    if 'repo' in config['forgejo']:
+                        _detected_repo = config['forgejo']['repo']
+                break
+            except Exception:
+                pass
+
+
+def cmd_init(args):
+    """Initialize .fj config file."""
+    cfg_file = Path.cwd() / ".fj"
+    if cfg_file.exists() and not args.force:
+        print("Error: .fj already exists. Use --force to overwrite.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Priority: args.url > _url_override (global --url) > env var > default
+    url = args.url or _url_override or os.environ.get('FORGEJO_URL', 'http://localhost:3000')
+    
+    content = f"""[forgejo]
+url = {url}
+"""
+    if args.token:
+        content += f"token = {args.token}\n"
+    if args.user:
+        content += f"user = {args.user}\n"
+    if args.password:
+        content += f"password = {args.password}\n"
+    if args.repo:
+        content += f"repo = {args.repo}\n"
+    
+    cfg_file.write_text(content)
+    print(f"Created {cfg_file}")
+    print("Config:")
+    print(content)
+
+
+def cmd_detect(args):
+    """Show detected repository from git remote."""
+    repo = detect_repo()
+    if repo:
+        print(f"Detected: {repo}")
+    else:
+        print("No repository detected from git remote.")
+
+
+def get_config():
+    """Get Forgejo configuration from environment."""
+    url = _url_override or os.environ.get("FORGEJO_URL", "http://localhost:3000")
+    token = os.environ.get("FORGEJO_TOKEN")
+    user = os.environ.get("FORGEJO_USER", "fjadmin")
+    password = os.environ.get("FORGEJO_PASSWORD", "REDACTED")
+    return url, token, user, password
+
+
+def curl(method, path, data=None, raw=False, silent=True):
+    """Execute a curl request to Forgejo API."""
+    url, token, user, password = get_config()
+    full_url = f"{url.rstrip('/')}/api/v1{path}"
+    
+    cmd = ["curl", "-s"]
+    if method != "GET":
+        cmd.extend(["-X", method])
+    
+    # Auth: token takes precedence, then basic auth
+    if token:
+        cmd.extend(["-H", f"Authorization: token {token}"])
+    else:
+        cmd.extend(["-u", f"{user}:{password}"])
+    
+    if data and not raw:
+        cmd.extend(["-H", "Content-Type: application/json"])
+        if isinstance(data, dict):
+            data = json.dumps(data)
+        cmd.extend(["-d", data])
+    elif data and raw:
+        cmd.extend(["-d", data])
+    
+    cmd.append(full_url)
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    
+    output = result.stdout.strip()
+    if output:
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError:
+            return output
+    return None
+
+
+def output(data):
+    """Output data - either JSON or formatted."""
+    if _json_output:
+        print(json.dumps(data, indent=2))
+    return data
+
+def escape_repo(repo):
+    """Escape repo path for URL (owner/repo -> owner%2Frepo)."""
+    parts = repo.split("/")
+    return "/".join(quote(p, safe="") for p in parts)
+
+
+# === REPO COMMANDS ===
+
+def cmd_repo_list(args):
+    """List user repositories."""
+    result = curl("GET", "/user/repos")
+    if _json_output:
+        output(result)
+        return
+    for repo in result or []:
+        print(f"{repo['full_name']} ({repo.get('visibility', 'private')})")
+
+
+def cmd_repo_create(args):
+    """Create a new repository."""
+    data = {"name": args.name}
+    if args.private:
+        data["private"] = True
+    if args.description:
+        data["description"] = args.description
+    result = curl("POST", "/user/repos", data)
+    if result:
+        print(f"Created: {result.get('full_name', args.name)}")
+
+
+# === ISSUE COMMANDS ===
+
+def cmd_issue_list(args):
+    """List issues in a repo."""
+    repo = escape_repo(get_repo(args.repo))
+    params = []
+    if args.state:
+        params.append(f"state={args.state}")
+    if args.labels:
+        params.append(f"labels={args.labels}")
+    query = "&".join(params)
+    path = f"/repos/{repo}/issues"
+    if query:
+        path += f"?{query}"
+    
+    result = curl("GET", path)
+    if _json_output:
+        output(result)
+        return
+    for issue in result or []:
+        num = issue.get("number", "?")
+        title = issue.get("title", "")
+        state = issue.get("state", "?")
+        print(f"#{num} [{state}] {title}")
+
+
+def cmd_issue_get(args):
+    """Get issue details."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/issues/{args.number}")
+    if result:
+        print(f"#{result.get('number')} {result.get('title')}")
+        print(f"State: {result.get('state')}")
+        print(f"Author: {result.get('user', {}).get('login')}")
+        print(f"\n{result.get('body', '')}")
+
+
+def cmd_issue_create(args):
+    """Create a new issue."""
+    repo = escape_repo(get_repo(args.repo))
+    data = {"title": args.title}
+    if args.body:
+        data["body"] = args.body
+    if args.labels:
+        data["labels"] = args.labels.split(",")
+    result = curl("POST", f"/repos/{repo}/issues", data)
+    if result:
+        print(f"Created issue #{result.get('number')}: {result.get('html_url')}")
+
+
+def cmd_issue_close(args):
+    """Close an issue."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("PATCH", f"/repos/{repo}/issues/{args.number}", {"state": "closed"})
+    if result:
+        print(f"Closed issue #{args.number}")
+
+
+def cmd_issue_open(args):
+    """Reopen an issue."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("PATCH", f"/repos/{repo}/issues/{args.number}", {"state": "open"})
+    if result:
+        print(f"Reopened issue #{args.number}")
+
+
+# === COMMENT COMMANDS ===
+
+def cmd_comment_list(args):
+    """List comments on an issue/PR."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/issues/{args.number}/comments")
+    for comment in result or []:
+        user = comment.get("user", {}).get("login", "?")
+        body = comment.get("body", "")[:60]
+        print(f"@{user}: {body}...")
+
+
+def cmd_comment_add(args):
+    """Add a comment to an issue/PR."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("POST", f"/repos/{repo}/issues/{args.number}/comments", {"body": args.body})
+    if result:
+        print(f"Commented on #{args.number}")
+
+
+# === PR COMMANDS ===
+
+def cmd_pr_list(args):
+    """List pull requests."""
+    repo = escape_repo(get_repo(args.repo))
+    params = []
+    if args.state:
+        params.append(f"state={args.state}")
+    query = "&".join(params)
+    path = f"/repos/{repo}/pulls"
+    if query:
+        path += f"?{query}"
+    
+    result = curl("GET", path)
+    for pr in result or []:
+        num = pr.get("number", "?")
+        title = pr.get("title", "")
+        state = pr.get("state", "?")
+        head = pr.get("head", {}).get("ref", "?")
+        print(f"#{num} [{state}] {title} ({head})")
+
+
+def cmd_pr_get(args):
+    """Get PR details."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/pulls/{args.number}")
+    if result:
+        print(f"#{result.get('number')} {result.get('title')}")
+        print(f"State: {result.get('state')}")
+        print(f"Head: {result.get('head', {}).get('ref')}")
+        print(f"Base: {result.get('base', {}).get('ref')}")
+        print(f"Mergeable: {result.get('mergeable', '?')}")
+        print(f"Has conflicts: {result.get('has_conflicts', '?')}")
+
+
+def cmd_pr_merge(args):
+    """Merge a pull request."""
+    repo = escape_repo(get_repo(args.repo))
+    merge_style = args.style or "merge"
+    data = {"Do": merge_style}
+    if args.message:
+        data["merge_message"] = args.message
+    result = curl("POST", f"/repos/{repo}/pulls/{args.number}/merge", data)
+    if result:
+        print(f"Merged PR #{args.number}")
+
+
+def cmd_pr_create(args):
+    """Create a pull request."""
+    repo = escape_repo(get_repo(args.repo))
+    data = {
+        "title": args.title,
+        "head": args.head,
+        "base": args.base or "main",
+    }
+    if args.body:
+        data["body"] = args.body
+    result = curl("POST", f"/repos/{repo}/pulls", data)
+    if result:
+        print(f"Created PR #{result.get('number')}: {result.get('html_url')}")
+
+
+def cmd_pr_close(args):
+    """Close a pull request."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("PATCH", f"/repos/{repo}/pulls/{args.number}", {"state": "closed"})
+    if result:
+        print(f"Closed PR #{args.number}")
+
+
+def cmd_pr_files(args):
+    """List files changed in a PR."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/pulls/{args.number}/files")
+    if result:
+        if _json_output:
+            output(result)
+            return
+        # Handle error response
+        if isinstance(result, dict) and "message" in result:
+            print(f"Error: {result.get('message')}", file=sys.stderr)
+            return
+        if not isinstance(result, list):
+            print(f"Unexpected response: {result}", file=sys.stderr)
+            return
+        for f in result:
+            status = f.get("status", "?")
+            fname = f.get("filename", "?")
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            status_map = {"added": "A", "modified": "M", "removed": "D", "renamed": "R"}
+            s = status_map.get(status, status[0].upper() if status else "?")
+            print(f"{s} {fname} (+{additions}/-{deletions})")
+
+
+# === BRANCH COMMANDS ===
+
+def cmd_branch_list(args):
+    """List branches."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/branches")
+    for branch in result or []:
+        name = branch.get("name", "?")
+        commit = branch.get("commit", {}).get("id", "?")[:8]
+        protected = " [protected]" if branch.get("protected") else ""
+        print(f"{name} ({commit}){protected}")
+
+
+def cmd_branch_delete(args):
+    """Delete a branch."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("DELETE", f"/repos/{repo}/branches/{args.name}")
+    print(f"Deleted branch {args.name}")
+
+
+# === WEBHOOK COMMANDS ===
+
+def cmd_hook_list(args):
+    """List webhooks."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/hooks")
+    for hook in result or []:
+        hook_id = hook.get("id", "?")
+        hook_type = hook.get("type", "?")
+        url = hook.get("config", {}).get("url", "?")
+        active = "active" if hook.get("active") else "inactive"
+        print(f"#{hook_id} [{active}] {hook_type}: {url}")
+
+
+def cmd_hook_create(args):
+    """Create a webhook."""
+    repo = escape_repo(get_repo(args.repo))
+    data = {
+        "type": "forgejo",
+        "config": {
+            "url": args.url,
+            "content_type": "json",
+        },
+        "events": args.events.split(",") if args.events else ["push"],
+        "active": True,
+    }
+    if args.secret:
+        data["config"]["secret"] = args.secret
+    result = curl("POST", f"/repos/{repo}/hooks", data)
+    if result:
+        print(f"Created webhook #{result.get('id')}: {args.url}")
+
+
+def cmd_hook_delete(args):
+    """Delete a webhook."""
+    repo = escape_repo(get_repo(args.repo))
+    curl("DELETE", f"/repos/{repo}/hooks/{args.id}")
+    print(f"Deleted webhook #{args.id}")
+
+
+# === LABEL COMMANDS ===
+
+def cmd_label_list(args):
+    """List labels for a repo."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/labels")
+    for label in result or []:
+        name = label.get("name", "?")
+        color = label.get("color", "?")
+        print(f"{name} (#{color})")
+
+
+def cmd_label_add(args):
+    """Add labels to an issue."""
+    repo = escape_repo(get_repo(args.repo))
+    labels = args.labels.split(",")
+    result = curl("POST", f"/repos/{repo}/issues/{args.number}/labels", {"labels": labels})
+    if result:
+        print(f"Added labels {args.labels} to #{args.number}")
+
+
+def cmd_label_remove(args):
+    """Remove a label from an issue."""
+    repo = escape_repo(get_repo(args.repo))
+    curl("DELETE", f"/repos/{repo}/issues/{args.number}/labels/{args.label}")
+    print(f"Removed label '{args.label}' from #{args.number}")
+
+
+# === REACTION COMMANDS ===
+
+def cmd_reaction_add(args):
+    """Add a reaction to an issue or comment."""
+    repo = escape_repo(get_repo(args.repo))
+    path = f"/repos/{repo}/issues/{args.number}/reactions"
+    if args.comment:
+        path = f"/repos/{repo}/issues/comments/{args.comment}/reactions"
+    result = curl("POST", path, {"content": args.emoji})
+    if result:
+        print(f"Added reaction {args.emoji}")
+
+
+# === FILE COMMANDS ===
+
+def cmd_file_list(args):
+    """List files in a repo directory."""
+    repo = escape_repo(get_repo(args.repo))
+    ref = args.ref or "main"
+    path = args.path or ""
+    result = curl("GET", f"/repos/{repo}/contents/{path}?ref={ref}")
+    if result:
+        if _json_output:
+            output(result)
+            return
+        # Handle error response
+        if isinstance(result, dict) and "message" in result:
+            print(f"Error: {result.get('message')}", file=sys.stderr)
+            return
+        # Result is a list of file/directory entries
+        if isinstance(result, list):
+            for entry in result:
+                ftype = "[DIR] " if entry.get("type") == "dir" else "      "
+                name = entry.get("name", "?")
+                print(f"{ftype}{name}")
+        else:
+            # Single file returned
+            print(result.get("name", "?"))
+
+
+def cmd_file_get(args):
+    """Get file contents from repo."""
+    repo = escape_repo(get_repo(args.repo))
+    ref = args.ref or "main"
+    result = curl("GET", f"/repos/{repo}/contents/{args.path}?ref={ref}")
+    if result:
+        if _json_output:
+            output(result)
+            return
+        import base64
+        content = result.get("content", "")
+        if result.get("encoding") == "base64":
+            try:
+                print(base64.b64decode(content).decode("utf-8"))
+            except:
+                print(content)
+        else:
+            print(content)
+
+
+def cmd_file_create(args):
+    """Create or update a file."""
+    repo = escape_repo(get_repo(args.repo))
+    import base64
+    content_b64 = base64.b64encode(args.content.encode()).decode()
+    data = {
+        "message": args.message,
+        "content": content_b64,
+    }
+    if args.sha:
+        data["sha"] = args.sha  # Required for update
+    result = curl("POST", f"/repos/{repo}/contents/{args.path}", data)
+    if result:
+        print(f"Created/updated {args.path} in {args.repo}")
+
+
+# === COLLABORATOR COMMANDS ===
+
+def cmd_collab_add(args):
+    """Add a collaborator to repo."""
+    repo = escape_repo(get_repo(args.repo))
+    data = {}
+    if args.permission:
+        data["permission"] = args.permission  # read, write, admin
+    result = curl("PUT", f"/repos/{repo}/collaborators/{args.user}", data)
+    print(f"Added {args.user} as collaborator to {args.repo}")
+
+
+def cmd_collab_list(args):
+    """List collaborators."""
+    repo = escape_repo(get_repo(args.repo))
+    result = curl("GET", f"/repos/{repo}/collaborators")
+    for user in result or []:
+        login = user.get("login", "?")
+        perm = user.get("permissions", {})
+        admin = "[admin]" if perm.get("admin") else ""
+        print(f"{login} {admin}")
+
+
+# === ISSUE COMMENT ALIAS ===
+
+def cmd_issue_comment(args):
+    """Add comment to issue (alias for 'comment add')."""
+    # Translate to comment add args
+    class CommentArgs:
+        pass
+    cargs = CommentArgs()
+    cargs.repo = args.repo
+    cargs.number = args.number
+    cargs.body = args.body
+    cmd_comment_add(cargs)
+
+
+# === MISC COMMANDS ===
+
+def cmd_version(args):
+    """Get Forgejo version."""
+    result = curl("GET", "/version")
+    if result:
+        print(f"Forgejo {result.get('version', 'unknown')}")
+
+
+def cmd_user(args):
+    """Get current user info."""
+    result = curl("GET", "/user")
+    if result:
+        print(f"{result.get('login')} ({result.get('email', 'no email')})")
+        print(f"ID: {result.get('id')}")
+
+
+def cmd_token_create(args):
+    """Create an access token."""
+    result = curl("POST", f"/users/{args.user}/tokens", {"name": args.name})
+    if result:
+        # Token is only shown once!
+        print(f"Token: {result.get('sha1')}")
+        print("Save this - it won't be shown again!")
+
+
+def cmd_raw(args):
+    """Execute a raw API call."""
+    result = curl(args.method, args.path, args.data)
+    if result:
+        print(json.dumps(result, indent=2))
+
+
+def main():
+    global _url_override, _json_output
+    
+    # Pre-parse to get global flags before subcommand parsing
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--url", "-u", help="Forgejo URL")
+    pre_parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    pre_args, remaining = pre_parser.parse_known_args()
+    
+    if pre_args.url:
+        _url_override = pre_args.url
+    if pre_args.json:
+        _json_output = True
+    
+    parser = argparse.ArgumentParser(
+        description="""Forgejo CLI - Common API operations
+
+Examples:
+  fj issue list owner/repo                    # List open issues
+  fj issue create owner/repo "Title" --body "Description"
+  fj issue comment owner/repo 42 "My comment"  # Add comment
+  fj pr list owner/repo --state all           # List all PRs
+  fj pr files owner/repo 5                    # Show changed files
+  fj pr merge owner/repo 5                    # Merge PR
+  fj file list owner/repo pkg/                # List directory
+  fj file get owner/repo README.md            # Get file
+  fj comment add owner/repo 42 "Reply..."     # Add comment
+  fj label add owner/repo 42 bug,urgent       # Add labels
+
+Repo can be omitted if running from inside a git repo (auto-detected).
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--url", "-u", help="Forgejo URL (default: $FORGEJO_URL or http://localhost:3000)")
+    parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    
+    # === REPO ===
+    repo_parser = subparsers.add_parser("repo", help="Repository operations")
+    repo_sub = repo_parser.add_subparsers(dest="subcommand")
+    
+    p = repo_sub.add_parser("list", help="List repositories")
+    p.set_defaults(func=cmd_repo_list)
+    
+    p = repo_sub.add_parser("create", help="Create repository")
+    p.add_argument("name", help="Repository name")
+    p.add_argument("--private", action="store_true", help="Make private")
+    p.add_argument("--description", help="Repository description")
+    p.set_defaults(func=cmd_repo_create)
+    
+    # === ISSUE ===
+    issue_parser = subparsers.add_parser("issue", help="Issue operations")
+    issue_sub = issue_parser.add_subparsers(dest="subcommand")
+    
+    p = issue_sub.add_parser("list", help="List issues")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("--state", choices=["open", "closed", "all"], default="open")
+    p.add_argument("--labels", help="Filter by labels (comma-separated)")
+    p.set_defaults(func=cmd_issue_list)
+    
+    p = issue_sub.add_parser("get", help="Get issue details")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.set_defaults(func=cmd_issue_get)
+    
+    p = issue_sub.add_parser("create", help="Create issue")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("title", help="Issue title")
+    p.add_argument("--body", help="Issue body")
+    p.add_argument("--labels", help="Labels (comma-separated)")
+    p.set_defaults(func=cmd_issue_create)
+    
+    p = issue_sub.add_parser("close", help="Close issue")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.set_defaults(func=cmd_issue_close)
+    
+    p = issue_sub.add_parser("open", help="Reopen issue")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.set_defaults(func=cmd_issue_open)
+    
+    p = issue_sub.add_parser("comment", help="Add comment to issue (alias for 'comment add')")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.add_argument("body", help="Comment body")
+    p.set_defaults(func=cmd_issue_comment)
+    
+    # === COMMENT ===
+    comment_parser = subparsers.add_parser("comment", help="Comment operations")
+    comment_sub = comment_parser.add_subparsers(dest="subcommand")
+    
+    p = comment_sub.add_parser("list", help="List comments")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue/PR number")
+    p.set_defaults(func=cmd_comment_list)
+    
+    p = comment_sub.add_parser("add", help="Add comment")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue/PR number")
+    p.add_argument("body", help="Comment body")
+    p.set_defaults(func=cmd_comment_add)
+    
+    # === PR ===
+    pr_parser = subparsers.add_parser("pr", help="Pull request operations")
+    pr_sub = pr_parser.add_subparsers(dest="subcommand")
+    
+    p = pr_sub.add_parser("list", help="List pull requests")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("--state", choices=["open", "closed", "all"], default="open")
+    p.set_defaults(func=cmd_pr_list)
+    
+    p = pr_sub.add_parser("get", help="Get PR details")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="PR number")
+    p.set_defaults(func=cmd_pr_get)
+    
+    p = pr_sub.add_parser("merge", help="Merge pull request")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="PR number")
+    p.add_argument("--style", choices=["merge", "rebase-merge", "squash"], default="merge")
+    p.add_argument("--message", help="Merge commit message")
+    p.set_defaults(func=cmd_pr_merge)
+    
+    p = pr_sub.add_parser("create", help="Create pull request")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("title", help="PR title")
+    p.add_argument("--head", required=True, help="Head branch (source)")
+    p.add_argument("--base", default="main", help="Base branch (target)")
+    p.add_argument("--body", help="PR description")
+    p.set_defaults(func=cmd_pr_create)
+    
+    p = pr_sub.add_parser("close", help="Close pull request")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="PR number")
+    p.set_defaults(func=cmd_pr_close)
+    
+    p = pr_sub.add_parser("files", help="List files changed in PR")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="PR number")
+    p.set_defaults(func=cmd_pr_files)
+    
+    # === BRANCH ===
+    branch_parser = subparsers.add_parser("branch", help="Branch operations")
+    branch_sub = branch_parser.add_subparsers(dest="subcommand")
+    
+    p = branch_sub.add_parser("list", help="List branches")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.set_defaults(func=cmd_branch_list)
+    
+    p = branch_sub.add_parser("delete", help="Delete branch")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("name", help="Branch name")
+    p.set_defaults(func=cmd_branch_delete)
+    
+    # === HOOK ===
+    hook_parser = subparsers.add_parser("hook", help="Webhook operations")
+    hook_sub = hook_parser.add_subparsers(dest="subcommand")
+    
+    p = hook_sub.add_parser("list", help="List webhooks")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.set_defaults(func=cmd_hook_list)
+    
+    p = hook_sub.add_parser("create", help="Create webhook")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("url", help="Webhook URL")
+    p.add_argument("--secret", help="Webhook secret")
+    p.add_argument("--events", default="push", help="Events (comma-separated)")
+    p.set_defaults(func=cmd_hook_create)
+    
+    p = hook_sub.add_parser("delete", help="Delete webhook")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("id", type=int, help="Webhook ID")
+    p.set_defaults(func=cmd_hook_delete)
+    
+    # === LABEL ===
+    label_parser = subparsers.add_parser("label", help="Label operations")
+    label_sub = label_parser.add_subparsers(dest="subcommand")
+    
+    p = label_sub.add_parser("list", help="List labels")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.set_defaults(func=cmd_label_list)
+    
+    p = label_sub.add_parser("add", help="Add labels to issue")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.add_argument("labels", help="Labels (comma-separated)")
+    p.set_defaults(func=cmd_label_add)
+    
+    p = label_sub.add_parser("remove", help="Remove label from issue")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.add_argument("label", help="Label name")
+    p.set_defaults(func=cmd_label_remove)
+    
+    # === REACTION ===
+    reaction_parser = subparsers.add_parser("reaction", help="Reaction operations")
+    reaction_sub = reaction_parser.add_subparsers(dest="subcommand")
+    
+    p = reaction_sub.add_parser("add", help="Add reaction")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("number", type=int, help="Issue number")
+    p.add_argument("emoji", help="Reaction emoji (+1, -1, laugh, etc.)")
+    p.add_argument("--comment", type=int, help="Comment ID")
+    p.set_defaults(func=cmd_reaction_add)
+    
+    # === FILE ===
+    file_parser = subparsers.add_parser("file", help="File operations")
+    file_sub = file_parser.add_subparsers(dest="subcommand")
+    
+    p = file_sub.add_parser("list", help="List files in directory")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("path", nargs="?", default="", help="Directory path (default: root)")
+    p.add_argument("--ref", help="Branch/commit ref (default: main)")
+    p.set_defaults(func=cmd_file_list)
+    
+    p = file_sub.add_parser("get", help="Get file contents")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("path", help="File path")
+    p.add_argument("--ref", help="Branch/commit ref (default: main)")
+    p.set_defaults(func=cmd_file_get)
+    
+    p = file_sub.add_parser("create", help="Create/update file")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("path", help="File path")
+    p.add_argument("--message", required=True, help="Commit message")
+    p.add_argument("--content", help="File content (or stdin)")
+    p.add_argument("--sha", help="SHA of file being updated")
+    p.set_defaults(func=cmd_file_create)
+    
+    # === COLLAB ===
+    collab_parser = subparsers.add_parser("collab", help="Collaborator operations")
+    collab_sub = collab_parser.add_subparsers(dest="subcommand")
+    
+    p = collab_sub.add_parser("list", help="List collaborators")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.set_defaults(func=cmd_collab_list)
+    
+    p = collab_sub.add_parser("add", help="Add collaborator")
+    p.add_argument("repo", nargs="?", default=None, help="Repository (owner/repo), auto-detected from git")
+    p.add_argument("user", help="Username")
+    p.add_argument("--permission", choices=["read", "write", "admin"], default="write")
+    p.set_defaults(func=cmd_collab_add)
+    
+    # === MISC ===
+    p = subparsers.add_parser("version", help="Get Forgejo version")
+    p.set_defaults(func=cmd_version)
+    
+    p = subparsers.add_parser("user", help="Get current user")
+    p.set_defaults(func=cmd_user)
+    
+    p = subparsers.add_parser("token", help="Create access token")
+    p.add_argument("user", help="Username")
+    p.add_argument("name", help="Token name")
+    p.set_defaults(func=cmd_token_create)
+    
+    p = subparsers.add_parser("raw", help="Raw API call")
+    p.add_argument("method", choices=["GET", "POST", "PUT", "PATCH", "DELETE"])
+    p.add_argument("path", help="API path (e.g. /repos/owner/repo/issues)")
+    p.add_argument("--data", help="JSON data")
+    p.set_defaults(func=cmd_raw)
+    
+    p = subparsers.add_parser("init", help="Initialize .fj config file")
+    p.add_argument("--url", "-u", help="Forgejo URL")
+    p.add_argument("--token", help="API token")
+    p.add_argument("--user", help="Username for basic auth")
+    p.add_argument("--password", help="Password for basic auth")
+    p.add_argument("--repo", help="Default repository (owner/repo)")
+    p.add_argument("--force", "-f", action="store_true", help="Overwrite existing .fj")
+    p.set_defaults(func=cmd_init)
+    
+    p = subparsers.add_parser("detect", help="Show detected repository from git")
+    p.set_defaults(func=cmd_detect)
+    
+    # Load config file after parsing global flags but before executing command
+    load_config()
+    
+    args = parser.parse_args(remaining)
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    
+    if hasattr(args, "func"):
+        args.func(args)
+    else:
+        # No subcommand - print help for the command
+        subparsers.choices[args.command].print_help()
+
+
+if __name__ == "__main__":
+    main()
