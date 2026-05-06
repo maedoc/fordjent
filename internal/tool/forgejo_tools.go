@@ -391,6 +391,22 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
+	// Auto-push the branch before checking remote. If the branch was committed
+	// via bash (not the git tool), auto-push wouldn't have fired. This ensures
+	// the branch is always pushed before PR creation.
+	if t.repoDir != "" {
+		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+		pushCmd := exec.CommandContext(pushCtx, "git", "-C", t.repoDir, "push", "-u", "origin", "HEAD")
+		pushCmd.Dir = t.repoDir
+		pushOut, pushErr := pushCmd.CombinedOutput()
+		pushCancel()
+		if pushErr != nil {
+			slog.Warn("create_pr: auto-push failed (branch may already be pushed)", "error", pushErr, "output", string(pushOut))
+		} else {
+			slog.Info("create_pr: auto-push succeeded", "output", strings.TrimSpace(string(pushOut)))
+		}
+	}
+
 	// Verify branch exists on remote before gating / PR creation.
 	// Forgejo can lag behind the push, so retry up to 5× with 1s sleep.
 	if t.repoDir != "" {
