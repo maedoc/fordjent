@@ -86,6 +86,10 @@ func (l *Lifecycle) GetState(ctx context.Context, sessionKey string) (string, er
 
 // OnSessionStart records the transition from created → working.
 func (l *Lifecycle) OnSessionStart(ctx context.Context, sessionKey string) {
+	current, _ := l.GetState(ctx, sessionKey)
+	if current == StateWorking {
+		return
+	}
 	_ = l.RecordTransition(ctx, sessionKey, StateCreated, StateWorking, "session event received")
 }
 

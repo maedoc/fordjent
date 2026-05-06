@@ -94,6 +94,7 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("shutting down, draining sessions")
+	router.SetShutdown()
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer drainCancel()
 	mgr.Drain(drainCtx)

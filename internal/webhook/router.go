@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fordjent/fordjent/internal/config"
@@ -26,11 +27,13 @@ import (
 // Router receives Forgejo webhooks, validates them, normalizes events,
 // and publishes to the event bus.
 type Router struct {
-	cfg    *config.Config
-	bus    *event.Bus
-	logger *slog.Logger
-	mux    *http.ServeMux
-	server *http.Server
+	cfg       *config.Config
+	bus       *event.Bus
+	logger    *slog.Logger
+	mux       *http.ServeMux
+	server    *http.Server
+	mu        sync.Mutex
+	shuttingDown bool
 }
 
 func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router {
@@ -53,12 +56,29 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	return r
 }
 
+// SetShutdown marks the router as shutting down. New webhooks will receive 503.
+func (r *Router) SetShutdown() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shuttingDown = true
+}
+
+func (r *Router) isShuttingDown() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.shuttingDown
+}
+
 func (r *Router) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }
 
 func (r *Router) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if r.isShuttingDown() {
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ready")
 }
@@ -153,8 +173,26 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 
 	result := map[string]interface{}{}
 	var active, failed int
-	_ = db.QueryRow("SELECT COUNT(*) FROM session_transitions WHERE to_state = 'working'").Scan(&active)
-	_ = db.QueryRow("SELECT COUNT(*) FROM session_transitions WHERE to_state LIKE 'failed%'").Scan(&failed)
+	_ = db.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT session_key, MAX(occurred_at) AS max_at
+			FROM session_transitions
+			GROUP BY session_key
+		) grouped
+		JOIN session_transitions t
+			ON t.session_key = grouped.session_key AND t.occurred_at = grouped.max_at
+		WHERE t.to_state = 'working'
+	`).Scan(&active)
+	_ = db.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT session_key, MAX(occurred_at) AS max_at
+			FROM session_transitions
+			GROUP BY session_key
+		) grouped
+		JOIN session_transitions t
+			ON t.session_key = grouped.session_key AND t.occurred_at = grouped.max_at
+		WHERE t.to_state LIKE 'failed%'
+	`).Scan(&failed)
 	result["active_sessions"] = active
 	result["failed_sessions"] = failed
 
@@ -268,6 +306,10 @@ func (r *Router) ListenAndServe(ctx context.Context, addr string) error {
 }
 
 func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
+	if r.isShuttingDown() {
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	if req.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -575,18 +617,12 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	}
 
 	// Comment events (issue_comment, pull_request_review_comment):
-	// filter by body marker AND sender to prevent self-comment loops.
+	// Filter ONLY by body marker. Do NOT filter by sender, because the
+	// scheduler posts unblock comments from the bot that MUST be processed.
 	if comment, ok := payload["comment"].(map[string]interface{}); ok {
 		if body, ok := comment["body"].(string); ok {
 			if strings.Contains(body, marker) {
 				return true
-			}
-		}
-		if sender, ok := payload["sender"].(map[string]interface{}); ok {
-			if login, ok := sender["login"].(string); ok {
-				if login == "fordjent[bot]" || login == "fordjent-bot" {
-					return true
-				}
 			}
 		}
 	}

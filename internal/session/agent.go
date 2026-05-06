@@ -38,7 +38,7 @@ type Agent struct {
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, role string) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
-	prov := cfg.DefaultProvider()
+	prov := cfg.ProviderForRole(role)
 	llmClient := provider.NewClient(prov)
 	mem := memory.New(cfg, sess.WorkDir, forgejoClient)
 
@@ -357,6 +357,7 @@ You have access to the following tools:
 11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Sub-issues are auto-tagged 'blocked' when their parent code hasn't been merged yet. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues.
 12. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
 13. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
+14. **Merged PRs show state "closed" in the API.** When checking if a dependency PR is resolved, look at the 'merged' field (true = merged), not the 'state' field. A PR with 'state: closed' may still be merged and ready.
 
 ### Pre-Flight Checklist (RUN FIRST)
 Before writing ANY code, use bash or read_file to check:
@@ -531,19 +532,19 @@ func buildRoleRegistry(
 	// Role-specific tools
 	switch role {
 	case "pm":
-		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
+		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 5))
 		// PM cannot write code, create PRs, or merge
 	case "reviewer":
-		registry.Register(tool.NewMergePRTool(forgejoAdapter))
+		registry.Register(tool.NewMergePRTool(forgejoAdapter, true))
 		// Reviewer can read, search, comment, and merge — but not write code or create PRs
 	case "devops", "tester", "implementer":
 		fallthrough
 	default:
-		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber))
+		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0))
 		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
 		registry.Register(tool.NewGitTool(sessionInfo))
 		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
-		registry.Register(tool.NewMergePRTool(forgejoAdapter))
+		registry.Register(tool.NewMergePRTool(forgejoAdapter, false))
 		// Admin tools for implementer role
 		registry.Register(tool.NewDeleteBranchTool(forgejoAdapter))
 		registry.Register(tool.NewCreateHookTool(forgejoAdapter))

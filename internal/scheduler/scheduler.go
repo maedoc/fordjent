@@ -55,6 +55,17 @@ type Label struct {
 // any whose declared dependencies are all closed (satisfied), removes their
 // 'blocked' label, and adds a 'ready' label. It also posts a comment.
 func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber int) error {
+	return s.checkAndUnblock(ctx, repo, mergedPRNumber)
+}
+
+// CheckAndUnblock scans all open issues for satisfied dependencies and unblocks them.
+// Unlike OnPRMerged, it does not require a specific merged PR trigger.
+func (s *Scheduler) CheckAndUnblock(ctx context.Context, repo string) error {
+	return s.checkAndUnblock(ctx, repo, 0)
+}
+
+// checkAndUnblock is the shared implementation.
+func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNumber int) error {
 	// 1. List all open issues in the repo
 	issues, err := s.listOpenIssues(ctx, repo)
 	if err != nil {
@@ -166,7 +177,8 @@ func (s *Scheduler) listOpenIssues(ctx context.Context, repo string) ([]Issue, e
 	return issues, nil
 }
 
-// isIssueClosed checks whether an issue is closed by querying its state.
+// isIssueClosed checks whether an issue/PR dependency is satisfied.
+// A merged PR has state="closed" but also merged=true — both count as closed.
 func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) (bool, error) {
 	escaped := escapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, number)
@@ -175,12 +187,13 @@ func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) 
 		return false, err
 	}
 	var issue struct {
-		State string `json:"state"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"` // present when issue is actually a PR
 	}
 	if err := json.Unmarshal([]byte(body), &issue); err != nil {
 		return false, fmt.Errorf("unmarshal issue: %w", err)
 	}
-	return issue.State == "closed", nil
+	return issue.State == "closed" || issue.Merged, nil
 }
 
 // removeLabel removes a label from an issue.

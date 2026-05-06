@@ -74,6 +74,7 @@ type PullRequest struct {
 	Body         string `json:"body"`
 	State        string `json:"state"`
 	Mergeable    bool   `json:"mergeable"`
+	Merged       bool   `json:"merged"` // Forgejo sends merged=true even when state=closed
 	HasConflicts bool   `json:"has_conflits"` // NOTE: Forgejo API field may vary — treat as advisory
 	Head         struct {
 		Ref string `json:"ref"`
@@ -810,4 +811,26 @@ func (c *Client) CreateToken(ctx context.Context, username, tokenName string) (*
 // RawRequest executes a raw API request and returns the response body.
 func (c *Client) RawRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
 	return c.doRequest(ctx, method, apiPath, body)
+}
+
+// Review represents a pull request review.
+type Review struct {
+	ID     int    `json:"id"`
+	User   *User  `json:"user"`
+	State  string `json:"state"` // "APPROVED", "REQUEST_CHANGES", etc.
+	Body   string `json:"body"`
+}
+
+// ListPRReviews returns reviews for a pull request.
+func (c *Client) ListPRReviews(ctx context.Context, repo string, number int) ([]Review, error) {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "reviews")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var reviews []Review
+	if err := json.Unmarshal([]byte(result), &reviews); err != nil {
+		return nil, fmt.Errorf("unmarshal reviews: %w", err)
+	}
+	return reviews, nil
 }

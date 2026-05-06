@@ -35,6 +35,7 @@ type Session struct {
 	RepoDir     string
 	LastActive  time.Time
 	Cancel      context.CancelFunc
+	Sender      string // original webhook sender (e.g. fordjent-bot)
 
 	mu     sync.Mutex
 	busy   bool
@@ -213,6 +214,19 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}()
 	}
 
+	// If code was pushed directly to main (e.g., scaffold), scan for unblocked issues
+	if evt.Type == event.Push {
+		if ref, ok := evt.Payload["ref"].(string); ok && ref == "refs/heads/main" {
+			go func() {
+				schedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := m.scheduler.CheckAndUnblock(schedCtx, evt.Repository); err != nil {
+					slog.Warn("scheduler: failed to unblock after push", "error", err, "repo", evt.Repository)
+				}
+			}()
+		}
+	}
+
 	// Scaffold detection: on new issues for empty repos, create/block
 	if m.cfg.Agent.EnableScaffoldDetection && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
 		blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber)
@@ -355,6 +369,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		RepoDir:     repoDir,
 		LastActive:  time.Now(),
 		Cancel:      cancel,
+		Sender:      evt.Sender,
 		events:      make(chan *event.Event, 64),
 	}
 
@@ -392,6 +407,12 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	// Detect role from issue or PR title/labels before agent construction
 	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
+	// If a bot created this PR, auto-assign reviewer role to inspect and merge it
+	if sess.PRNumber > 0 && (sess.Sender == "fordjent-bot" || sess.Sender == "fordjent[bot]") {
+		if role == "implementer" || role == "" {
+			role = "reviewer"
+		}
+	}
 	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, role)
 
 	for {

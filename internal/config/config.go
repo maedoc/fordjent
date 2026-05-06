@@ -56,6 +56,7 @@ type AgentConfig struct {
 	EnableContextInjection  bool          `yaml:"enable_context_injection"`
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
+	FastProvider            string        `yaml:"fast_provider"` // role "pm" / "reviewer" use this provider instead of default
 }
 
 type BudgetConfig struct {
@@ -199,6 +200,19 @@ func (c *Config) DefaultProvider() *ProviderConfig {
 		return nil
 	}
 	return &c.Providers[0]
+}
+
+// ProviderForRole returns the provider to use for a given agent role.
+// PM and reviewer roles use the fast_provider if configured; otherwise falls back to default.
+func (c *Config) ProviderForRole(role string) *ProviderConfig {
+	if (role == "pm" || role == "reviewer") && c.Agent.FastProvider != "" {
+		for _, p := range c.Providers {
+			if p.Name == c.Agent.FastProvider {
+				return &p
+			}
+		}
+	}
+	return c.DefaultProvider()
 }
 
 // RepositoryForChat returns the bound repository for a Telegram chat ID.

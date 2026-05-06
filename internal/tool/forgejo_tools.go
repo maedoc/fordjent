@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fordjent/fordjent/internal/forgejo"
@@ -91,10 +92,17 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 type forgejoCreateIssueTool struct {
 	adapter        *ForgejoAdapter
 	parentIssueNum int
+	maxSubIssues   int
+	subIssueCount  int
+	mu             sync.Mutex
 }
 
-func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int) *forgejoCreateIssueTool {
-	return &forgejoCreateIssueTool{adapter: adapter, parentIssueNum: parentIssueNum}
+func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int, maxSubIssues int) *forgejoCreateIssueTool {
+	return &forgejoCreateIssueTool{
+		adapter:      adapter,
+		parentIssueNum: parentIssueNum,
+		maxSubIssues:   maxSubIssues,
+	}
 }
 
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
@@ -133,6 +141,15 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
+
+	// Max sub-issue enforcement
+	t.mu.Lock()
+	if t.maxSubIssues > 0 && t.subIssueCount >= t.maxSubIssues {
+		t.mu.Unlock()
+		return "", fmt.Errorf("maximum sub-issues reached (%d). Do not create more issues for this task.", t.maxSubIssues)
+	}
+	t.subIssueCount++
+	t.mu.Unlock()
 
 	// Deduplication check: query open issues for similar titles
 	listPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues") + "?state=open&limit=50"
@@ -593,11 +610,12 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 // --- forgejo_merge_pr ---
 
 type forgejoMergePRTool struct {
-	adapter *ForgejoAdapter
+	adapter             *ForgejoAdapter
+	bypassHumanApproval bool // set true for reviewer/devops roles that can merge without external human
 }
 
-func NewMergePRTool(adapter *ForgejoAdapter) *forgejoMergePRTool {
-	return &forgejoMergePRTool{adapter: adapter}
+func NewMergePRTool(adapter *ForgejoAdapter, bypassHumanApproval bool) *forgejoMergePRTool {
+	return &forgejoMergePRTool{adapter: adapter, bypassHumanApproval: bypassHumanApproval}
 }
 
 func (t *forgejoMergePRTool) Name() string        { return "forgejo_merge_pr" }
@@ -652,6 +670,31 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	if !pr.Mergeable {
 		return "", fmt.Errorf("PR #%d is not mergeable yet — check status requirements", params.PRNumber)
+	}
+
+	// Human review gate: at least one non-bot APPROVED review required
+	if !t.bypassHumanApproval {
+		reviews, err := t.adapter.Client().ListPRReviews(ctx, params.Repository, params.PRNumber)
+		if err != nil {
+			return "", fmt.Errorf("failed to list reviews for PR #%d: %w", params.PRNumber, err)
+		}
+		approved := false
+		for _, r := range reviews {
+			if r.State == "APPROVED" {
+				// Skip bot approvals (anything matching fordjent bot login pattern)
+				if r.User != nil {
+					login := strings.ToLower(r.User.Login)
+					if login == "fordjent-bot" || login == "fordjent[bot]" {
+						continue
+					}
+				}
+				approved = true
+				break
+			}
+		}
+		if !approved {
+			return "", fmt.Errorf("PR #%d cannot be merged: no human approval found. Ask a human to review and approve first.", params.PRNumber)
+		}
 	}
 
 	mergePath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber), "merge")
