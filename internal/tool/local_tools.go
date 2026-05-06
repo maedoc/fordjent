@@ -335,15 +335,27 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 
 		// Auto-push after successful commit so forgejo_create_pr never sees a
 		// missing remote branch. Use -u origin HEAD to always push current branch.
-		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer pushCancel()
-		pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
-		pushCmd.Dir = t.repoDir
-		pushOut, pushErr := pushCmd.CombinedOutput()
-		if pushErr != nil {
-			return fmt.Sprintf("%s\n[auto-push warning] %s\n%s", string(out), pushErr, string(pushOut)), nil
+		//
+		// Guard: if the current branch is main/master, skip auto-push and warn.
+		// The agent should be on a feature branch for PR-based workflow.
+		// Scaffold sessions (Rule 5) should use `git push origin HEAD:main` via bash.
+		branchCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = t.repoDir
+		branchOut, _ := branchCmd.CombinedOutput()
+		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == "main" || currentBranch == "master" {
+			out = append(out, []byte(fmt.Sprintf("\n[auto-push skipped] Current branch is '%s'. Create a feature branch before committing (e.g., git checkout -b feature/my-feature).", currentBranch))...)
+		} else {
+			pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer pushCancel()
+			pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
+			pushCmd.Dir = t.repoDir
+			pushOut, pushErr := pushCmd.CombinedOutput()
+			if pushErr != nil {
+				return fmt.Sprintf("%s\n[auto-push warning] %s\n%s", string(out), pushErr, string(pushOut)), nil
+			}
+			out = append(out, []byte(fmt.Sprintf("\n[auto-push] %s", strings.TrimSpace(string(pushOut))))...)
 		}
-		out = append(out, []byte(fmt.Sprintf("\n[auto-push] %s", strings.TrimSpace(string(pushOut))))...)
 	}
 
 	return string(out), nil
