@@ -627,11 +627,15 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 		}
 	}
 
-	// PR events: filter by marker in PR body only.
+	// PR events: filter by marker in PR body only, EXCEPT for 'opened' action
+	// which must pass through so reviewer sessions can inspect bot-created PRs.
 	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-		if body, ok := pr["body"].(string); ok {
-			if strings.Contains(body, marker) {
-				return true
+		action, _ := payload["action"].(string)
+		if action != "opened" {
+			if body, ok := pr["body"].(string); ok {
+				if strings.Contains(body, marker) {
+					return true
+				}
 			}
 		}
 	}

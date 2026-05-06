@@ -160,6 +160,19 @@ func (m *Manager) restoreSessions() error {
 		m.sessions[rec.SessionKey] = sess
 		go m.runSession(sessCtx, sess)
 		slog.Info("restored session from database", "session_key", rec.SessionKey, "last_active", rec.LastActive)
+
+		// Auto-resume recently-active sessions by posting a synthetic comment
+		if m.cfg.Agent.EnableSessionRecovery && time.Since(rec.LastActive) < 2*time.Hour {
+			if rec.IssueNumber > 0 {
+				go func(repo string, issueNum int) {
+					resumeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer cancel()
+					if err := m.forgejoClient.PostIssueComment(resumeCtx, repo, issueNum, "Resuming work after agent restart..."); err != nil {
+						slog.Warn("failed to post resume comment", "error", err, "issue", issueNum)
+					}
+				}(rec.Repository, rec.IssueNumber)
+			}
+		}
 	}
 	return nil
 }
