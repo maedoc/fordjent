@@ -195,7 +195,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Bootstrap scheduler/lifecycle/scaffold labels once per repo (sync to avoid races)
 	if _, ok := m.labelBoot.Load(evt.Repository); !ok {
 		m.labelBoot.Store(evt.Repository, true)
-		lbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		lbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := m.forgejoClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
 			slog.Warn("failed to ensure repo labels", "repo", evt.Repository, "error", err)
 		}
