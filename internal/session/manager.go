@@ -145,6 +145,11 @@ func (m *Manager) restoreSessions() error {
 			m.store.Delete(rec.SessionKey)
 			continue
 		}
+		// Skip completed/failed sessions — no need to restore idle goroutines
+		state, _ := m.lc.GetState(context.Background(), rec.SessionKey)
+		if state == lifecycle.StateCompleted || strings.HasPrefix(state, "failed") {
+			continue
+		}
 		sessCtx, cancel := context.WithCancel(context.Background())
 		sess := &Session{
 			Key:         rec.SessionKey,
@@ -161,17 +166,20 @@ func (m *Manager) restoreSessions() error {
 		go m.runSession(sessCtx, sess)
 		slog.Info("restored session from database", "session_key", rec.SessionKey, "last_active", rec.LastActive)
 
-		// Auto-resume recently-active sessions by posting a synthetic comment
-		if m.cfg.Agent.EnableSessionRecovery && time.Since(rec.LastActive) < 2*time.Hour {
-			if rec.IssueNumber > 0 {
-				go func(repo string, issueNum int) {
-					resumeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					defer cancel()
-					if err := m.forgejoClient.PostIssueComment(resumeCtx, repo, issueNum, "Resuming work after agent restart..."); err != nil {
-						slog.Warn("failed to post resume comment", "error", err, "issue", issueNum)
-					}
-				}(rec.Repository, rec.IssueNumber)
-			}
+		// Auto-resume recently-active implementer sessions by posting a synthetic comment
+		if m.cfg.Agent.EnableSessionRecovery && time.Since(rec.LastActive) < 2*time.Hour && rec.IssueNumber > 0 {
+			go func(repo string, issueNum int) {
+				resumeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				issue, err := m.forgejoClient.GetIssue(resumeCtx, repo, issueNum)
+				if err == nil && issue != nil && detectRoleFromIssue(issue) == "pm" {
+					return // Do not nudge PM sessions
+				}
+				body := "Resuming work after agent restart..."
+				if err := m.forgejoClient.PostIssueComment(resumeCtx, repo, issueNum, body); err != nil {
+					slog.Warn("failed to post resume comment", "error", err, "issue", issueNum)
+				}
+			}(rec.Repository, rec.IssueNumber)
 		}
 	}
 	return nil
