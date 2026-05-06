@@ -1026,7 +1026,7 @@ func (t *forgejoCreateHookTool) Parameters() map[string]interface{} {
 			},
 			"events": map[string]interface{}{
 				"type":        "array",
-				"items":       "string",
+				"items":       map[string]interface{}{"type": "string"},
 				"description": "Event types (e.g., push, pull_request)",
 			},
 		},
