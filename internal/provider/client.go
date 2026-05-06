@@ -110,9 +110,10 @@ type toolCallFunctionJSON struct {
 type openAIResponse struct {
 	Choices []struct {
 		Message struct {
-			Role      string         `json:"role"`
-			Content   string         `json:"content"`
-			ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+			Role             string         `json:"role"`
+			Content          string         `json:"content"`
+			ReasoningContent string         `json:"reasoning_content"`
+			ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -298,8 +299,16 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 	}
 
 	choice := openaiResp.Choices[0]
+	content := choice.Message.Content
+	// Reasoning models (e.g., GLM-5.1, DeepSeek) may return thinking in
+	// reasoning_content when content is null. Only use it when there are no
+	// tool calls — if tool calls exist, the thinking is just the model's
+	// internal chain and should be discarded.
+	if content == "" && len(choice.Message.ToolCalls) == 0 && choice.Message.ReasoningContent != "" {
+		content = choice.Message.ReasoningContent
+	}
 	result := &Response{
-		Content:    choice.Message.Content,
+		Content:    content,
 		StopReason: choice.FinishReason,
 	}
 
