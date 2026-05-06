@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/fordjent/fordjent/internal/agent"
 	"github.com/fordjent/fordjent/internal/config"
@@ -64,6 +65,15 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 
 // ProcessEvent handles a single event: builds context, runs LLM loop with compaction/retry/cost tracking, executes tools.
 func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
+	// Enforce overall session timeout
+	sessionTimeout := a.cfg.Agent.SessionTimeout
+	if sessionTimeout == 0 {
+		sessionTimeout = 30 * time.Minute
+	}
+	sessCtx, sessCancel := context.WithTimeout(ctx, sessionTimeout)
+	defer sessCancel()
+	ctx = sessCtx
+
 	// Step 1: Acknowledge with 👀 reaction
 	a.addReaction(ctx, evt, "eyes")
 

@@ -156,8 +156,8 @@ def get_config():
     """Get Forgejo configuration from environment."""
     url = _url_override or os.environ.get("FORGEJO_URL", "http://localhost:3000")
     token = os.environ.get("FORGEJO_TOKEN")
-    user = os.environ.get("FORGEJO_USER", "fjadmin")
-    password = os.environ.get("FORGEJO_PASSWORD", "REDACTED")
+    user = os.environ.get("FORGEJO_USER")
+    password = os.environ.get("FORGEJO_PASSWORD")
     return url, token, user, password
 
 
@@ -173,8 +173,11 @@ def curl(method, path, data=None, raw=False, silent=True):
     # Auth: token takes precedence, then basic auth
     if token:
         cmd.extend(["-H", f"Authorization: token {token}"])
-    else:
+    elif user and password:
         cmd.extend(["-u", f"{user}:{password}"])
+    else:
+        print("Error: No authentication configured. Set FORGEJO_TOKEN or FORGEJO_USER/FORGEJO_PASSWORD, or run 'fj init'.", file=sys.stderr)
+        sys.exit(1)
     
     if data and not raw:
         cmd.extend(["-H", "Content-Type: application/json"])

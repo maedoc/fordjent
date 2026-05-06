@@ -28,6 +28,7 @@ agent:
   enable_session_recovery: true
   enable_context_injection: true
   enable_auto_collaborator: true
+  session_timeout: "30m"
 
 budget:
   enabled: true
