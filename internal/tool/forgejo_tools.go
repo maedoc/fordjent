@@ -1,11 +1,9 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -14,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/stalegate"
 )
@@ -663,52 +662,602 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	return fmt.Sprintf("PR #%d merged successfully using '%s'", params.PRNumber, params.Style), nil
 }
 
-// ForgejoAdapter holds shared HTTP client and credentials for Forgejo API tools.
+// ForgejoAdapter holds shared Forgejo client for API tools.
+// It wraps forgejo.Client for compatibility with existing tools.
 type ForgejoAdapter struct {
-	Client  *http.Client
-	BaseURL string
-	Token   string
+	client *forgejo.Client
+	// Legacy fields for backward compatibility with mergequeue/scheduler
+	baseURL string
+	token   string
 }
 
 func NewForgejoAdapter(baseURL, token string) *ForgejoAdapter {
 	return &ForgejoAdapter{
-		Client:  &http.Client{Timeout: 30 * time.Second},
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Token:   token,
+		client:  forgejo.NewClient(baseURL, token),
+		baseURL: strings.TrimRight(baseURL, "/"),
+		token:   token,
 	}
 }
 
-// doRequest is a shared helper that handles auth, request construction, and error handling.
+// NewForgejoAdapterFromClient creates an adapter from an existing client.
+func NewForgejoAdapterFromClient(client *forgejo.Client) *ForgejoAdapter {
+	return &ForgejoAdapter{client: client}
+}
+
+// Client returns the underlying forgejo client.
+func (a *ForgejoAdapter) Client() *forgejo.Client {
+	return a.client
+}
+
+// BaseURL returns the Forgejo base URL (for backward compatibility).
+func (a *ForgejoAdapter) BaseURL() string {
+	return a.baseURL
+}
+
+// Token returns the API token (for backward compatibility).
+func (a *ForgejoAdapter) Token() string {
+	return a.token
+}
+
+// HTTPClient returns an http.Client for direct use (for backward compatibility).
+func (a *ForgejoAdapter) HTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second}
+}
+
+// doRequest is a shared helper that delegates to the client.
+// Kept for backward compatibility with tools that still use raw API paths.
 func (a *ForgejoAdapter) doRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
-	var reqBody io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return "", fmt.Errorf("marshal body: %w", err)
-		}
-		reqBody = bytes.NewReader(data)
+	return a.client.RawRequest(ctx, method, apiPath, body)
+}
+
+// === NEW TOOLS ===
+
+// forgejoListBranchesTool lists branches in a repository.
+type forgejoListBranchesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListBranchesTool(adapter *ForgejoAdapter) *forgejoListBranchesTool {
+	return &forgejoListBranchesTool{adapter: adapter}
+}
+
+func (t *forgejoListBranchesTool) Name() string { return "forgejo_list_branches" }
+
+func (t *forgejoListBranchesTool) Description() string {
+	return "List all branches in a repository. Returns branch names, commit SHAs, and protection status."
+}
+
+func (t *forgejoListBranchesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListBranchesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	fullURL := a.BaseURL + apiPath
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
+	branches, err := t.adapter.Client().ListBranches(ctx, params.Repository)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "token "+a.Token)
+	result, _ := json.MarshalIndent(branches, "", "  ")
+	return string(result), nil
+}
 
-	resp, err := a.Client.Do(req)
+// forgejoDeleteBranchTool deletes a branch.
+type forgejoDeleteBranchTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewDeleteBranchTool(adapter *ForgejoAdapter) *forgejoDeleteBranchTool {
+	return &forgejoDeleteBranchTool{adapter: adapter}
+}
+
+func (t *forgejoDeleteBranchTool) Name() string { return "forgejo_delete_branch" }
+
+func (t *forgejoDeleteBranchTool) Description() string {
+	return "Delete a branch from a repository. Use after merging a PR to clean up feature branches."
+}
+
+func (t *forgejoDeleteBranchTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"branch": map[string]interface{}{
+				"type":        "string",
+				"description": "Branch name to delete",
+			},
+		},
+		"required": []string{"repository", "branch"},
+	}
+}
+
+func (t *forgejoDeleteBranchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		Branch     string `json:"branch"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if err := t.adapter.Client().DeleteBranch(ctx, params.Repository, params.Branch); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Branch '%s' deleted", params.Branch), nil
+}
+
+// forgejoListHooksTool lists webhooks.
+type forgejoListHooksTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListHooksTool(adapter *ForgejoAdapter) *forgejoListHooksTool {
+	return &forgejoListHooksTool{adapter: adapter}
+}
+
+func (t *forgejoListHooksTool) Name() string { return "forgejo_list_hooks" }
+
+func (t *forgejoListHooksTool) Description() string {
+	return "List webhooks for a repository. Returns hook IDs, types, URLs, and active status."
+}
+
+func (t *forgejoListHooksTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListHooksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	hooks, err := t.adapter.Client().ListWebhooks(ctx, params.Repository)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	result, _ := json.MarshalIndent(hooks, "", "  ")
+	return string(result), nil
+}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+// forgejoCreateHookTool creates a webhook.
+type forgejoCreateHookTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewCreateHookTool(adapter *ForgejoAdapter) *forgejoCreateHookTool {
+	return &forgejoCreateHookTool{adapter: adapter}
+}
+
+func (t *forgejoCreateHookTool) Name() string { return "forgejo_create_hook" }
+
+func (t *forgejoCreateHookTool) Description() string {
+	return "Create a webhook for a repository. Events default to push if not specified."
+}
+
+func (t *forgejoCreateHookTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "Webhook URL",
+			},
+			"secret": map[string]interface{}{
+				"type":        "string",
+				"description": "Webhook secret (optional)",
+			},
+			"events": map[string]interface{}{
+				"type":        "array",
+				"items":       "string",
+				"description": "Event types (e.g., push, pull_request)",
+			},
+		},
+		"required": []string{"repository", "url"},
+	}
+}
+
+func (t *forgejoCreateHookTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string   `json:"repository"`
+		URL        string   `json:"url"`
+		Secret     string   `json:"secret"`
+		Events     []string `json:"events"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if len(params.Events) == 0 {
+		params.Events = []string{"push"}
+	}
+
+	hook, err := t.adapter.Client().CreateWebhook(ctx, params.Repository, "forgejo", params.URL, params.Secret, params.Events)
 	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+		return "", err
 	}
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	return fmt.Sprintf("Webhook #%d created: %s", hook.ID, params.URL), nil
+}
+
+// forgejoDeleteHookTool deletes a webhook.
+type forgejoDeleteHookTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewDeleteHookTool(adapter *ForgejoAdapter) *forgejoDeleteHookTool {
+	return &forgejoDeleteHookTool{adapter: adapter}
+}
+
+func (t *forgejoDeleteHookTool) Name() string { return "forgejo_delete_hook" }
+
+func (t *forgejoDeleteHookTool) Description() string {
+	return "Delete a webhook from a repository."
+}
+
+func (t *forgejoDeleteHookTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"hook_id": map[string]interface{}{
+				"type":        "integer",
+				"description": "Webhook ID",
+			},
+		},
+		"required": []string{"repository", "hook_id"},
 	}
-	return string(respBody), nil
+}
+
+func (t *forgejoDeleteHookTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		HookID     int    `json:"hook_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if err := t.adapter.Client().DeleteWebhook(ctx, params.Repository, params.HookID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Webhook #%d deleted", params.HookID), nil
+}
+
+// forgejoListFilesTool lists files in a directory.
+type forgejoListFilesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListFilesTool(adapter *ForgejoAdapter) *forgejoListFilesTool {
+	return &forgejoListFilesTool{adapter: adapter}
+}
+
+func (t *forgejoListFilesTool) Name() string { return "forgejo_list_files" }
+
+func (t *forgejoListFilesTool) Description() string {
+	return "List files in a repository directory. Returns file/directory names, types, and paths."
+}
+
+func (t *forgejoListFilesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory path (default: root)",
+			},
+			"ref": map[string]interface{}{
+				"type":        "string",
+				"description": "Branch/commit ref (default: main)",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListFilesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		Path       string `json:"path"`
+		Ref        string `json:"ref"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	files, err := t.adapter.Client().ListDir(ctx, params.Repository, params.Ref, params.Path)
+	if err != nil {
+		return "", err
+	}
+	result, _ := json.MarshalIndent(files, "", "  ")
+	return string(result), nil
+}
+
+// forgejoPRFilesTool lists files changed in a PR.
+type forgejoPRFilesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewPRFilesTool(adapter *ForgejoAdapter) *forgejoPRFilesTool {
+	return &forgejoPRFilesTool{adapter: adapter}
+}
+
+func (t *forgejoPRFilesTool) Name() string { return "forgejo_pr_files" }
+
+func (t *forgejoPRFilesTool) Description() string {
+	return "List files changed in a pull request. Returns filenames, status (added/modified/removed), and +/- counts."
+}
+
+func (t *forgejoPRFilesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"pr_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "Pull request number",
+			},
+		},
+		"required": []string{"repository", "pr_number"},
+	}
+}
+
+func (t *forgejoPRFilesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		PRNumber   int    `json:"pr_number"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	files, err := t.adapter.Client().GetPRFiles(ctx, params.Repository, params.PRNumber)
+	if err != nil {
+		return "", err
+	}
+	result, _ := json.MarshalIndent(files, "", "  ")
+	return string(result), nil
+}
+
+// forgejoListCollabsTool lists collaborators.
+type forgejoListCollabsTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListCollabsTool(adapter *ForgejoAdapter) *forgejoListCollabsTool {
+	return &forgejoListCollabsTool{adapter: adapter}
+}
+
+func (t *forgejoListCollabsTool) Name() string { return "forgejo_list_collabs" }
+
+func (t *forgejoListCollabsTool) Description() string {
+	return "List collaborators for a repository."
+}
+
+func (t *forgejoListCollabsTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListCollabsTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	collabs, err := t.adapter.Client().ListCollaborators(ctx, params.Repository)
+	if err != nil {
+		return "", err
+	}
+	result, _ := json.MarshalIndent(collabs, "", "  ")
+	return string(result), nil
+}
+
+// forgejoGetVersionTool returns server version.
+type forgejoGetVersionTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewGetVersionTool(adapter *ForgejoAdapter) *forgejoGetVersionTool {
+	return &forgejoGetVersionTool{adapter: adapter}
+}
+
+func (t *forgejoGetVersionTool) Name() string { return "forgejo_version" }
+
+func (t *forgejoGetVersionTool) Description() string {
+	return "Get the Forgejo server version."
+}
+
+func (t *forgejoGetVersionTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (t *forgejoGetVersionTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	version, err := t.adapter.Client().GetVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	return version.Version, nil
+}
+
+// forgejoGetUserTool returns current user.
+type forgejoGetUserTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewGetUserTool(adapter *ForgejoAdapter) *forgejoGetUserTool {
+	return &forgejoGetUserTool{adapter: adapter}
+}
+
+func (t *forgejoGetUserTool) Name() string { return "forgejo_user" }
+
+func (t *forgejoGetUserTool) Description() string {
+	return "Get the currently authenticated user."
+}
+
+func (t *forgejoGetUserTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (t *forgejoGetUserTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	user, err := t.adapter.Client().GetCurrentUser(ctx)
+	if err != nil {
+		return "", err
+	}
+	result, _ := json.MarshalIndent(user, "", "  ")
+	return string(result), nil
+}
+
+// forgejoCreateTokenTool creates an access token.
+type forgejoCreateTokenTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewCreateTokenTool(adapter *ForgejoAdapter) *forgejoCreateTokenTool {
+	return &forgejoCreateTokenTool{adapter: adapter}
+}
+
+func (t *forgejoCreateTokenTool) Name() string { return "forgejo_create_token" }
+
+func (t *forgejoCreateTokenTool) Description() string {
+	return "Create a new access token for a user."
+}
+
+func (t *forgejoCreateTokenTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"username": map[string]interface{}{
+				"type":        "string",
+				"description": "Username to create token for",
+			},
+			"token_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Name for the new token",
+			},
+		},
+		"required": []string{"username", "token_name"},
+	}
+}
+
+func (t *forgejoCreateTokenTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Username  string `json:"username"`
+		TokenName string `json:"token_name"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	token, err := t.adapter.Client().CreateToken(ctx, params.Username, params.TokenName)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Token created: %s", token.Token), nil
+}
+
+// forgejoListPRsTool lists pull requests.
+type forgejoListPRsTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListPRsTool(adapter *ForgejoAdapter) *forgejoListPRsTool {
+	return &forgejoListPRsTool{adapter: adapter}
+}
+
+func (t *forgejoListPRsTool) Name() string { return "forgejo_list_prs" }
+
+func (t *forgejoListPRsTool) Description() string {
+	return "List pull requests in a repository. Returns PR numbers, titles, states, and branches."
+}
+
+func (t *forgejoListPRsTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"state": map[string]interface{}{
+				"type":        "string",
+				"description": "PR state: open, closed, all",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListPRsTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		State      string `json:"state"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	prs, err := t.adapter.Client().ListPRs(ctx, params.Repository, params.State)
+	if err != nil {
+		return "", err
+	}
+	result, _ := json.MarshalIndent(prs, "", "  ")
+	return string(result), nil
 }

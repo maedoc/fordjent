@@ -31,9 +31,9 @@ type Scheduler struct {
 // New creates a Scheduler from a ForgejoAdapter.
 func New(adapter *tool.ForgejoAdapter) *Scheduler {
 	return &Scheduler{
-		BaseURL: adapter.BaseURL,
-		Token:   adapter.Token,
-		HTTP:    adapter.Client,
+		BaseURL: adapter.BaseURL(),
+		Token:   adapter.Token(),
+		HTTP:    adapter.HTTPClient(),
 	}
 }
 

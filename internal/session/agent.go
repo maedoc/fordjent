@@ -518,6 +518,16 @@ func buildRoleRegistry(
 	registry.Register(tool.NewBashTool(sessionInfo))
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 
+	// New common tools (branches, PRs, files, hooks, etc.)
+	registry.Register(tool.NewListBranchesTool(forgejoAdapter))
+	registry.Register(tool.NewListPRsTool(forgejoAdapter))
+	registry.Register(tool.NewPRFilesTool(forgejoAdapter))
+	registry.Register(tool.NewListFilesTool(forgejoAdapter))
+	registry.Register(tool.NewListHooksTool(forgejoAdapter))
+	registry.Register(tool.NewListCollabsTool(forgejoAdapter))
+	registry.Register(tool.NewGetVersionTool(forgejoAdapter))
+	registry.Register(tool.NewGetUserTool(forgejoAdapter))
+
 	// Role-specific tools
 	switch role {
 	case "pm":
@@ -534,6 +544,11 @@ func buildRoleRegistry(
 		registry.Register(tool.NewGitTool(sessionInfo))
 		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
 		registry.Register(tool.NewMergePRTool(forgejoAdapter))
+		// Admin tools for implementer role
+		registry.Register(tool.NewDeleteBranchTool(forgejoAdapter))
+		registry.Register(tool.NewCreateHookTool(forgejoAdapter))
+		registry.Register(tool.NewDeleteHookTool(forgejoAdapter))
+		registry.Register(tool.NewCreateTokenTool(forgejoAdapter))
 	}
 
 	return registry

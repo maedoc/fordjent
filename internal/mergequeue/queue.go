@@ -28,9 +28,9 @@ type Client struct {
 // NewClient creates a merge-queue client from a ForgejoAdapter.
 func NewClient(adapter *tool.ForgejoAdapter) *Client {
 	return &Client{
-		BaseURL: adapter.BaseURL,
-		Token:   adapter.Token,
-		HTTP:    adapter.Client,
+		BaseURL: adapter.BaseURL(),
+		Token:   adapter.Token(),
+		HTTP:    adapter.HTTPClient(),
 	}
 }
 
