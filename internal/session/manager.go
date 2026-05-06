@@ -195,6 +195,9 @@ func (m *Manager) Run(ctx context.Context) {
 	reaperTicker := time.NewTicker(1 * time.Minute)
 	defer reaperTicker.Stop()
 
+	cleanupTicker := time.NewTicker(1 * time.Hour)
+	defer cleanupTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -209,6 +212,9 @@ func (m *Manager) Run(ctx context.Context) {
 
 		case <-reaperTicker.C:
 			m.reapIdle(ctx)
+
+		case <-cleanupTicker.C:
+			m.cleanupOldWorkDirs(ctx)
 		}
 	}
 }
@@ -554,6 +560,38 @@ func (m *Manager) reapIdle(ctx context.Context) {
 			delete(m.sessions, key)
 			m.store.Delete(key)
 			metrics.SetActiveSessions(int64(len(m.sessions)))
+		}
+	}
+}
+
+// cleanupOldWorkDirs removes work directories for sessions that have been
+// completed or failed for more than 7 days, freeing disk space.
+func (m *Manager) cleanupOldWorkDirs(ctx context.Context) {
+	if m.cfg.Agent.WorkDir == "" {
+		return
+	}
+	const maxAge = 7 * 24 * time.Hour
+
+	records, err := m.store.ListAll()
+	if err != nil {
+		return
+	}
+	for _, rec := range records {
+		// Only clean up old completed/failed sessions
+		state, _ := m.lc.GetState(ctx, rec.SessionKey)
+		if state != lifecycle.StateCompleted && !strings.HasPrefix(state, "failed") {
+			continue
+		}
+		if time.Since(rec.LastActive) < maxAge {
+			continue
+		}
+		if _, err := os.Stat(rec.WorkDir); err != nil {
+			continue // already gone
+		}
+		if err := os.RemoveAll(rec.WorkDir); err != nil {
+			slog.Warn("failed to clean up old workdir", "error", err, "dir", rec.WorkDir)
+		} else {
+			slog.Info("cleaned up old workdir", "session_key", rec.SessionKey, "dir", rec.WorkDir)
 		}
 	}
 }

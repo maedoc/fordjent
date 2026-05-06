@@ -45,6 +45,8 @@ type AgentConfig struct {
 	IdleTimeout             time.Duration `yaml:"idle_timeout"`
 	WorkDir                 string        `yaml:"workdir"`
 	MaxTurns                int           `yaml:"max_turns"`
+	MaxTurnsPM              int           `yaml:"max_turns_pm"`
+	MaxTurnsImplementer     int           `yaml:"max_turns_implementer"`
 	CommitPrefix            string        `yaml:"commit_prefix"`
 	ContextWindow           int           `yaml:"context_window"`
 	CompactionThreshold     float64       `yaml:"compaction_threshold"`
@@ -128,6 +130,8 @@ func Load(path string) (*Config, error) {
 			IdleTimeout:             4 * time.Hour,
 			WorkDir:                 "/tmp/fordjent/work",
 			MaxTurns:                25,
+			MaxTurnsPM:              15,
+			MaxTurnsImplementer:     50,
 			CommitPrefix:            "[agent-automation]",
 			ContextWindow:           128000,
 			CompactionThreshold:     0.80,

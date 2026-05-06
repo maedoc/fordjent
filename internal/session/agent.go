@@ -138,7 +138,8 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Update reaction to ⏳
 	a.addReaction(ctx, evt, "hourglass_flowing_sand")
 
-	for turn := 0; turn < a.cfg.Agent.MaxTurns; turn++ {
+	maxTurns := a.effectiveMaxTurns()
+	for turn := 0; turn < maxTurns; turn++ {
 		slog.Info("LLM turn begin",
 			"session_key", a.sess.Key,
 			"turn", turn,
@@ -233,7 +234,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 
 	slog.Warn("max turns reached", "session_key", a.sess.Key)
 	a.addReaction(ctx, evt, "warning")
-	return fmt.Errorf("max turns (%d) reached: %w", a.cfg.Agent.MaxTurns, agent.ErrMaxTurnsReached)
+	return fmt.Errorf("max turns (%d) reached: %w", maxTurns, agent.ErrMaxTurnsReached)
 }
 
 func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string) {
@@ -247,6 +248,21 @@ func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string)
 	if err := a.forgejo.AddReaction(ctx, evt.Repository, evt.IssueNumber, commentID, emoji); err != nil {
 		slog.Debug("failed to add reaction", "emoji", emoji, "error", err)
 	}
+}
+
+// effectiveMaxTurns returns the turn limit based on role.
+func (a *Agent) effectiveMaxTurns() int {
+	switch a.role {
+	case "pm":
+		if a.cfg.Agent.MaxTurnsPM > 0 {
+			return a.cfg.Agent.MaxTurnsPM
+		}
+	case "implementer":
+		if a.cfg.Agent.MaxTurnsImplementer > 0 {
+			return a.cfg.Agent.MaxTurnsImplementer
+		}
+	}
+	return a.cfg.Agent.MaxTurns
 }
 
 func (a *Agent) buildSystemPrompt(evt *event.Event, analysisMode bool, role string) string {

@@ -18,6 +18,8 @@ agent:
   idle_timeout: "4h"
   workdir: "/var/lib/fordjent/work"
   max_turns: 75
+  max_turns_pm: 15
+  max_turns_implementer: 50
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
