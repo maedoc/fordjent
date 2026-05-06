@@ -689,11 +689,16 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		return "", fmt.Errorf("get PR details: %w", err)
 	}
 	var pr struct {
-		Mergeable    bool `json:"mergeable"`
-		HasConflicts bool `json:"has_conflits"`
+		Merged       bool   `json:"merged"`
+		State        string `json:"state"`
+		Mergeable    bool   `json:"mergeable"`
+		HasConflicts bool   `json:"has_conflits"`
 	}
 	_ = json.Unmarshal([]byte(result), &pr)
 
+	if pr.Merged || pr.State == "closed" {
+		return fmt.Sprintf("PR #%d is already merged/closed — no action needed.", params.PRNumber), nil
+	}
 	if pr.HasConflicts {
 		return "", fmt.Errorf("PR #%d has conflicts — please resolve before merging", params.PRNumber)
 	}
@@ -727,11 +732,30 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 
 	mergePath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber), "merge")
-	_, err = t.adapter.doRequest(ctx, http.MethodPost, mergePath, map[string]string{"Do": params.Style})
-	if err != nil {
-		return "", fmt.Errorf("merge PR #%d: %w", params.PRNumber, err)
+
+	// Retry merge on transient 405 (Forgejo may need time to process refs after push)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			slog.Info("merge_pr: retrying after 405", "attempt", attempt+1, "pr", params.PRNumber)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt) * 3 * time.Second):
+			}
+		}
+		_, err = t.adapter.doRequest(ctx, http.MethodPost, mergePath, map[string]string{"Do": params.Style})
+		if err == nil {
+			return fmt.Sprintf("PR #%d merged successfully using '%s'", params.PRNumber, params.Style), nil
+		}
+		lastErr = err
+		var apiErr *sentinel.ErrAPIClient
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == 405 || apiErr.StatusCode == 409) {
+			continue // 405 = try again later, 409 = conflict (may resolve)
+		}
+		break // other errors are not retryable
 	}
-	return fmt.Sprintf("PR #%d merged successfully using '%s'", params.PRNumber, params.Style), nil
+	return "", fmt.Errorf("merge PR #%d after 3 attempts: %w", params.PRNumber, lastErr)
 }
 
 // ForgejoAdapter holds shared Forgejo client for API tools.
