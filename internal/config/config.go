@@ -180,20 +180,96 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	var errs []string
+
+	// Forgejo
 	if c.Forgejo.URL == "" {
-		return fmt.Errorf("forgejo.url is required")
-	}
-	if !strings.HasPrefix(c.Forgejo.URL, "http://") && !strings.HasPrefix(c.Forgejo.URL, "https://") {
-		return fmt.Errorf("forgejo.url must start with http:// or https://")
+		errs = append(errs, "forgejo.url is required")
+	} else if !strings.HasPrefix(c.Forgejo.URL, "http://") && !strings.HasPrefix(c.Forgejo.URL, "https://") {
+		errs = append(errs, "forgejo.url must start with http:// or https://")
 	}
 	if c.Forgejo.Token == "" {
-		return fmt.Errorf("forgejo.token is required")
+		errs = append(errs, "forgejo.token is required")
 	}
+
+	// Webhook
 	if c.Webhook.Secret == "" || c.Webhook.Secret == "change-me-in-production" {
-		return fmt.Errorf("webhook.secret is required and must not be the default value")
+		errs = append(errs, "webhook.secret is required and must not be the default value")
 	}
+
+	// Providers
 	if len(c.Providers) == 0 {
-		return fmt.Errorf("at least one provider is required")
+		errs = append(errs, "at least one provider is required")
+	}
+	for i, p := range c.Providers {
+		if p.Name == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d].name is required", i))
+		}
+		if p.APIBase == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d].api_base is required", i))
+		} else if !strings.HasPrefix(p.APIBase, "http://") && !strings.HasPrefix(p.APIBase, "https://") {
+			errs = append(errs, fmt.Sprintf("providers[%d].api_base must start with http:// or https://", i))
+		}
+		if p.Model == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d].model is required", i))
+		}
+		if p.MaxTokens <= 0 {
+			errs = append(errs, fmt.Sprintf("providers[%d].max_tokens must be > 0", i))
+		}
+		if p.MaxConcurrentLLMCalls <= 0 {
+			c.Providers[i].MaxConcurrentLLMCalls = 3 // default
+		}
+	}
+
+	// Agent
+	if c.Agent.WorkDir == "" {
+		errs = append(errs, "agent.workdir is required")
+	}
+	if c.Agent.MaxSessions <= 0 {
+		errs = append(errs, "agent.max_sessions must be > 0")
+	}
+	if c.Agent.MaxTurns <= 0 {
+		errs = append(errs, "agent.max_turns must be > 0")
+	}
+	if c.Agent.ContextWindow <= 0 {
+		errs = append(errs, "agent.context_window must be > 0")
+	}
+	if c.Agent.IdleTimeout <= 0 {
+		errs = append(errs, "agent.idle_timeout must be > 0")
+	}
+	if c.Agent.SessionTimeout <= 0 {
+		errs = append(errs, "agent.session_timeout must be > 0")
+	}
+	if c.Agent.CompactionThreshold <= 0 || c.Agent.CompactionThreshold > 1 {
+		errs = append(errs, "agent.compaction_threshold must be between 0 and 1")
+	}
+
+	// Budget
+	if c.Budget.Enabled {
+		if c.Budget.MaxSessionCost <= 0 {
+			errs = append(errs, "budget.max_session_cost must be > 0 when budget is enabled")
+		}
+		if c.Budget.MaxMonthlyCost <= 0 {
+			errs = append(errs, "budget.max_monthly_cost must be > 0 when budget is enabled")
+		}
+	}
+
+	// Fast provider reference
+	if c.Agent.FastProvider != "" {
+		found := false
+		for _, p := range c.Providers {
+			if p.Name == c.Agent.FastProvider {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("agent.fast_provider %q not found in providers list", c.Agent.FastProvider))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
 }
