@@ -323,15 +323,16 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		}
 	}
 
-	// Auto-elevate bot permissions so subsequent label/branch/PR operations succeed
+	// Auto-elevate bot permissions so subsequent label/branch/PR operations succeed.
+	// NOTE: The bot cannot add itself as a collaborator — this requires owner action.
+	// We log a one-time warning with instructions instead.
 	if m.cfg.Agent.EnableAutoCollaborator {
-		collabCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		if err := m.forgejoClient.AddCollaborator(collabCtx, evt.Repository, "fordjent-bot", "admin"); err != nil {
-			slog.Warn("failed to auto-elevate bot as collaborator", "repo", evt.Repository, "error", err)
-		} else {
-			slog.Info("auto-elevated bot to admin collaborator", "repo", evt.Repository, "user", "fordjent-bot")
+		_, loaded := m.labelBoot.LoadOrStore("collab-warn-"+evt.Repository, true)
+		if !loaded {
+			slog.Warn("bot may lack write access — add fordjent-bot as admin collaborator manually",
+				"repo", evt.Repository,
+				"instruction", "Forgejo Admin: Settings → Collaborators → Add fordjent-bot with Admin permission")
 		}
-		cancel()
 	}
 
 	sessCtx, cancel := context.WithCancel(context.Background())

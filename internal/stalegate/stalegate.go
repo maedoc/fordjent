@@ -29,7 +29,13 @@ func IsStale(repoDir, base string) (bool, string, error) {
 
 	// Fetch the remote ref.
 	if out, err := exec.Command("git", "-C", repoDir, "fetch", "origin", base).CombinedOutput(); err != nil {
-		slog.Warn("stalegate: git fetch failed", "error", err, "output", strings.TrimSpace(string(out)), "repoDir", repoDir)
+		outStr := strings.TrimSpace(string(out))
+		// If the remote has no base branch yet (empty repo), it's not "stale".
+		if strings.Contains(outStr, "couldn't find remote ref") {
+			slog.Info("stalegate: remote has no base branch yet (empty repo), treating as not stale", "repoDir", repoDir, "base", base)
+			return false, "", nil
+		}
+		slog.Warn("stalegate: git fetch failed", "error", err, "output", outStr, "repoDir", repoDir)
 	}
 
 	// Retry merge-base after fetch.
