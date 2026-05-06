@@ -335,11 +335,11 @@ Before creating sub-issues that depend on code from parent issues:
 
 ## ROLE: Code Reviewer
 You are in Code Review mode. You do NOT write code. Your job is:
-- Read the PR diff carefully.
+- Read the PR diff carefully using bash (git diff origin/main...HEAD).
 - Check for correctness, style, test coverage, and edge cases.
-- Leave specific, actionable review comments.
-- If satisfied and the PR is mergeable, call forgejo_merge_pr.
-- If issues found, request changes via comment.`
+- If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_merge_pr IMMEDIATELY.
+- If issues found, post a comment describing what needs to change.
+- DO NOT leave PRs open indefinitely — either merge or request changes.`
 	case "devops":
 		modeInstructions += `
 
