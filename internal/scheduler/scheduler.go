@@ -52,8 +52,8 @@ type Label struct {
 }
 
 // OnPRMerged is called whenever a PR is merged. It scans open issues for
-// any that declared a dependency on the merged PR number and removes their
-// 'blocked' label, adding a 'ready' label instead. It also posts a comment.
+// any whose declared dependencies are all closed (satisfied), removes their
+// 'blocked' label, and adds a 'ready' label. It also posts a comment.
 func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber int) error {
 	// 1. List all open issues in the repo
 	issues, err := s.listOpenIssues(ctx, repo)
@@ -61,7 +61,6 @@ func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber 
 		return fmt.Errorf("list open issues: %w", err)
 	}
 
-	mergedDep := fmt.Sprintf("#%d", mergedPRNumber)
 	var unblocked []int
 
 	for _, issue := range issues {
@@ -70,30 +69,16 @@ func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber 
 			continue
 		}
 
-		// Check if this issue depended on the merged PR
-		dependsOnMerged := false
-		for _, d := range deps {
-			if d == mergedPRNumber {
-				dependsOnMerged = true
-				break
-			}
-		}
-		if !dependsOnMerged {
-			continue
-		}
-
-		// Check if ALL declared dependencies are satisfied.
-		// For now, a "satisfied" dependency means the PR is merged.
-		// In a future iteration we could track PR state in a local table.
+		// Check if ALL declared dependencies are closed (satisfied).
 		allSatisfied := true
 		for _, depNum := range deps {
-			isMerged, err := s.isPRMerged(ctx, repo, depNum)
+			isClosed, err := s.isIssueClosed(ctx, repo, depNum)
 			if err != nil {
-				slog.Warn("scheduler: failed to check PR state, assuming not merged", "error", err, "pr", depNum)
+				slog.Warn("scheduler: failed to check issue state, assuming not closed", "error", err, "issue", depNum)
 				allSatisfied = false
 				break
 			}
-			if !isMerged {
+			if !isClosed {
 				allSatisfied = false
 				break
 			}
@@ -117,7 +102,7 @@ func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber 
 		}
 
 		// Post a comment
-		comment := fmt.Sprintf("Dependency %s is now merged. This issue is unblocked and ready to work on!", mergedDep)
+		comment := "All dependencies are now resolved. This issue is unblocked and ready to work on!"
 		if err := s.postComment(ctx, repo, issue.Number, comment); err != nil {
 			slog.Warn("scheduler: failed to post unblock comment", "error", err, "issue", issue.Number)
 		}
@@ -141,18 +126,25 @@ func (s *Scheduler) hasLabel(labels []Label, name string) bool {
 	return false
 }
 
-// parseDependsOn extracts PR/issue numbers from a body string.
+// parseDependsOn extracts issue/PR numbers from lines containing "depends on".
 func parseDependsOn(body string) []int {
-	if !dependsOnKeywordRegex.MatchString(body) {
-		return nil
-	}
-	matches := dependsOnRegex.FindAllStringSubmatch(body, -1)
+	lines := strings.Split(body, "\n")
+	seen := make(map[int]struct{})
 	var nums []int
-	for _, m := range matches {
-		if len(m) >= 2 {
-			n, err := strconv.Atoi(m[1])
-			if err == nil {
-				nums = append(nums, n)
+	for _, line := range lines {
+		if !dependsOnKeywordRegex.MatchString(line) {
+			continue
+		}
+		matches := dependsOnRegex.FindAllStringSubmatch(line, -1)
+		for _, m := range matches {
+			if len(m) >= 2 {
+				n, err := strconv.Atoi(m[1])
+				if err == nil {
+					if _, ok := seen[n]; !ok {
+						seen[n] = struct{}{}
+						nums = append(nums, n)
+					}
+				}
 			}
 		}
 	}
@@ -174,22 +166,21 @@ func (s *Scheduler) listOpenIssues(ctx context.Context, repo string) ([]Issue, e
 	return issues, nil
 }
 
-// isPRMerged checks whether a PR is merged by querying its state.
-func (s *Scheduler) isPRMerged(ctx context.Context, repo string, number int) (bool, error) {
+// isIssueClosed checks whether an issue is closed by querying its state.
+func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) (bool, error) {
 	escaped := escapeRepoPath(repo)
-	apiPath := fmt.Sprintf("/api/v1/repos/%s/pulls/%d", escaped, number)
+	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, number)
 	body, err := s.doGet(ctx, apiPath)
 	if err != nil {
 		return false, err
 	}
-	var pr struct {
-		State  string `json:"state"`
-		Merged bool   `json:"merged"`
+	var issue struct {
+		State string `json:"state"`
 	}
-	if err := json.Unmarshal([]byte(body), &pr); err != nil {
-		return false, fmt.Errorf("unmarshal PR: %w", err)
+	if err := json.Unmarshal([]byte(body), &issue); err != nil {
+		return false, fmt.Errorf("unmarshal issue: %w", err)
 	}
-	return pr.Merged, nil
+	return issue.State == "closed", nil
 }
 
 // removeLabel removes a label from an issue.

@@ -44,10 +44,9 @@ func TestOnPRMerged_UnblocksDependentIssue(t *testing.T) {
 					"labels": []map[string]interface{}{},
 				},
 			})
-		case strings.HasSuffix(r.URL.Path, "/pulls/10"):
+		case strings.HasSuffix(r.URL.Path, "/issues/10"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"state":  "closed",
-				"merged": true,
+				"state": "closed",
 			})
 		case r.URL.Path == "/api/v1/repos/fjadmin/gogit/issues/15/labels/blocked":
 			w.WriteHeader(http.StatusOK)
@@ -104,7 +103,7 @@ func TestParseDependsOn(t *testing.T) {
 		{"Depends on: #15", []int{15}},
 		{"depends on: #15, #16", []int{15, 16}},
 		{"DEPENDS ON #15, #16, #17", []int{15, 16, 17}},
-		{"Depends on #15 and also check #16", []int{15, 16}},
+		{"Depends on: #15\nSee also #16", []int{15}},
 		{"No deps here.", nil},
 	}
 
