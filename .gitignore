@@ -2,3 +2,4 @@
 .ralph/
 .fj
 .gitignore
+__pycache__/
