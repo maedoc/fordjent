@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -426,7 +427,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 				break
 			}
 			mqErr = err
-			if strings.Contains(err.Error(), "bad revision") {
+			if errors.Is(err, sentinel.ErrBadRevision) || sentinel.IsRetryable(err) {
 				delay := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
 				select {
 				case <-ctx.Done():
@@ -482,7 +483,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 		slog.Warn("create_pr: API call failed", "attempt", attempt+1, "error", err, "head", params.Head)
 		lastErr = err
-		if strings.Contains(err.Error(), "bad revision") || strings.Contains(err.Error(), "500") {
+		if errors.Is(err, sentinel.ErrBadRevision) || sentinel.IsRetryable(err) {
 			delay := time.Duration(1<<attempt) * time.Second
 			select {
 			case <-ctx.Done():

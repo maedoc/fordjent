@@ -7,25 +7,24 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/sentinel"
 )
 
 // RetryPolicy defines when and how to retry LLM requests.
 type RetryPolicy struct {
-	MaxRetries    int
-	BaseDelay     time.Duration
-	MaxDelay      time.Duration
-	RetryableErrs []string // Substrings that signal a retryable error
+	MaxRetries int
+	BaseDelay  time.Duration
+	MaxDelay   time.Duration
 }
 
 // DefaultRetryPolicy returns a sensible default retry policy.
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
-		MaxRetries:    3,
-		BaseDelay:     2 * time.Second,
-		MaxDelay:      30 * time.Second,
-		RetryableErrs: []string{"context deadline exceeded", "connection refused", "timeout", "overloaded", "rate limit", "temporary"},
+		MaxRetries: 3,
+		BaseDelay:  2 * time.Second,
+		MaxDelay:   30 * time.Second,
 	}
 }
 
@@ -33,6 +32,11 @@ func DefaultRetryPolicy() RetryPolicy {
 func (r RetryPolicy) IsRetryable(err error, statusCode int) bool {
 	if err == nil {
 		return false
+	}
+
+	// Check typed sentinel errors first
+	if sentinel.IsRetryable(err) {
+		return true
 	}
 
 	// Explicit HTTP status codes
@@ -48,12 +52,11 @@ func (r RetryPolicy) IsRetryable(err error, statusCode int) bool {
 		return false
 	}
 
-	errStr := strings.ToLower(err.Error())
-	for _, substr := range r.RetryableErrs {
-		if strings.Contains(errStr, substr) {
-			return true
-		}
+	// Context deadline / timeout errors are retryable
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
+
 	return false
 }
 

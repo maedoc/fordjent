@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/sentinel"
 )
 
 // Client is a Forgejo API client.
@@ -154,7 +157,11 @@ func (c *Client) doRequest(ctx context.Context, method, apiPath string, body int
 		return "", fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		respStr := string(respBody)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return "", &sentinel.ErrAPIClient{StatusCode: resp.StatusCode, Body: respStr}
+		}
+		return "", &sentinel.ErrAPIServer{StatusCode: resp.StatusCode, Body: respStr}
 	}
 	return string(respBody), nil
 }
@@ -333,7 +340,8 @@ func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
 	for _, l := range labels {
 		if err := c.CreateLabel(ctx, repo, l.Name, l.Color); err != nil {
 			// Ignore conflict (label already exists)
-			if strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "already exists") {
+			var apiErr *sentinel.ErrAPIClient
+			if (errors.As(err, &apiErr) && apiErr.StatusCode == 422) || errors.Is(err, sentinel.ErrAlreadyExists) {
 				continue
 			}
 			return fmt.Errorf("create label %q: %w", l.Name, err)

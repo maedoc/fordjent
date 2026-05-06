@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+
+	"github.com/fordjent/fordjent/internal/sentinel"
 )
 
 // IsStale checks whether origin/<base> is an ancestor of HEAD.
@@ -33,7 +35,7 @@ func IsStale(repoDir, base string) (bool, string, error) {
 		// If the remote has no base branch yet (empty repo), it's not "stale".
 		if strings.Contains(outStr, "couldn't find remote ref") {
 			slog.Info("stalegate: remote has no base branch yet (empty repo), treating as not stale", "repoDir", repoDir, "base", base)
-			return false, "", nil
+			return false, "", sentinel.ErrNoRemoteRef
 		}
 		slog.Warn("stalegate: git fetch failed", "error", err, "output", outStr, "repoDir", repoDir)
 	}
