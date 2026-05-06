@@ -261,12 +261,30 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}()
 	}
 
-	// If code was pushed directly to main (e.g., scaffold), scan for unblocked issues
+	// If code was pushed directly to main (e.g., scaffold), close scaffold issues and unblock dependents
 	if evt.Type == event.Push {
 		if ref, ok := evt.Payload["ref"].(string); ok && ref == "refs/heads/main" {
 			go func() {
 				schedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
+
+				// Close any open scaffold issues now that main has content
+				issues, err := m.forgejoClient.ListOpenIssues(schedCtx, evt.Repository)
+				if err != nil {
+					slog.Warn("push handler: failed to list issues", "error", err, "repo", evt.Repository)
+				} else {
+					for _, issue := range issues {
+						if strings.HasPrefix(issue.Title, "[scaffold]") {
+							if err := m.forgejoClient.CloseIssue(schedCtx, evt.Repository, issue.Number); err != nil {
+								slog.Warn("push handler: failed to close scaffold issue", "error", err, "issue", issue.Number)
+							} else {
+								slog.Info("push handler: closed scaffold issue", "issue", issue.Number, "repo", evt.Repository)
+							}
+						}
+					}
+				}
+
+				// Now unblock dependent issues
 				if err := m.scheduler.CheckAndUnblock(schedCtx, evt.Repository); err != nil {
 					slog.Warn("scheduler: failed to unblock after push", "error", err, "repo", evt.Repository)
 				}
