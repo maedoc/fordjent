@@ -209,6 +209,22 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 		}
 	}
 	result["recent_transitions"] = recent
+
+	// Recent turn progress
+	turns := []map[string]interface{}{}
+	tRows, err := db.Query("SELECT session_key, turn, tool_calls, latency_ms, tokens_in, tokens_out, error, occurred_at FROM session_turns ORDER BY occurred_at DESC LIMIT 30")
+	if err == nil && tRows != nil {
+		defer tRows.Close()
+		for tRows.Next() {
+			var sk string; var turn, tc, lat, tin, tout int; var errMsg, ts string
+			_ = tRows.Scan(&sk, &turn, &tc, &lat, &tin, &tout, &errMsg, &ts)
+			entry := map[string]interface{}{"session_key": sk, "turn": turn, "tool_calls": tc, "latency_ms": lat, "tokens_in": tin, "tokens_out": tout, "timestamp": ts}
+			if errMsg != "" { entry["error"] = errMsg }
+			turns = append(turns, entry)
+		}
+	}
+	result["recent_turns"] = turns
+
 	return result, nil
 }
 

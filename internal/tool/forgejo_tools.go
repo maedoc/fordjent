@@ -378,6 +378,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 	if t.repoDir != "" {
 		stale, msg, err := stalegate.IsStale(t.repoDir, params.Base)
 		if err == nil && stale {
+			slog.Warn("create_pr: stale branch blocked", "branch", params.Head, "msg", msg)
 			return "Stale branch: " + msg, nil
 		}
 	}
@@ -399,6 +400,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 			}
 		}
 		if !found {
+			slog.Warn("create_pr: branch not found on remote", "branch", params.Head)
 			return "", fmt.Errorf("branch %q not found on remote after 5 retries — did you push?", params.Head)
 		}
 	}
@@ -412,6 +414,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 			if err == nil {
 				if blocked {
 					// Clean up dangling branch so the repo doesn't accumulate stale branches
+					slog.Warn("create_pr: merge queue blocked", "branch", params.Head, "msg", msg)
 					if t.repoDir != "" {
 						cmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "push", "--delete", "origin", params.Head)
 						if out, err := cmd.CombinedOutput(); err != nil {
@@ -474,8 +477,10 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 	for attempt := 0; attempt < 3; attempt++ {
 		result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
 		if err == nil {
+			slog.Info("create_pr: PR created successfully", "repo", params.Repository, "head", params.Head, "base", params.Base)
 			return fmt.Sprintf("Pull request created: %s", result), nil
 		}
+		slog.Warn("create_pr: API call failed", "attempt", attempt+1, "error", err, "head", params.Head)
 		lastErr = err
 		if strings.Contains(err.Error(), "bad revision") || strings.Contains(err.Error(), "500") {
 			delay := time.Duration(1<<attempt) * time.Second
