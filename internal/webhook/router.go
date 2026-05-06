@@ -19,6 +19,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/lifecycle"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/webui"
 	_ "modernc.org/sqlite"
@@ -34,6 +35,7 @@ type Router struct {
 	server    *http.Server
 	mu        sync.Mutex
 	shuttingDown bool
+	lc        *lifecycle.Lifecycle // optional: set post-construction for webhook delivery tracking
 }
 
 func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router {
@@ -54,6 +56,11 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.Handle("/admin/", webui.Handler(cfg))
 
 	return r
+}
+
+// SetLifecycle wires the lifecycle tracker for webhook delivery logging.
+func (r *Router) SetLifecycle(lc *lifecycle.Lifecycle) {
+	r.lc = lc
 }
 
 // SetShutdown marks the router as shutting down. New webhooks will receive 503.
@@ -398,6 +405,9 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 	evt, err := r.normalizeEvent(eventType, action, payload)
 	if err != nil {
 		r.logger.Warn("unhandled event type", "type", eventType, "action", action, "error", err)
+		if r.lc != nil {
+			r.lc.RecordDelivery(req.Context(), eventType, action, repoName, 0, "", "ignored", err)
+		}
 		w.WriteHeader(http.StatusOK) // Ack but ignore
 		fmt.Fprintln(w, "ignored")
 		return
@@ -406,6 +416,9 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 	metrics.IncEvents()
 	if r.cfg.Security.FilterAgentEvents && r.isAgentEvent(payload) {
 		r.logger.Info("filtered agent-originated event", "event_id", evt.ID)
+		if r.lc != nil {
+			r.lc.RecordDelivery(req.Context(), string(evt.Type), evt.Action, evt.Repository, evt.IssueNumber, evt.Sender, "filtered", nil)
+		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "filtered")
 		return
@@ -421,6 +434,11 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 
 	// Publish to event bus
 	r.bus.Publish(req.Context(), evt)
+
+	// Record webhook delivery for tracking
+	if r.lc != nil {
+		r.lc.RecordDelivery(req.Context(), string(evt.Type), evt.Action, evt.Repository, evt.IssueNumber, evt.Sender, "accepted", nil)
+	}
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"event_id": "%s", "status": "accepted"}`, evt.ID)

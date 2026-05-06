@@ -75,6 +75,9 @@ type Manager struct {
 	labelBoot     sync.Map // repo → bool, tracks which repos have had labels ensured
 }
 
+// Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
+func (m *Manager) Lifecycle() *lifecycle.Lifecycle { return m.lc }
+
 func resolveDBPath(cfgPath, workDir string) string {
 	if cfgPath != "" {
 		return cfgPath

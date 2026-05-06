@@ -302,6 +302,19 @@ func initSchema(db *sql.DB) error {
 			occurred_at  DATETIME NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_turns_session ON session_turns(session_key);
+
+		CREATE TABLE IF NOT EXISTS webhook_deliveries (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_type   TEXT NOT NULL,
+		action       TEXT NOT NULL DEFAULT '',
+		repository   TEXT NOT NULL,
+		number       INTEGER NOT NULL DEFAULT 0,
+		sender       TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'accepted',
+		error        TEXT,
+		occurred_at  DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_webhook_time ON webhook_deliveries(occurred_at);
 	`)
 	return err
 }
@@ -319,5 +332,21 @@ func (l *Lifecycle) RecordTurn(ctx context.Context, sessionKey string, turn, too
 	)
 	if err != nil {
 		slog.Warn("lifecycle: failed to record turn", "error", err, "session_key", sessionKey)
+	}
+}
+
+// RecordDelivery logs a webhook delivery to the database for tracking.
+func (l *Lifecycle) RecordDelivery(ctx context.Context, eventType, action, repo string, number int, sender, status string, deliveryErr error) {
+	var errStr string
+	if deliveryErr != nil {
+		errStr = deliveryErr.Error()
+	}
+	_, err := l.db.ExecContext(ctx,
+		`INSERT INTO webhook_deliveries (event_type, action, repository, number, sender, status, error, occurred_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventType, action, repo, number, sender, status, errStr, time.Now().UTC(),
+	)
+	if err != nil {
+		slog.Warn("lifecycle: failed to record webhook delivery", "error", err)
 	}
 }
