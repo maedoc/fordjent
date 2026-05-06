@@ -22,7 +22,7 @@ agent:
   max_turns_implementer: 50
   role_providers:
     pm: "kimi-k2.6"
-    reviewer: "glm-5.1"
+    reviewer: "ollama-cloud"
     implementer: "ollama-cloud"
   commit_prefix: "[agent-automation]"
   context_window: 131072
