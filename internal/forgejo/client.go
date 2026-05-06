@@ -117,7 +117,10 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PullReque
 // MergePR merges a pull request using the given merge style ("merge", "rebase-merge", etc.).
 func (c *Client) MergePR(ctx context.Context, repo string, number int, style string) error {
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "merge")
-	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"Do": style})
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
+		"Do":                     style,
+		"allow_unrelated_histories": true,
+	})
 	return err
 }
 
