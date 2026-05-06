@@ -46,7 +46,8 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 
 	sessionInfo := &sessionInfoAdapter{workDir: sess.WorkDir, repoDir: sess.RepoDir}
 	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
-	agentCfg := &agentConfigAdapter{cfg: cfg}
+	isScaffold := strings.HasPrefix(strings.ToLower(sess.IssueTitle), "[scaffold]") || strings.HasPrefix(strings.ToLower(sess.IssueTitle), "scaffold")
+	agentCfg := &agentConfigAdapter{cfg: cfg, isScaffold: isScaffold}
 
 	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role)
 
@@ -550,7 +551,7 @@ func buildRoleRegistry(
 	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
 	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
 	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
-	registry.Register(tool.NewBashTool(sessionInfo))
+	registry.Register(tool.NewBashTool(sessionInfo, agentCfg))
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 
 	// New common tools (branches, PRs, files, hooks, etc.)
@@ -576,7 +577,7 @@ func buildRoleRegistry(
 	default:
 		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0))
 		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
-		registry.Register(tool.NewGitTool(sessionInfo))
+		registry.Register(tool.NewGitTool(sessionInfo, agentCfg))
 		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, false))
 		// Admin tools for implementer role

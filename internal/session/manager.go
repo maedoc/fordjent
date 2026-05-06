@@ -31,6 +31,7 @@ type Session struct {
 	Repository  string
 	IssueNumber int
 	PRNumber    int
+	IssueTitle  string
 	WorkDir     string
 	RepoDir     string
 	LastActive  time.Time
@@ -53,13 +54,16 @@ func (s *sessionInfoAdapter) RepoDir() string  { return s.repoDir }
 
 // agentConfigAdapter adapts Config to tool.AgentConfig
 type agentConfigAdapter struct {
-	cfg *config.Config
+	cfg        *config.Config
+	isScaffold bool
 }
 
 func (a *agentConfigAdapter) CommitPrefix() string       { return a.cfg.Agent.CommitPrefix }
 func (a *agentConfigAdapter) ProtectedBranches() []string { return a.cfg.Security.ProtectedBranches }
 func (a *agentConfigAdapter) RequirePRForWorkflows() bool { return a.cfg.Security.RequirePRForWorkflows }
 func (a *agentConfigAdapter) DryRun() bool               { return a.cfg.Agent.DryRun }
+func (a *agentConfigAdapter) AllowProtectedPush() bool   { return a.cfg.Agent.AllowProtectedPush || a.isScaffold }
+func (a *agentConfigAdapter) IsScaffold() bool          { return a.isScaffold }
 
 // Manager manages agent session lifecycle.
 type Manager struct {
@@ -444,6 +448,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		Repository:  evt.Repository,
 		IssueNumber: evt.IssueNumber,
 		PRNumber:    evt.PRNumber,
+		IssueTitle:  extractIssueTitle(evt),
 		WorkDir:     workDir,
 		RepoDir:     repoDir,
 		LastActive:  time.Now(),
@@ -753,6 +758,21 @@ func detectRoleFromTitle(title string) string {
 	}
 	if strings.Contains(lower, "[test]") || strings.Contains(lower, "[tester]") || strings.Contains(lower, "[testing]") || strings.Contains(lower, "[qa]") {
 		return "tester"
+	}
+	return ""
+}
+
+// extractIssueTitle pulls the issue title from the webhook payload.
+func extractIssueTitle(evt *event.Event) string {
+	if issue, ok := evt.Payload["issue"].(map[string]interface{}); ok {
+		if title, ok := issue["title"].(string); ok {
+			return title
+		}
+	}
+	if pr, ok := evt.Payload["pull_request"].(map[string]interface{}); ok {
+		if title, ok := pr["title"].(string); ok {
+			return title
+		}
 	}
 	return ""
 }

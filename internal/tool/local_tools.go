@@ -15,11 +15,12 @@ import (
 
 // bashTool executes shell commands in the repository root directory.
 type bashTool struct {
-	repoDir string
+	repoDir  string
+	agentCfg AgentConfig
 }
 
-func NewBashTool(info SessionInfo) *bashTool {
-	return &bashTool{repoDir: info.RepoDir()}
+func NewBashTool(info SessionInfo, cfg AgentConfig) *bashTool {
+	return &bashTool{repoDir: info.RepoDir(), agentCfg: cfg}
 }
 
 // bashBlockedPatterns are command substrings that are always blocked for safety.
@@ -72,6 +73,20 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	for _, pattern := range bashBlockedPatterns {
 		if strings.Contains(cmdLower, strings.ToLower(pattern)) {
 			return "", fmt.Errorf("command blocked by safety policy: contains %q", pattern)
+		}
+	}
+
+	// Block git push to protected branches (main, master, etc.)
+	// Agents must use feature branches + forgejo_create_pr for the PR workflow.
+	// Scaffold sessions set allow_protected_push=true to bypass this.
+	if t.agentCfg != nil && !t.agentCfg.AllowProtectedPush() && strings.Contains(cmdLower, "git push") {
+		for _, branch := range t.agentCfg.ProtectedBranches() {
+			// Match patterns like: git push origin main, git push origin HEAD:main, git push -u origin main
+			if strings.Contains(cmdLower, " "+strings.ToLower(branch)) ||
+				strings.Contains(cmdLower, ":"+strings.ToLower(branch)) ||
+				strings.Contains(cmdLower, "head:"+strings.ToLower(branch)) {
+				return "", fmt.Errorf("git push to protected branch %q is blocked. Use a feature branch and forgejo_create_pr instead. Only scaffold sessions may push to main.", branch)
+			}
 		}
 	}
 
@@ -299,12 +314,14 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 
 // gitTool handles git operations in the session.
 type gitTool struct {
-	repoDir string
+	repoDir  string
+	agentCfg AgentConfig
 }
 
-func NewGitTool(info SessionInfo) *gitTool {
+func NewGitTool(info SessionInfo, cfg AgentConfig) *gitTool {
 	return &gitTool{
-		repoDir: info.RepoDir(),
+		repoDir:  info.RepoDir(),
+		agentCfg: cfg,
 	}
 }
 
@@ -406,14 +423,23 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		// missing remote branch. Use -u origin HEAD to always push current branch.
 		//
 		// Guard: if the current branch is main/master, skip auto-push and warn.
-		// The agent should be on a feature branch for PR-based workflow.
-		// Scaffold sessions (Rule 5) should use `git push origin HEAD:main` via bash.
+		// Block auto-push if on a protected branch. Agents must use feature
+		// branches + forgejo_create_pr for the PR-based workflow.
 		branchCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "rev-parse", "--abbrev-ref", "HEAD")
 		branchCmd.Dir = t.repoDir
 		branchOut, _ := branchCmd.CombinedOutput()
 		currentBranch := strings.TrimSpace(string(branchOut))
-		if currentBranch == "main" || currentBranch == "master" {
-			out = append(out, []byte(fmt.Sprintf("\n[auto-push skipped] Current branch is '%s'. Create a feature branch before committing (e.g., git checkout -b feature/my-feature).", currentBranch))...)
+		isProtected := false
+		if t.agentCfg != nil {
+			for _, pb := range t.agentCfg.ProtectedBranches() {
+				if currentBranch == pb {
+					isProtected = true
+					break
+				}
+			}
+		}
+		if isProtected && (t.agentCfg == nil || !t.agentCfg.AllowProtectedPush()) {
+			return "", fmt.Errorf("commit on protected branch %q blocked. Create a feature branch first (e.g., git checkout -b feature/my-feature). Only scaffold sessions may commit on main.", currentBranch)
 		} else {
 			pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer pushCancel()

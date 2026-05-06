@@ -16,6 +16,18 @@ type testSessionInfo struct {
 func (t *testSessionInfo) WorkDir() string { return t.workDir }
 func (t *testSessionInfo) RepoDir() string  { return t.repoDir }
 
+type testAgentConfig struct {
+	protectedBranches []string
+	allowProtected   bool
+}
+
+func (t *testAgentConfig) CommitPrefix() string            { return "[agent-automation]" }
+func (t *testAgentConfig) ProtectedBranches() []string    { return t.protectedBranches }
+func (t *testAgentConfig) RequirePRForWorkflows() bool    { return true }
+func (t *testAgentConfig) DryRun() bool                  { return false }
+func (t *testAgentConfig) AllowProtectedPush() bool      { return t.allowProtected }
+func (t *testAgentConfig) IsScaffold() bool              { return t.allowProtected }
+
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -31,7 +43,7 @@ func setupTestRepo(t *testing.T) string {
 
 func TestBashToolSuccess(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "ls hello.txt"}`))
 	if err != nil {
@@ -44,7 +56,7 @@ func TestBashToolSuccess(t *testing.T) {
 
 func TestBashToolStderr(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "echo err >&2 && echo out"}`))
 	if err != nil {
@@ -57,7 +69,7 @@ func TestBashToolStderr(t *testing.T) {
 
 func TestBashToolExitError(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir})
+	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "exit 1"}`))
 	if err != nil {
@@ -148,7 +160,7 @@ func TestWriteFileToolOverwrite(t *testing.T) {
 func TestGitToolStatus(t *testing.T) {
 	dir := setupTestRepo(t)
 	// Init a git repo for the test
-	tool := NewGitTool(&testSessionInfo{repoDir: dir})
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	// git init should work even without a real repo
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "init"}`))
@@ -162,7 +174,7 @@ func TestGitToolStatus(t *testing.T) {
 
 func TestGitToolBlocksPush(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewGitTool(&testSessionInfo{repoDir: dir})
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "push origin main"}`))
 	if err == nil {
@@ -172,7 +184,7 @@ func TestGitToolBlocksPush(t *testing.T) {
 
 func TestGitToolBlocksPushCaseInsensitive(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewGitTool(&testSessionInfo{repoDir: dir})
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "Push origin feature"}`))
 	if err == nil {
@@ -182,7 +194,7 @@ func TestGitToolBlocksPushCaseInsensitive(t *testing.T) {
 
 func TestGitToolBlocksPushWithLeadingSpaces(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewGitTool(&testSessionInfo{repoDir: dir})
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "  push origin main"}`))
 	if err == nil {
@@ -192,7 +204,7 @@ func TestGitToolBlocksPushWithLeadingSpaces(t *testing.T) {
 
 func TestGitToolEmptyCommand(t *testing.T) {
 	dir := setupTestRepo(t)
-	tool := NewGitTool(&testSessionInfo{repoDir: dir})
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"command": "  "}`))
 	if err == nil {

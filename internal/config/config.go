@@ -60,6 +60,7 @@ type AgentConfig struct {
 	EnableContextInjection  bool          `yaml:"enable_context_injection"`
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 	DryRun                  bool          `yaml:"dry_run"`
+	AllowProtectedPush      bool          `yaml:"allow_protected_push"`
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
 	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
 	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
