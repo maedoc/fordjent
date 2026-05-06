@@ -27,8 +27,8 @@ func IsStale(repoDir, base string) (bool, string, error) {
 		return false, "", nil
 	}
 
-	// Fetch the remote ref.
-	if out, err := exec.Command("git", "-C", repoDir, "fetch", "origin", base).CombinedOutput(); err != nil {
+	// Fetch the remote ref — use full fetch to ensure refs/remotes/origin/<base> is updated.
+	if out, err := exec.Command("git", "-C", repoDir, "fetch", "origin").CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
 		// If the remote has no base branch yet (empty repo), it's not "stale".
 		if strings.Contains(outStr, "couldn't find remote ref") {
@@ -74,6 +74,13 @@ func IsStale(repoDir, base string) (bool, string, error) {
 }
 
 func isAncestor(repoDir, base string) (bool, error) {
+	// First check if origin/<base> ref exists
+	refCmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "origin/"+base)
+	if refErr := refCmd.Run(); refErr != nil {
+		// origin/<base> doesn't exist — can't be stale
+		slog.Info("stalegate: origin/" + base + " ref not found, treating as not stale")
+		return true, nil // treat as ancestor (not stale)
+	}
 	cmd := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", "origin/"+base, "HEAD")
 	err := cmd.Run()
 	if err == nil {
