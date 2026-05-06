@@ -311,14 +311,20 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	}
 
 	// Scaffold detection: on new issues for empty repos, create/block
+	// Skip PM/decompose issues — they don't need code on main to decompose work.
 	if m.cfg.Agent.EnableScaffoldDetection && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
-		blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber)
-		if err != nil {
-			slog.Warn("scaffold detection failed", "error", err, "repo", evt.Repository, "issue", evt.IssueNumber)
-		}
-		if blocked {
-			slog.Info("scaffold: blocked issue on empty repo", "repo", evt.Repository, "issue", evt.IssueNumber)
-			return
+		title := extractIssueTitle(evt)
+		lower := strings.ToLower(title)
+		isPM := strings.Contains(lower, "[pm]") || strings.Contains(lower, "[project manager]") || strings.Contains(lower, "[decompose]")
+		if !isPM {
+			blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber)
+			if err != nil {
+				slog.Warn("scaffold detection failed", "error", err, "repo", evt.Repository, "issue", evt.IssueNumber)
+			}
+			if blocked {
+				slog.Info("scaffold: blocked issue on empty repo", "repo", evt.Repository, "issue", evt.IssueNumber)
+				return
+			}
 		}
 	}
 
