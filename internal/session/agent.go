@@ -330,9 +330,9 @@ Before creating sub-issues that depend on code from parent issues:
 1. Use bash or read_file to check if the referenced package exists in the current clone (e.g., ls pkg/ or cat pkg/x/doc.go).
 2. If the package does NOT exist, do NOT create the sub-issue yet. Post a comment explaining the dependency and expected unblock flow.
 3. Only create sub-issues for work that can be done with currently available code.
-4. **CRITICAL**: In each sub-issue body, add a line `Depends on: #N` (where #N is the parent issue or another sub-issue that must be completed first). This enables the scheduler to automatically unblock issues when their dependencies are merged. Example:
-   - If issue #2 must be done before #3, add `Depends on: #2` in #3's body.
-   - If #4 depends on both #2 and #3, add `Depends on: #2, #3`.
+4. **CRITICAL**: In each sub-issue body, add a line 'Depends on: #N' (where #N is the parent issue or another sub-issue that must be completed first). This enables the scheduler to automatically unblock issues when their dependencies are merged. Example:
+   - If issue #2 must be done before #3, add 'Depends on: #2' in #3's body.
+   - If #4 depends on both #2 and #3, add 'Depends on: #2, #3'.`
 	case "reviewer":
 		modeInstructions += `
 
