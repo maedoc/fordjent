@@ -112,8 +112,8 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 			}
 		}
 
-		// Post a comment
-		comment := "All dependencies are now resolved. This issue is unblocked and ready to work on!"
+		// Post a comment with the ford marker so isAgentEvent() filters it
+		comment := "All dependencies are now resolved. This issue is unblocked and ready to work on!\n\n<!-- ford -->"
 		if err := s.postComment(ctx, repo, issue.Number, comment); err != nil {
 			slog.Warn("scheduler: failed to post unblock comment", "error", err, "issue", issue.Number)
 		}

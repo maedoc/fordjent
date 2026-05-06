@@ -704,12 +704,22 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	marker := "<!-- ford -->"
 
 	// Comment events (issue_comment, pull_request_review_comment):
-	// Filter ONLY by body marker. Do NOT filter by sender, because the
-	// scheduler posts unblock comments from the bot that MUST be processed.
+	// Filter by body marker OR by bot sender. The scheduler posts
+	// unblock comments WITH the marker, so this is safe.
 	if comment, ok := payload["comment"].(map[string]interface{}); ok {
 		if body, ok := comment["body"].(string); ok {
 			if strings.Contains(body, marker) {
 				return true
+			}
+		}
+	}
+	// Also filter comments where the sender is the bot user.
+	// This catches cost-summary comments and other auto-generated text that
+	// may not have the marker (e.g., pre-fix cost comments).
+	if sender, ok := payload["sender"].(map[string]interface{}); ok {
+		if login, ok := sender["login"].(string); ok {
+			if login == "fordjent-bot" || login == "fordjent[bot]" {
+				return true // bot comments never need agent processing
 			}
 		}
 	}

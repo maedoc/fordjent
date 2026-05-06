@@ -180,6 +180,9 @@ func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo stri
 			msg = fmt.Sprintf("Session completed successfully. Total: %.0f tokens ($%.4f USD)", float64(tokens), cost)
 		}
 	}
+	// Append agent marker so isAgentEvent() filters these comments and
+	// prevents self-loop (each comment triggers a new webhook → new session).
+	msg += "\n\n<!-- ford -->"
 	_ = l.forgejo.PostIssueComment(ctx, repo, issueNumber, msg)
 }
 
