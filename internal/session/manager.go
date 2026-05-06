@@ -107,7 +107,7 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	if cfg.Agent.WorkDir != "" {
 		lifecycleDBPath = filepath.Join(cfg.Agent.WorkDir, "lifecycle.db")
 	}
-	lc, err := lifecycle.New(lifecycleDBPath, forgejoClient)
+	lc, err := lifecycle.New(lifecycleDBPath, forgejoClient, costTracker)
 	if err != nil {
 		return nil, fmt.Errorf("init lifecycle tracker: %w", err)
 	}
@@ -508,7 +508,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err)
 				}
 			} else {
-				m.lc.OnSessionComplete(ctx, sess.Key)
+				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber)
 			}
 
 			sess.mu.Lock()

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/forgejo"
 	_ "modernc.org/sqlite"
 )
@@ -31,11 +32,12 @@ const (
 type Lifecycle struct {
 	db           *sql.DB
 	forgejo      *forgejo.Client
+	costTracker  *cost.Tracker
 	labelPrefix  string
 }
 
 // New opens (or creates) the lifecycle SQLite DB and returns a tracker.
-func New(dbPath string, client *forgejo.Client) (*Lifecycle, error) {
+func New(dbPath string, client *forgejo.Client, costTracker *cost.Tracker) (*Lifecycle, error) {
 	if err := ensureDir(dbPath); err != nil {
 		return nil, err
 	}
@@ -52,6 +54,7 @@ func New(dbPath string, client *forgejo.Client) (*Lifecycle, error) {
 	return &Lifecycle{
 		db:          db,
 		forgejo:     client,
+		costTracker: costTracker,
 		labelPrefix: "fordjent/",
 	}, nil
 }
@@ -163,9 +166,21 @@ func (l *Lifecycle) ResolveBlockedBranch(ctx context.Context, repo, branch strin
 	return nil
 }
 
-// OnSessionComplete records a successful completion.
-func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey string) {
+// OnSessionComplete records a successful completion and optionally posts a cost summary.
+func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateCompleted, "session finished successfully")
+
+	if l.forgejo == nil || issueNumber <= 0 {
+		return
+	}
+	msg := "Session completed successfully."
+	if l.costTracker != nil {
+		tokens, cost, _ := l.costTracker.GetSessionCost(sessionKey)
+		if tokens > 0 {
+			msg = fmt.Sprintf("Session completed successfully. Total: %.0f tokens ($%.4f USD)", float64(tokens), cost)
+		}
+	}
+	_ = l.forgejo.PostIssueComment(ctx, repo, issueNumber, msg)
 }
 
 // OnSessionFailedMaxTurns records that the session exhausted its turn budget.
