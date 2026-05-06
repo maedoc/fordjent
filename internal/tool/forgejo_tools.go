@@ -723,27 +723,61 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 
 	// Human review gate: at least one non-bot APPROVED review required
+	// Auto-approve if the PR was created by fordjent-bot (agent-created PRs
+	// don't need separate human approval — the reviewer session handles that)
 	if !t.bypassHumanApproval {
-		reviews, err := t.adapter.Client().ListPRReviews(ctx, params.Repository, params.PRNumber)
-		if err != nil {
-			return "", fmt.Errorf("failed to list reviews for PR #%d: %w", params.PRNumber, err)
-		}
-		approved := false
-		for _, r := range reviews {
-			if r.State == "APPROVED" {
-				// Skip bot approvals (anything matching fordjent bot login pattern)
-				if r.User != nil {
-					login := strings.ToLower(r.User.Login)
-					if login == "fordjent-bot" || login == "fordjent[bot]" {
-						continue
+		// Check if PR author is the bot — auto-bypass for bot PRs
+		pr, err := t.adapter.Client().GetPR(ctx, params.Repository, params.PRNumber)
+		if err == nil && pr.User != nil {
+			login := strings.ToLower(pr.User.Login)
+			if login == "fordjent-bot" || login == "fordjent[bot]" {
+				// Bot PR — skip approval gate
+				slog.Info("merge_pr: skipping approval gate for bot PR", "pr", params.PRNumber, "author", login)
+			} else {
+				// Human-authored PR — require approval
+				reviews, err := t.adapter.Client().ListPRReviews(ctx, params.Repository, params.PRNumber)
+				if err != nil {
+					return "", fmt.Errorf("failed to list reviews for PR #%d: %w", params.PRNumber, err)
+				}
+				approved := false
+				for _, r := range reviews {
+					if r.State == "APPROVED" {
+						if r.User != nil {
+							login := strings.ToLower(r.User.Login)
+							if login == "fordjent-bot" || login == "fordjent[bot]" {
+								continue
+							}
+						}
+						approved = true
+						break
 					}
 				}
-				approved = true
-				break
+				if !approved {
+					return "", fmt.Errorf("PR #%d cannot be merged: no human approval found. Ask a human to review and approve first.", params.PRNumber)
+				}
 			}
-		}
-		if !approved {
-			return "", fmt.Errorf("PR #%d cannot be merged: no human approval found. Ask a human to review and approve first.", params.PRNumber)
+		} else {
+			// Could not determine PR author — require approval as fallback
+			reviews, err := t.adapter.Client().ListPRReviews(ctx, params.Repository, params.PRNumber)
+			if err != nil {
+				return "", fmt.Errorf("failed to list reviews for PR #%d: %w", params.PRNumber, err)
+			}
+			approved := false
+			for _, r := range reviews {
+				if r.State == "APPROVED" {
+					if r.User != nil {
+						login := strings.ToLower(r.User.Login)
+						if login == "fordjent-bot" || login == "fordjent[bot]" {
+							continue
+						}
+					}
+					approved = true
+					break
+				}
+			}
+			if !approved {
+				return "", fmt.Errorf("PR #%d cannot be merged: no human approval found. Ask a human to review and approve first.", params.PRNumber)
+			}
 		}
 	}
 
