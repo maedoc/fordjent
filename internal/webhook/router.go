@@ -621,6 +621,12 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 		if _, ok := payload["pull_request"]; ok {
 			return extractIssueNum()
 		}
+		// issue_comment on a PR has 'issue.is_pull_request: true'
+		if issue, ok := payload["issue"].(map[string]interface{}); ok {
+			if isPR, ok := issue["is_pull_request"].(bool); ok && isPR {
+				return extractIssueNum()
+			}
+		}
 		return 0
 	}
 

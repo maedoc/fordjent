@@ -241,6 +241,8 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			defer cancel()
 			if err := m.scheduler.OnPRMerged(schedCtx, evt.Repository, evt.PRNumber); err != nil {
 				slog.Warn("scheduler: failed to process merged PR", "error", err, "pr", evt.PRNumber, "repo", evt.Repository)
+			} else {
+				slog.Info("scheduler: processed merged PR", "pr", evt.PRNumber, "repo", evt.Repository)
 			}
 			// Auto-requeue any blocked branches whose merge-gate may now be clear.
 			if m.mqClient != nil && m.lc != nil {
@@ -297,6 +299,8 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				// Now unblock dependent issues
 				if err := m.scheduler.CheckAndUnblock(schedCtx, evt.Repository); err != nil {
 					slog.Warn("scheduler: failed to unblock after push", "error", err, "repo", evt.Repository)
+				} else {
+					slog.Info("scheduler: unblock check completed after push", "repo", evt.Repository)
 				}
 			}()
 		}
