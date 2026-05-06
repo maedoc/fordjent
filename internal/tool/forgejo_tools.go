@@ -77,8 +77,10 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	// Append hidden marker so webhook router can filter self-generated comments
-	body := params.Body + agentCommentMarker
+	// Append hidden marker + visible agent signature so webhook router can filter
+	// self-generated comments and humans can identify bot work.
+	signature := "\n\n---\n*🤖 Created by [Fordjent](https://github.com/fordjent/fordjent) autonomous coding agent*"
+	body := params.Body + signature + agentCommentMarker
 
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber), "comments")
@@ -319,19 +321,24 @@ type MergeGate interface {
 
 // forgejoCreatePRTool creates a pull request.
 type forgejoCreatePRTool struct {
-	adapter *ForgejoAdapter
-	mq      MergeGate
-	repoDir string
+	adapter        *ForgejoAdapter
+	mq             MergeGate
+	repoDir        string
+	parentIssueNum int
 }
 
 func NewCreatePRTool(adapter *ForgejoAdapter, mq MergeGate, repoDir string) *forgejoCreatePRTool {
 	return &forgejoCreatePRTool{adapter: adapter, mq: mq, repoDir: repoDir}
 }
 
+func (t *forgejoCreatePRTool) SetParentIssueNum(n int) {
+	t.parentIssueNum = n
+}
+
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
 
 func (t *forgejoCreatePRTool) Description() string {
-	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead. IMPORTANT: This tool will verify that go build and go test pass before creating the PR. If tests fail, the PR will be blocked and you must fix the failures."
+	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead. IMPORTANT: This tool will verify that go build and go test pass before creating the PR. If tests fail, the PR will be blocked and you must fix the failures. The PR description body MUST include three sections: 1) '## Changes' listing every file modified and a one-line summary of what changed, 2) '## Testing' describing how the changes were verified (unit tests, manual checks, build steps), 3) '## Related' containing 'Closes #{issue number}' to link the PR to its originating issue and 'Depends on: #{parent}' if this work depends on another issue/PR."
 }
 
 func (t *forgejoCreatePRTool) Parameters() map[string]interface{} {
@@ -459,11 +466,27 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		if testErr != nil {
 			return "", fmt.Errorf("go test failed — all tests must pass before creating PR:\n%s", string(testOut))
 		}
+
+		lintCmd := exec.CommandContext(ctx, "golangci-lint", "run", "./...")
+		lintCmd.Dir = t.repoDir
+		if lintOut, lintErr := lintCmd.CombinedOutput(); lintErr != nil {
+			// golangci-lint may not be installed — only fail if it IS installed and finds issues
+			if !strings.Contains(lintErr.Error(), "executable file not found") {
+				return "", fmt.Errorf("golangci-lint failed — fix lint errors before creating PR:\n%s", string(lintOut))
+			}
+		}
+
 		slog.Info("verify gate passed", "repo_dir", t.repoDir)
 	}
 
-	// Append hidden marker so webhook router can filter self-generated PRs
-	body := params.Body + agentCommentMarker
+	// Append hidden marker + visible agent signature so webhook router can filter
+	// self-generated PRs and humans can identify bot work.
+	signature := "\n\n---\n*🤖 Created by [Fordjent](https://github.com/fordjent/fordjent) autonomous coding agent*"
+	body := params.Body
+	if t.parentIssueNum > 0 {
+		body += fmt.Sprintf("\n\nCloses #%d", t.parentIssueNum)
+	}
+	body += signature + agentCommentMarker
 
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls")
 	payload := map[string]string{

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -57,6 +59,7 @@ type AgentConfig struct {
 	EnableSessionRecovery   bool          `yaml:"enable_session_recovery"`
 	EnableContextInjection  bool          `yaml:"enable_context_injection"`
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
+	DryRun                  bool          `yaml:"dry_run"`
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
 	FastProvider            string        `yaml:"fast_provider"` // role "pm" / "reviewer" use this provider instead of default
 }
@@ -338,4 +341,48 @@ func (c *Config) IsUserAllowed(chatID int64, username string) bool {
 		}
 	}
 	return false
+}
+
+// Watcher periodically reloads config from disk when the file changes.
+type Watcher struct {
+	path     string
+	modTime  time.Time
+	OnChange func(*Config)
+}
+
+// NewWatcher creates a config file watcher. Call Run() in a goroutine.
+func NewWatcher(path string, initial *Config) *Watcher {
+	info, _ := os.Stat(path)
+	mod := time.Time{}
+	if info != nil {
+		mod = info.ModTime()
+	}
+	return &Watcher{path: path, modTime: mod}
+}
+
+// Run checks for config changes every interval and calls OnChange if modified.
+func (w *Watcher) Run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := os.Stat(w.path)
+			if err != nil || info.ModTime().Equal(w.modTime) {
+				continue
+			}
+			w.modTime = info.ModTime()
+			cfg, err := Load(w.path)
+			if err != nil {
+				slog.Warn("config hot-reload failed", "error", err)
+				continue
+			}
+			slog.Info("config hot-reloaded", "path", w.path)
+			if w.OnChange != nil {
+				w.OnChange(cfg)
+			}
+		}
+	}
 }

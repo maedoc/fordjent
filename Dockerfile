@@ -10,6 +10,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl git golang-go && rm -rf /var/lib/apt/lists/*
 
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.64.8
+
 RUN useradd -m -d /var/lib/fordjent -s /bin/sh fordjent \
     && mkdir -p /var/lib/fordjent/work \
     && chown -R fordjent:fordjent /var/lib/fordjent

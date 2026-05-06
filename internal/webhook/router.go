@@ -52,6 +52,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/metrics", metrics.Handler())
 	r.mux.HandleFunc("/status", r.handleStatus)
 	r.mux.HandleFunc("/tokens-per-minute", r.handleTokensPerMinute)
+	r.mux.HandleFunc("/activity", r.handleActivity)
 	r.mux.Handle("/admin", webui.Handler(cfg))
 	r.mux.Handle("/admin/", webui.Handler(cfg))
 
@@ -131,6 +132,58 @@ func (r *Router) handleTokensPerMinute(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	lifecycleDB := filepath.Join(r.cfg.Agent.WorkDir, "lifecycle.db")
+	if lifecycleDB == "" {
+		http.Error(w, "no workdir configured", http.StatusInternalServerError)
+		return
+	}
+
+	db, err := sql.Open("sqlite", lifecycleDB)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintln(w, "<html><head><title>Fordjent Activity</title>")
+	fmt.Fprintln(w, "<style>body{font-family:monospace;max-width:900px;margin:2em auto}table{width:100%;border-collapse:collapse}th,td{padding:4px 8px;text-align:left;border-bottom:1px solid #eee}th{background:#f5f5f5}</style>")
+	fmt.Fprintln(w, "</head><body><h1>Fordjent Activity Feed</h1>")
+
+	// Recent webhook deliveries
+	fmt.Fprintln(w, "<h2>Recent Webhooks</h2><table><tr><th>Time</th><th>Type</th><th>Action</th><th>Repo</th><th>#</th><th>Sender</th><th>Status</th></tr>")
+	rows, err := db.Query("SELECT occurred_at, event_type, action, repository, number, sender, status FROM webhook_deliveries ORDER BY occurred_at DESC LIMIT 30")
+	if err == nil && rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ts, et, act, repo, sender, status string
+			var num int
+			rows.Scan(&ts, &et, &act, &repo, &num, &sender, &status)
+			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td></tr>\n", ts, et, act, repo, num, sender, status)
+		}
+	}
+	fmt.Fprintln(w, "</table>")
+
+	// Recent lifecycle transitions
+	fmt.Fprintln(w, "<h2>Recent Sessions</h2><table><tr><th>Time</th><th>Session</th><th>From</th><th>To</th><th>Reason</th></tr>")
+	rows2, err := db.Query("SELECT occurred_at, session_key, from_state, to_state, reason FROM session_transitions ORDER BY occurred_at DESC LIMIT 30")
+	if err == nil && rows2 != nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var ts, sk, from, to, reason string
+			rows2.Scan(&ts, &sk, &from, &to, &reason)
+			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", ts, sk, from, to, reason)
+		}
+	}
+	fmt.Fprintln(w, "</table></body></html>")
 }
 
 func queryCostDB(dbPath string) (map[string]interface{}, error) {

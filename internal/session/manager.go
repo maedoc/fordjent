@@ -59,6 +59,7 @@ type agentConfigAdapter struct {
 func (a *agentConfigAdapter) CommitPrefix() string       { return a.cfg.Agent.CommitPrefix }
 func (a *agentConfigAdapter) ProtectedBranches() []string { return a.cfg.Security.ProtectedBranches }
 func (a *agentConfigAdapter) RequirePRForWorkflows() bool { return a.cfg.Security.RequirePRForWorkflows }
+func (a *agentConfigAdapter) DryRun() bool               { return a.cfg.Agent.DryRun }
 
 // Manager manages agent session lifecycle.
 type Manager struct {

@@ -11,4 +11,5 @@ type AgentConfig interface {
 	CommitPrefix() string
 	ProtectedBranches() []string
 	RequirePRForWorkflows() bool
+	DryRun() bool
 }

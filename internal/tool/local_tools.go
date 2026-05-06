@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,16 @@ type bashTool struct {
 
 func NewBashTool(info SessionInfo) *bashTool {
 	return &bashTool{repoDir: info.RepoDir()}
+}
+
+// bashBlockedPatterns are command substrings that are always blocked for safety.
+var bashBlockedPatterns = []string{
+	"rm -rf /",
+	"mkfs.",
+	"dd if=",
+	"shutdown",
+	"reboot",
+	"poweroff",
 }
 
 func (t *bashTool) Name() string { return "bash" }
@@ -56,6 +67,14 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 		params.Timeout = 30
 	}
 
+	// Sandbox: block dangerous commands
+	cmdLower := strings.ToLower(params.Command)
+	for _, pattern := range bashBlockedPatterns {
+		if strings.Contains(cmdLower, strings.ToLower(pattern)) {
+			return "", fmt.Errorf("command blocked by safety policy: contains %q", pattern)
+		}
+	}
+
 	timeout := time.Duration(params.Timeout) * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -87,6 +106,7 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 // readFileTool reads file contents from the repository.
 type readFileTool struct {
 	repoDir string
+	cache   sync.Map // path → string (simple file content cache)
 }
 
 func NewReadFileTool(info SessionInfo) *readFileTool {
@@ -122,31 +142,58 @@ func (t *readFileTool) Parameters() map[string]interface{} {
 
 func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
+		Path   string   `json:"path"`
+		Paths  []string `json:"paths"`
+		Offset int      `json:"offset"`
+		Limit  int      `json:"limit"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	if params.Limit == 0 {
-		params.Limit = 2000
+
+	// Batch mode: if 'paths' is provided, read multiple files
+	if len(params.Paths) > 0 {
+		var results []string
+		for _, p := range params.Paths {
+			content, err := t.readFile(ctx, p, params.Offset, params.Limit)
+			if err != nil {
+				results = append(results, fmt.Sprintf("=== %s ===\nERROR: %s", p, err))
+			} else {
+				results = append(results, fmt.Sprintf("=== %s ===\n%s", p, content))
+			}
+		}
+		return strings.Join(results, "\n\n"), nil
 	}
 
-	absPath := filepath.Join(t.repoDir, params.Path)
+	// Single file mode
+	return t.readFile(ctx, params.Path, params.Offset, params.Limit)
+}
+
+func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit int) (string, error) {
+	// Cache check for full-file reads (offset=0, limit=default)
+	if offset <= 1 && limit == 0 {
+		if cached, ok := t.cache.Load(path); ok {
+			return cached.(string), nil
+		}
+	}
+	if limit == 0 {
+		limit = 2000
+	}
+
+	absPath := filepath.Join(t.repoDir, path)
 
 	// Sanitize: if model passed an absolute path containing repoDir, extract the relative part.
-	if strings.HasPrefix(params.Path, t.repoDir) {
-		rel, err := filepath.Rel(t.repoDir, params.Path)
+	if strings.HasPrefix(path, t.repoDir) {
+		rel, err := filepath.Rel(t.repoDir, path)
 		if err == nil {
 			absPath = filepath.Join(t.repoDir, rel)
 		}
 	}
 
 	// Sanitize: if model passed "repo/<file>" and repoDir already ends with "repo", strip the prefix.
-	relClean := strings.TrimPrefix(params.Path, "repo/")
+	relClean := strings.TrimPrefix(path, "repo/")
 	relClean = strings.TrimPrefix(relClean, "/")
-	if relClean != params.Path {
+	if relClean != path {
 		candidate := filepath.Join(t.repoDir, relClean)
 		if _, err := os.Stat(candidate); err == nil {
 			absPath = candidate
@@ -164,10 +211,10 @@ func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		lineNum++
-		if lineNum < params.Offset {
+		if lineNum < offset {
 			continue
 		}
-		if len(lines) >= params.Limit {
+		if len(lines) >= limit {
 			break
 		}
 		lines = append(lines, fmt.Sprintf("%6d\t%s", lineNum, scanner.Text()))
@@ -176,19 +223,28 @@ func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("read file: %w", err)
 	}
 
-	return strings.Join(lines, "\n"), nil
+	result := strings.Join(lines, "\n")
+
+	// Cache full-file reads
+	if offset <= 1 && limit == 2000 {
+		t.cache.Store(path, result)
+	}
+
+	return result, nil
 }
 
 // writeFileTool writes content to a file in the repository.
 type writeFileTool struct {
 	repoDir      string
 	commitPrefix string
+	dryRun       bool
 }
 
 func NewWriteFileTool(info SessionInfo, cfg AgentConfig) *writeFileTool {
 	return &writeFileTool{
 		repoDir:      info.RepoDir(),
 		commitPrefix: cfg.CommitPrefix(),
+		dryRun:       cfg.DryRun(),
 	}
 }
 
@@ -222,6 +278,10 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if t.dryRun {
+		return fmt.Sprintf("[dry-run] Would write %d bytes to %s", len(params.Content), params.Path), nil
 	}
 
 	absPath := filepath.Join(t.repoDir, params.Path)
@@ -331,6 +391,15 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		if testOut, testErr := testCmd.CombinedOutput(); testErr != nil {
 			return fmt.Sprintf("%s\n[verify error] go test ./... failed:\n%s\n%s",
 				string(out), testErr, string(testOut)), nil
+		}
+
+		lintCmd := exec.CommandContext(verifyCtx, "golangci-lint", "run", "./...")
+		lintCmd.Dir = t.repoDir
+		if lintOut, lintErr := lintCmd.CombinedOutput(); lintErr != nil {
+			// golangci-lint may not be installed — only fail if it IS installed and finds issues
+			if !strings.Contains(lintErr.Error(), "executable file not found") {
+				return fmt.Sprintf("%s\n[verify error] golangci-lint failed:\n%s", string(out), string(lintOut)), nil
+			}
 		}
 
 		// Auto-push after successful commit so forgejo_create_pr never sees a
