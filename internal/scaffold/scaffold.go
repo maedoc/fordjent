@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	MinFilesForNonEmpty = 3
-	ScaffoldLabel       = "scaffold"
+	ScaffoldLabel = "scaffold"
 )
 
 // CheckAndBlock inspects the repository file count. If it is below the threshold
@@ -32,8 +31,10 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 		return false, nil
 	}
 
-	if len(files) >= MinFilesForNonEmpty {
-		return false, nil
+	for _, f := range files {
+		if f == "go.mod" || strings.EqualFold(f, "README.md") {
+			return false, nil
+		}
 	}
 
 	// Check whether there is already an open scaffold issue.
