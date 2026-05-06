@@ -270,11 +270,10 @@ You are in PM mode. You do NOT write code. Your job is:
 - Post a summary comment with your decomposition plan.
 - STOP after posting the comment. Do not implement.
 
-Before creating sub-issues that depend on code being written by parent issues:
-1. Check if the referenced code path exists (use read_file or bash ls).
-2. If the code does NOT exist in main, sub-issues will be auto-tagged 'blocked'.
-3. The scheduler will unblock them when parent PRs merge.
-4. Post a clear comment explaining the dependency chain and expected unblock flow.`
+Before creating sub-issues that depend on code from parent issues:
+1. Use bash or read_file to check if the referenced package exists in the current clone (e.g., ls pkg/ or cat pkg/x/doc.go).
+2. If the package does NOT exist, do NOT create the sub-issue yet. Post a comment explaining the dependency and expected unblock flow.
+3. Only create sub-issues for work that can be done with currently available code.`
 	case "reviewer":
 		modeInstructions += `
 
