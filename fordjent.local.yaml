@@ -21,9 +21,9 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   role_providers:
-    pm: "wafer-qwen"
-    reviewer: "wafer-glm"
-    implementer: "wafer-qwen"
+    pm: "ollama-cloud"
+    reviewer: "ollama-cloud"
+    implementer: "ollama-cloud"
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -48,10 +48,10 @@ providers:
     model: "Qwen3.5-397B-A17B"
     max_tokens: 16384
     request_timeout: "60s"
-    max_retries: 3
-    retry_base_delay: "1s"
-    retry_max_delay: "15s"
-    max_concurrent_llm_calls: 5
+    max_retries: 5
+    retry_base_delay: "2s"
+    retry_max_delay: "60s"
+    max_concurrent_llm_calls: 2
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
   - name: "wafer-glm"
@@ -60,10 +60,10 @@ providers:
     model: "glm-5.1"
     max_tokens: 32768
     request_timeout: "90s"
-    max_retries: 3
-    retry_base_delay: "2s"
-    retry_max_delay: "30s"
-    max_concurrent_llm_calls: 2
+    max_retries: 5
+    retry_base_delay: "3s"
+    retry_max_delay: "60s"
+    max_concurrent_llm_calls: 1
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
   - name: "ollama-cloud"
