@@ -77,6 +77,21 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		slog.Warn("failed to build full context", "error", err)
 	}
 
+	// If this is a scheduler unblock comment, inject a system directive to proceed.
+	if evt.Type == event.IssueCommentCreated && evt.IssueNumber > 0 {
+		if comment, ok := evt.Payload["comment"].(map[string]interface{}); ok {
+			if body, ok := comment["body"].(string); ok {
+				if strings.Contains(body, "is now merged") && strings.Contains(body, "unblocked") {
+					contextMessages = append([]provider.Message{{
+						Role:    "user",
+						Content: "[SYSTEM] This issue is now unblocked. Proceed with implementation immediately.",
+					}}, contextMessages...)
+					slog.Info("injected unblock directive into context", "session_key", a.sess.Key)
+				}
+			}
+		}
+	}
+
 	// Step 4: If this is a PR review comment, fetch PR and checkout its branch
 	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
 		pr, err := a.forgejo.GetPR(ctx, evt.Repository, evt.PRNumber)
@@ -330,6 +345,7 @@ You have access to the following tools:
 9. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
 10. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Sub-issues are auto-tagged 'blocked' when their parent code hasn't been merged yet. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues.
 11. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
+12. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
 
 ### Pre-Flight Checklist (RUN FIRST)
 Before writing ANY code, use bash or read_file to check:
