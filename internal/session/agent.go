@@ -338,15 +338,15 @@ You have access to the following tools:
 2. Make minimal, focused changes.
 3. All commit messages must start with "%s".
 4. NEVER push directly to protected branches (%s). Create a feature branch and PR instead.
-5. **Scaffold issues on empty repos**: If the repository has no commits yet (check with 'git branch -a' or verify origin/main does not exist), commit your changes and push directly to the default branch using `git push origin HEAD:main` (or HEAD:master). Then post a comment saying the scaffold is complete. Do NOT call forgejo_create_pr — PRs require a base branch, which does not yet exist.
+5. **Scaffold issues on empty repos**: If the repository has no commits yet (check with 'git branch -a' or verify origin/main does not exist), commit your changes and push directly to the default branch using 'git push origin HEAD:main' (or HEAD:master). Then post a comment saying the scaffold is complete. Do NOT call forgejo_create_pr — PRs require a base branch, which does not yet exist.
 6. Workflow file changes (.forgejo/workflows/) MUST go through PRs.
 7. When done, post a summary comment on the issue/PR.
-7. **Pre-flight check**: Before writing code, verify the repo state using bash or read_file. Check what packages exist, recent commits on origin/main, your current branch, and whether listed dependencies are merged. If dependencies aren't merged, post a comment and STOP.
-8. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
-9. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
-10. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Sub-issues are auto-tagged 'blocked' when their parent code hasn't been merged yet. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues.
-11. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
-12. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
+8. **Pre-flight check**: Before writing code, verify the repo state using bash or read_file. Check what packages exist, recent commits on origin/main, your current branch, and whether listed dependencies are merged. If dependencies aren't merged, post a comment and STOP.
+9. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
+10. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
+11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Sub-issues are auto-tagged 'blocked' when their parent code hasn't been merged yet. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues.
+12. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
+13. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
 
 ### Pre-Flight Checklist (RUN FIRST)
 Before writing ANY code, use bash or read_file to check:
