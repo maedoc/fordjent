@@ -61,7 +61,8 @@ type AgentConfig struct {
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 	DryRun                  bool          `yaml:"dry_run"`
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
-	FastProvider            string        `yaml:"fast_provider"` // role "pm" / "reviewer" use this provider instead of default
+	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
+	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 }
 
 type BudgetConfig struct {
@@ -257,7 +258,7 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Fast provider reference
+	// Fast provider reference (legacy)
 	if c.Agent.FastProvider != "" {
 		found := false
 		for _, p := range c.Providers {
@@ -268,6 +269,20 @@ func (c *Config) validate() error {
 		}
 		if !found {
 			errs = append(errs, fmt.Sprintf("agent.fast_provider %q not found in providers list", c.Agent.FastProvider))
+		}
+	}
+
+	// Role providers references
+	for role, name := range c.Agent.RoleProviders {
+		found := false
+		for _, p := range c.Providers {
+			if p.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("agent.role_providers[%s] = %q not found in providers list", role, name))
 		}
 	}
 
@@ -286,8 +301,19 @@ func (c *Config) DefaultProvider() *ProviderConfig {
 }
 
 // ProviderForRole returns the provider to use for a given agent role.
-// PM and reviewer roles use the fast_provider if configured; otherwise falls back to default.
+// Checks role_providers map first, then fast_provider for pm/reviewer, then default.
 func (c *Config) ProviderForRole(role string) *ProviderConfig {
+	// Per-role mapping takes priority
+	if c.Agent.RoleProviders != nil {
+		if name, ok := c.Agent.RoleProviders[role]; ok {
+			for _, p := range c.Providers {
+				if p.Name == name {
+					return &p
+			}
+		}
+		}
+	}
+	// Legacy fast_provider fallback for pm/reviewer
 	if (role == "pm" || role == "reviewer") && c.Agent.FastProvider != "" {
 		for _, p := range c.Providers {
 			if p.Name == c.Agent.FastProvider {

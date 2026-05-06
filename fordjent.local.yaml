@@ -20,6 +20,10 @@ agent:
   max_turns: 75
   max_turns_pm: 15
   max_turns_implementer: 50
+  role_providers:
+    pm: "kimi-k2.6"
+    reviewer: "glm-5.1"
+    implementer: "ollama-cloud"
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -50,18 +54,30 @@ providers:
     max_concurrent_llm_calls: 3
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
-  - name: "deepseek"
-    api_base: "https://api.deepseek.com/v1"
-    api_key: "${DEEPSEEK_API_KEY}"
-    model: "deepseek-chat"
-    max_tokens: 8192
+  - name: "kimi-k2.6"
+    api_base: "https://ollama.com/v1"
+    api_key: "${OLLAMA_API_KEY}"
+    model: "kimi-k2.6"
+    max_tokens: 16384
+    request_timeout: "120s"
+    max_retries: 3
+    retry_base_delay: "2s"
+    retry_max_delay: "30s"
+    max_concurrent_llm_calls: 2
+    cost_per_1m_input_tokens: 0
+    cost_per_1m_output_tokens: 0
+  - name: "glm-5.1"
+    api_base: "https://open.bigmodel.cn/api/paas/v4"
+    api_key: "${GLM_API_KEY}"
+    model: "glm-5.1"
+    max_tokens: 16384
     request_timeout: "180s"
     max_retries: 3
     retry_base_delay: "5s"
     retry_max_delay: "60s"
-    max_concurrent_llm_calls: 5
-    cost_per_1m_input_tokens: 2.00
-    cost_per_1m_output_tokens: 8.00
+    max_concurrent_llm_calls: 2
+    cost_per_1m_input_tokens: 0
+    cost_per_1m_output_tokens: 0
 
 events:
   - "issues"
