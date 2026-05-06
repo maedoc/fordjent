@@ -8,6 +8,7 @@ webhook:
 forgejo:
   url: "http://forgejo-local:3000"
   token: "${FORGEJO_TOKEN}"
+  admin_token: "${FORGEJO_ADMIN_TOKEN}"
   rate_limit: 60
 
 telegram:

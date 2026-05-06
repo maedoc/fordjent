@@ -735,13 +735,16 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 			}
 		}
 	}
-	// Also filter comments where the sender is the bot user.
-	// This catches cost-summary comments and other auto-generated text that
-	// may not have the marker (e.g., pre-fix cost comments).
-	if sender, ok := payload["sender"].(map[string]interface{}); ok {
-		if login, ok := sender["login"].(string); ok {
-			if login == "fordjent-bot" || login == "fordjent[bot]" {
-				return true // bot comments never need agent processing
+	// Also filter comment events where the sender is the bot user.
+	// This catches cost-summary comments and other auto-generated text.
+	// IMPORTANT: only filter comments — bot-created issues and PRs MUST pass
+	// through so their sessions can spawn (scaffold issues, sub-issues from PM).
+	if _, isCommentEvent := payload["comment"]; isCommentEvent {
+		if sender, ok := payload["sender"].(map[string]interface{}); ok {
+			if login, ok := sender["login"].(string); ok {
+				if login == "fordjent-bot" || login == "fordjent[bot]" {
+					return true // bot comments never need agent processing
+				}
 			}
 		}
 	}

@@ -73,6 +73,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	store         *Store
 	forgejoClient *forgejo.Client
+	adminClient   *forgejo.Client // repo-owner-level client for collab/label setup
 	lc            *lifecycle.Lifecycle
 	mqClient      *mergequeue.Client
 	scheduler     *scheduler.Scheduler
@@ -82,7 +83,8 @@ type Manager struct {
 
 // Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
 func (m *Manager) Lifecycle() *lifecycle.Lifecycle { return m.lc }
-func (m *Manager) ForgejoClient() *forgejo.Client { return m.forgejoClient }
+func (m *Manager) ForgejoClient() *forgejo.Client  { return m.forgejoClient }
+func (m *Manager) AdminClient() *forgejo.Client     { return m.adminClient }
 
 func resolveDBPath(cfgPath, workDir string) string {
 	if cfgPath != "" {
@@ -111,6 +113,16 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 
+	// Admin client uses a separate token (if configured) for repo-owner-level
+	// operations like adding collaborators. Falls back to the bot token.
+	var adminClient *forgejo.Client
+	if cfg.Forgejo.AdminToken != "" {
+		adminClient = forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.AdminToken)
+		slog.Info("admin client configured for repo setup operations")
+	} else {
+		adminClient = forgejoClient
+	}
+
 	// Initialize lifecycle tracker
 	lifecycleDBPath := ""
 	if cfg.Agent.WorkDir != "" {
@@ -128,6 +140,7 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 		store:         store,
 		costTracker:   costTracker,
 		forgejoClient: forgejoClient,
+		adminClient:   adminClient,
 		lc:            lc,
 	}
 
@@ -230,10 +243,15 @@ func (m *Manager) Run(ctx context.Context) {
 
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Bootstrap scheduler/lifecycle/scaffold labels once per repo (sync to avoid races)
+	// Use admin client if available (bot may not have repo access yet).
 	if _, ok := m.labelBoot.Load(evt.Repository); !ok {
 		m.labelBoot.Store(evt.Repository, true)
 		lbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := m.forgejoClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
+		labelClient := m.adminClient
+		if labelClient == nil {
+			labelClient = m.forgejoClient
+		}
+		if err := labelClient.EnsureLabels(lbCtx, evt.Repository); err != nil {
 			slog.Warn("failed to ensure repo labels", "repo", evt.Repository, "error", err)
 		}
 		cancel()
@@ -318,7 +336,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		lower := strings.ToLower(title)
 		isPM := strings.Contains(lower, "[pm]") || strings.Contains(lower, "[project manager]") || strings.Contains(lower, "[decompose]")
 		if !isPM {
-			blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber)
+			blocked, err := scaffold.CheckAndBlock(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber, m.adminClient)
 			if err != nil {
 				slog.Warn("scaffold detection failed", "error", err, "repo", evt.Repository, "issue", evt.IssueNumber)
 			}

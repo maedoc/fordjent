@@ -91,6 +91,7 @@ type PullRequest struct {
 
 // Label represents a Forgejo issue/PR label.
 type Label struct {
+	ID   int64  `json:"id"`
 	Name string `json:"name"`
 }
 
@@ -241,9 +242,56 @@ func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, comm
 }
 
 // AddIssueLabels adds labels to an issue.
+// Forgejo expects {"labels": [label_id, ...]} with numeric IDs.
+// We first resolve label names to IDs via the labels API.
 func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber int, labels []string) error {
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
-	_, err := c.doRequest(ctx, http.MethodPost, apiPath, labels)
+
+	// Resolve label names to IDs
+	existing, err := c.ListLabels(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list labels: %w", err)
+	}
+	nameToID := make(map[string]int64)
+	for _, l := range existing {
+		nameToID[l.Name] = l.ID
+	}
+
+	var ids []int64
+	for _, name := range labels {
+		if id, ok := nameToID[name]; ok {
+			ids = append(ids, id)
+		} else {
+			// Label doesn't exist yet — try to create it first
+			if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
+				// If creation failed, try to list again in case of race
+				existing2, listErr := c.ListLabels(ctx, repo)
+				if listErr == nil {
+					for _, l := range existing2 {
+						if l.Name == name {
+							ids = append(ids, l.ID)
+							break
+						}
+					}
+				}
+				continue
+			}
+			// Re-list to get the new label's ID
+			existing3, _ := c.ListLabels(ctx, repo)
+			for _, l := range existing3 {
+				if l.Name == name {
+					ids = append(ids, l.ID)
+					break
+				}
+			}
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil // nothing to add
+	}
+
+	_, err = c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{"labels": ids})
 	return err
 }
 

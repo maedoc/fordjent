@@ -19,10 +19,19 @@ const (
 // CheckAndBlock inspects the repository file count. If it is below the threshold
 // and the current issue is not itself the scaffold issue, it either creates a
 // scaffold issue or labels the current issue blocked.
+// If adminClient is non-nil, it is used to add the bot as collaborator and apply
+// labels (requires repo-owner-level permissions that the bot token may not have).
 // Returns (blocked, error). A non-nil error does not imply blocked.
-func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, issueNumber int) (bool, error) {
+func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, issueNumber int, adminClient *forgejo.Client) (bool, error) {
 	if client == nil {
 		return false, nil
+	}
+
+	// Use adminClient for write operations (label add, collab add).
+	// The bot token may not have repo-level permissions yet.
+	writeClient := client
+	if adminClient != nil {
+		writeClient = adminClient
 	}
 
 	files, err := client.ListRepoFiles(ctx, repo, "")
@@ -45,6 +54,16 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 		return false, nil
 	}
 
+	// Ensure bot has write access to the repo (needed for push, labels, PRs).
+	// Do this FIRST so subsequent label operations can use either token.
+	if adminClient != nil {
+		if err := adminClient.AddCollaborator(ctx, repo, "fordjent-bot", "admin"); err != nil {
+			slog.Debug("scaffold: could not add bot as collaborator (may already have access)", "error", err, "repo", repo)
+		} else {
+			slog.Info("scaffold: added fordjent-bot as admin collaborator", "repo", repo)
+		}
+	}
+
 	// Check whether there is already an open scaffold issue.
 	openIssues, err := client.ListOpenIssues(ctx, repo)
 	if err != nil {
@@ -59,7 +78,6 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 			scaffoldIssue = iss
 			break
 		}
-		// Also check labels if available (Forgejo issue labels are returned inline)
 	}
 
 	if scaffoldIssue == nil {
@@ -75,14 +93,14 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 			slog.Warn("scaffold: failed to create scaffold issue", "error", err, "repo", repo)
 			return false, nil
 		}
-		_ = client.AddIssueLabels(ctx, repo, iss.Number, []string{ScaffoldLabel, "blocked"})
+		_ = writeClient.AddIssueLabels(ctx, repo, iss.Number, []string{ScaffoldLabel, "blocked"})
 		scaffoldIssue = iss
 		slog.Info("scaffold: created scaffold issue", "repo", repo, "issue", iss.Number)
 	}
 
 	// Label the current issue blocked so the agent doesn't start on it yet.
 	if issueNumber > 0 && (scaffoldIssue == nil || scaffoldIssue.Number != issueNumber) {
-		if err := client.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"}); err != nil {
+		if err := writeClient.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"}); err != nil {
 			slog.Warn("scaffold: failed to add blocked label", "error", err, "issue", issueNumber)
 		}
 		// Post a pointer comment

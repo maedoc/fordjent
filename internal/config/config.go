@@ -37,9 +37,10 @@ type WebhookConfig struct {
 }
 
 type ForgejoConfig struct {
-	URL       string `yaml:"url"`
-	Token     string `yaml:"token"`
-	RateLimit int    `yaml:"rate_limit"`
+	URL        string `yaml:"url"`
+	Token      string `yaml:"token"`
+	AdminToken string `yaml:"admin_token"`
+	RateLimit  int    `yaml:"rate_limit"`
 }
 
 type AgentConfig struct {
