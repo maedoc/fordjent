@@ -54,6 +54,7 @@ type AgentConfig struct {
 	EnableScaffoldDetection bool          `yaml:"enable_scaffold_detection"`
 	EnableSessionRecovery   bool          `yaml:"enable_session_recovery"`
 	EnableContextInjection  bool          `yaml:"enable_context_injection"`
+	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 }
 
 type BudgetConfig struct {
@@ -134,6 +135,7 @@ func Load(path string) (*Config, error) {
 			EnableScaffoldDetection: true,
 			EnableSessionRecovery:   true,
 			EnableContextInjection:  true,
+			EnableAutoCollaborator:  true,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

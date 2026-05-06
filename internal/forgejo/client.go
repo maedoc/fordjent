@@ -282,6 +282,13 @@ func (c *Client) PostIssueComment(ctx context.Context, repo string, issueNumber 
 	return err
 }
 
+// AddCollaborator adds a user as a collaborator to a repository with the given permission (read, write, admin).
+func (c *Client) AddCollaborator(ctx context.Context, repo, username, permission string) error {
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "collaborators", url.PathEscape(username))
+	_, err := c.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"permission": permission})
+	return err
+}
+
 // CreateLabel creates a new label in a repository.
 func (c *Client) CreateLabel(ctx context.Context, repo, name, color string) error {
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "labels")

@@ -323,6 +323,17 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		}
 	}
 
+	// Auto-elevate bot permissions so subsequent label/branch/PR operations succeed
+	if m.cfg.Agent.EnableAutoCollaborator {
+		collabCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if err := m.forgejoClient.AddCollaborator(collabCtx, evt.Repository, "fordjent-bot", "admin"); err != nil {
+			slog.Warn("failed to auto-elevate bot as collaborator", "repo", evt.Repository, "error", err)
+		} else {
+			slog.Info("auto-elevated bot to admin collaborator", "repo", evt.Repository, "user", "fordjent-bot")
+		}
+		cancel()
+	}
+
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sess = &Session{
 		Key:         evt.SessionKey,
