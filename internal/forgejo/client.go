@@ -76,6 +76,7 @@ type PullRequest struct {
 	Mergeable    bool   `json:"mergeable"`
 	Merged       bool   `json:"merged"` // Forgejo sends merged=true even when state=closed
 	HasConflicts bool   `json:"has_conflits"` // NOTE: Forgejo API field may vary — treat as advisory
+	User         *User  `json:"user"`
 	Head         struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`

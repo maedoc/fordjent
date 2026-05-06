@@ -479,8 +479,19 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	// Detect role from issue or PR title/labels before agent construction
 	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
 	// If a bot created this PR, auto-assign reviewer role to inspect and merge it
-	if sess.PRNumber > 0 && (sess.Sender == "fordjent-bot" || sess.Sender == "fordjent[bot]") {
-		if role == "implementer" || role == "" {
+	if sess.PRNumber > 0 {
+		isBotPR := sess.Sender == "fordjent-bot" || sess.Sender == "fordjent[bot]"
+		if !isBotPR {
+			// Check PR author for restored sessions where Sender is not set
+			pr, err := m.forgejoClient.GetPR(ctx, sess.Repository, sess.PRNumber)
+			if err == nil && pr != nil && pr.User != nil {
+				login := strings.ToLower(pr.User.Login)
+				if login == "fordjent-bot" || login == "fordjent[bot]" {
+					isBotPR = true
+				}
+			}
+		}
+		if isBotPR && (role == "implementer" || role == "") {
 			role = "reviewer"
 		}
 	}
