@@ -504,6 +504,35 @@ func (m *Manager) shutdownAll() {
 	}
 }
 
+// Drain waits up to the context deadline for active sessions to finish
+// their current turn before hard-cancelling. Call after Run() returns.
+func (m *Manager) Drain(ctx context.Context) {
+	for {
+		m.mu.Lock()
+		active := 0
+		for _, s := range m.sessions {
+			if s.busy {
+				active++
+			}
+		}
+		m.mu.Unlock()
+
+		if active == 0 {
+			slog.Info("all sessions drained")
+			return
+		}
+
+		slog.Info("draining sessions", "active", active)
+		select {
+		case <-ctx.Done():
+			slog.Warn("drain timeout exceeded, forcing shutdown", "remaining", active)
+			m.shutdownAll()
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
 // CleanSessions wipes all persistent session records from the database.
 // Does not affect in-memory sessions — call before Run().
 func (m *Manager) CleanSessions(_ context.Context) error {

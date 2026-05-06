@@ -92,5 +92,9 @@ func main() {
 	)
 
 	<-ctx.Done()
-	slog.Info("shutting down")
+	slog.Info("shutting down, draining sessions")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer drainCancel()
+	mgr.Drain(drainCtx)
+	slog.Info("shutdown complete")
 }
