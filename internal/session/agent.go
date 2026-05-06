@@ -15,6 +15,7 @@ import (
 	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/lifecycle"
 	"github.com/fordjent/fordjent/internal/memory"
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
@@ -33,10 +34,11 @@ type Agent struct {
 	mem         *memory.Memory
 	costTracker *cost.Tracker
 	executor    *agent.TurnExecutor
+	lc          *lifecycle.Lifecycle
 	role        string // pm, reviewer, devops, tester, implementer
 }
 
-func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, role string) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.ProviderForRole(role)
 	llmClient := provider.NewClient(prov)
@@ -59,6 +61,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		mem:         mem,
 		costTracker: ct,
 		executor:    executor,
+		lc:          lc,
 		role:        role,
 	}
 }
@@ -162,6 +165,18 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		}
 		if result.CostUSD > 0 {
 			metrics.AddCost(result.CostUSD)
+		}
+
+		// Record turn progress in lifecycle DB for diagnostics
+		if a.lc != nil {
+			var turnErr error
+			tokensIn, tokensOut := 0, 0
+			if result.Usage != nil {
+				tokensIn = result.Usage.PromptTokens
+				tokensOut = result.Usage.CompletionTokens
+			}
+			a.lc.RecordTurn(ctx, a.sess.Key, turn, len(result.Response.ToolCalls),
+				int(result.Latency.Milliseconds()), tokensIn, tokensOut, turnErr)
 		}
 
 		// If no tool calls, we're done

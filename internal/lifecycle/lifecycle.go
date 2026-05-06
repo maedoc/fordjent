@@ -289,6 +289,35 @@ func initSchema(db *sql.DB) error {
 			resolved_at  DATETIME
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_blocked_branch ON blocked_branches(repo, branch);
+
+		CREATE TABLE IF NOT EXISTS session_turns (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key  TEXT NOT NULL,
+			turn         INTEGER NOT NULL,
+			tool_calls   INTEGER NOT NULL DEFAULT 0,
+			latency_ms   INTEGER NOT NULL DEFAULT 0,
+			tokens_in    INTEGER NOT NULL DEFAULT 0,
+			tokens_out   INTEGER NOT NULL DEFAULT 0,
+			error        TEXT,
+			occurred_at  DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_turns_session ON session_turns(session_key);
 	`)
 	return err
+}
+
+// RecordTurn persists per-turn progress data for diagnostics.
+func (l *Lifecycle) RecordTurn(ctx context.Context, sessionKey string, turn, toolCalls, latencyMs, tokensIn, tokensOut int, turnErr error) {
+	var errStr string
+	if turnErr != nil {
+		errStr = turnErr.Error()
+	}
+	_, err := l.db.ExecContext(ctx,
+		`INSERT INTO session_turns (session_key, turn, tool_calls, latency_ms, tokens_in, tokens_out, error, occurred_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionKey, turn, toolCalls, latencyMs, tokensIn, tokensOut, errStr, time.Now().UTC(),
+	)
+	if err != nil {
+		slog.Warn("lifecycle: failed to record turn", "error", err, "session_key", sessionKey)
+	}
 }

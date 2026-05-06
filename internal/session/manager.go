@@ -484,7 +484,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			role = "reviewer"
 		}
 	}
-	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, role)
+	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role)
 
 	for {
 		select {
