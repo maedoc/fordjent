@@ -82,6 +82,7 @@ type Manager struct {
 
 // Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
 func (m *Manager) Lifecycle() *lifecycle.Lifecycle { return m.lc }
+func (m *Manager) ForgejoClient() *forgejo.Client { return m.forgejoClient }
 
 func resolveDBPath(cfgPath, workDir string) string {
 	if cfgPath != "" {

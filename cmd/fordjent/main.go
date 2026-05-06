@@ -59,6 +59,7 @@ func main() {
 	// Forgejo webhook router (always started)
 	router := webhook.NewRouter(cfg, bus, logger)
 	router.SetLifecycle(mgr.Lifecycle())
+	router.SetForgejoClient(mgr.ForgejoClient())
 
 	go func() {
 		addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

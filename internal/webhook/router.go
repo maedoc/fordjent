@@ -19,6 +19,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/lifecycle"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/webui"
@@ -36,6 +37,7 @@ type Router struct {
 	mu        sync.Mutex
 	shuttingDown bool
 	lc        *lifecycle.Lifecycle // optional: set post-construction for webhook delivery tracking
+	forgejo   *forgejo.Client      // optional: set post-construction for PR state checks
 }
 
 func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router {
@@ -62,6 +64,11 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 // SetLifecycle wires the lifecycle tracker for webhook delivery logging.
 func (r *Router) SetLifecycle(lc *lifecycle.Lifecycle) {
 	r.lc = lc
+}
+
+// SetForgejoClient wires the Forgejo API client for PR state checks.
+func (r *Router) SetForgejoClient(client *forgejo.Client) {
+	r.forgejo = client
 }
 
 // SetShutdown marks the router as shutting down. New webhooks will receive 503.
@@ -475,6 +482,21 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "filtered")
 		return
+	}
+
+	// Skip issue_comment events on closed/merged PRs to prevent runaway loops.
+	// Cost summary comments on completed PRs were the #1 cause of token burn.
+	if evt.Type == event.Type("issue_comment.created") && evt.PRNumber > 0 && r.forgejo != nil {
+		pr, err := r.forgejo.GetPR(req.Context(), evt.Repository, evt.PRNumber)
+		if err == nil && pr.State == "closed" {
+			r.logger.Info("skipped comment on closed PR", "event_id", evt.ID, "pr", evt.PRNumber)
+			if r.lc != nil {
+				r.lc.RecordDelivery(req.Context(), string(evt.Type), evt.Action, evt.Repository, evt.IssueNumber, evt.Sender, "skipped_closed_pr", nil)
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "skipped_closed_pr")
+			return
+		}
 	}
 
 	r.logger.Info("received event",
