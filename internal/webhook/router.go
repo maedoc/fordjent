@@ -41,6 +41,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 		mux:    http.NewServeMux(),
 	}
 	r.mux.HandleFunc("/acp/v1/events", r.handleWebhook)
+	r.mux.HandleFunc("/acp/v1/test-merge-webhook", r.handleTestMergeWebhook)
 	r.mux.HandleFunc("/healthz", r.handleHealth)
 	r.mux.HandleFunc("/readyz", r.handleReadyz)
 	r.mux.HandleFunc("/metrics", metrics.Handler())
@@ -310,6 +311,31 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 	// Extract action
 	action, _ := payload["action"].(string)
 
+	// Verbose logging for every received event (before filtering)
+	repoName := ""
+	if repo, ok := payload["repository"].(map[string]interface{}); ok {
+		if full, ok := repo["full_name"].(string); ok {
+			repoName = full
+		}
+	}
+	num := 0
+	if issue, ok := payload["issue"].(map[string]interface{}); ok {
+		if n, ok := issue["number"].(float64); ok {
+			num = int(n)
+		}
+	}
+	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+		if n, ok := pr["number"].(float64); ok {
+			num = int(n)
+		}
+	}
+	r.logger.Info("webhook received",
+		"event_type", eventType,
+		"action", action,
+		"repository", repoName,
+		"number", num,
+	)
+
 	// Normalize to internal event
 	evt, err := r.normalizeEvent(eventType, action, payload)
 	if err != nil {
@@ -336,6 +362,79 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 	)
 
 	// Publish to event bus
+	r.bus.Publish(req.Context(), evt)
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"event_id": "%s", "status": "accepted"}`, evt.ID)
+}
+
+// handleTestMergeWebhook accepts a synthetic pull_request.closed payload for
+// manual testing of the scheduler/merge-event path. No HMAC validation.
+func (r *Router) handleTestMergeWebhook(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(req.Body, 10<<20))
+	if err != nil {
+		r.logger.Error("failed to read test body", "error", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	defer req.Body.Close()
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		r.logger.Error("failed to parse test payload", "error", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	action, _ := payload["action"].(string)
+	repoName := ""
+	if repo, ok := payload["repository"].(map[string]interface{}); ok {
+		if full, ok := repo["full_name"].(string); ok {
+			repoName = full
+		}
+	}
+	num := 0
+	if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+		if n, ok := pr["number"].(float64); ok {
+			num = int(n)
+		}
+	}
+
+	r.logger.Info("test webhook received",
+		"event_type", "pull_request",
+		"action", action,
+		"repository", repoName,
+		"number", num,
+	)
+
+	evt, err := r.normalizeEvent("pull_request", action, payload)
+	if err != nil {
+		r.logger.Warn("unhandled test event", "action", action, "error", err)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ignored")
+		return
+	}
+
+	metrics.IncEvents()
+	if r.cfg.Security.FilterAgentEvents && r.isAgentEvent(payload) {
+		r.logger.Info("filtered agent-originated test event", "event_id", evt.ID)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "filtered")
+		return
+	}
+
+	r.logger.Info("test event accepted",
+		"event_id", evt.ID,
+		"type", evt.Type,
+		"repository", evt.Repository,
+		"session_key", evt.SessionKey,
+	)
+
 	r.bus.Publish(req.Context(), evt)
 
 	w.WriteHeader(http.StatusOK)
@@ -450,6 +549,16 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 // filtered by sender, because the agent legitimately creates sub-issues that
 // need downstream sessions spawned.
 func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
+	// NEVER filter pull_request closed events that represent a merge — the
+	// scheduler depends on seeing these.
+	if action, ok := payload["action"].(string); ok && action == "closed" {
+		if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+			if merged, ok := pr["merged"].(bool); ok && merged {
+				return false
+			}
+		}
+	}
+
 	marker := "<!-- ford -->"
 
 	// Check commits in push events
