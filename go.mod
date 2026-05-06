@@ -1,6 +1,6 @@
 module github.com/fordjent/fordjent
 
-go 1.19
+go 1.25.0
 
 require (
 	github.com/google/uuid v1.6.0
