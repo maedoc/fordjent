@@ -323,6 +323,16 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		}
 	}
 
+	// Ensure refs are current. Critical for PR review sessions and when
+	// main was updated since the last session.
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin")
+	fetchCmd.Env = append(os.Environ(), fmt.Sprintf("GIT_TERMINAL_PROMPT=0"))
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		slog.Warn("git fetch failed", "error", err, "output", string(out), "repoDir", repoDir)
+	} else {
+		slog.Debug("git fetch completed", "repoDir", repoDir)
+	}
+
 	// Auto-elevate bot permissions so subsequent label/branch/PR operations succeed.
 	// NOTE: The bot cannot add itself as a collaborator — this requires owner action.
 	// We log a one-time warning with instructions instead.

@@ -313,9 +313,28 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		return fmt.Sprintf("git error: %s\n%s", err, string(out)), nil
 	}
 
-	// Auto-push after successful commit so forgejo_create_pr never sees a
-	// missing remote branch. Use -u origin HEAD to always push current branch.
+	// After successful commit, verify code compiles and tests pass BEFORE
+	// pushing. This catches broken code early, not just at PR creation.
 	if isCommit {
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer verifyCancel()
+
+		buildCmd := exec.CommandContext(verifyCtx, "go", "build", "./...")
+		buildCmd.Dir = t.repoDir
+		if buildOut, buildErr := buildCmd.CombinedOutput(); buildErr != nil {
+			return fmt.Sprintf("%s\n[verify error] go build ./... failed:\n%s\n%s",
+				string(out), buildErr, string(buildOut)), nil
+		}
+
+		testCmd := exec.CommandContext(verifyCtx, "go", "test", "./...", "-count=1")
+		testCmd.Dir = t.repoDir
+		if testOut, testErr := testCmd.CombinedOutput(); testErr != nil {
+			return fmt.Sprintf("%s\n[verify error] go test ./... failed:\n%s\n%s",
+				string(out), testErr, string(testOut)), nil
+		}
+
+		// Auto-push after successful commit so forgejo_create_pr never sees a
+		// missing remote branch. Use -u origin HEAD to always push current branch.
 		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer pushCancel()
 		pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
