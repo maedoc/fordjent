@@ -27,14 +27,22 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 
 	files, err := client.ListRepoFiles(ctx, repo, "")
 	if err != nil {
-		slog.Warn("scaffold: failed to list repo files, allowing through", "error", err, "repo", repo)
-		return false, nil
+		slog.Warn("scaffold: failed to list repo files", "error", err, "repo", repo)
 	}
 
+	// If repo has zero files OR lacks go.mod/README.md, treat as empty.
+	hasGoMod := false
+	hasReadme := false
 	for _, f := range files {
-		if f == "go.mod" || strings.EqualFold(f, "README.md") {
-			return false, nil
+		if f == "go.mod" {
+			hasGoMod = true
 		}
+		if strings.EqualFold(f, "README.md") {
+			hasReadme = true
+		}
+	}
+	if len(files) > 0 && hasGoMod && hasReadme {
+		return false, nil
 	}
 
 	// Check whether there is already an open scaffold issue.

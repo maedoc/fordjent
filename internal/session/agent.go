@@ -338,8 +338,9 @@ You have access to the following tools:
 2. Make minimal, focused changes.
 3. All commit messages must start with "%s".
 4. NEVER push directly to protected branches (%s). Create a feature branch and PR instead.
-5. Workflow file changes (.forgejo/workflows/) MUST go through PRs.
-6. When done, post a summary comment on the issue/PR.
+5. **Scaffold issues on empty repos**: If the repository has no commits yet (check with 'git branch -a' or verify origin/main does not exist), commit your changes and push directly to the default branch using `git push origin HEAD:main` (or HEAD:master). Then post a comment saying the scaffold is complete. Do NOT call forgejo_create_pr — PRs require a base branch, which does not yet exist.
+6. Workflow file changes (.forgejo/workflows/) MUST go through PRs.
+7. When done, post a summary comment on the issue/PR.
 7. **Pre-flight check**: Before writing code, verify the repo state using bash or read_file. Check what packages exist, recent commits on origin/main, your current branch, and whether listed dependencies are merged. If dependencies aren't merged, post a comment and STOP.
 8. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
 9. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
