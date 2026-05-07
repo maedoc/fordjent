@@ -1,0 +1,53 @@
+digraph Coordination {
+    rankdir=TB;
+    node [fontname="Helvetica", fontsize=10, style=filled, fillcolor="#f0f0f0", shape=box, penwidth=0.5];
+    edge [fontname="Helvetica", fontsize=9, penwidth=0.8, color="#555555"];
+
+    subgraph cluster_sm {
+        label="Session Manager";
+        style=dashed;
+        color="#999999";
+        fontname="Helvetica";
+        fontsize=11;
+
+        SM [label="handleEvent()", fillcolor="#f5a623", fontcolor="white"];
+        Scaffold [label="Scaffold\nDetection", fillcolor="#7bc47f"];
+        Lifecycle [label="Lifecycle\nState Machine", fillcolor="#4a90d9", fontcolor="white"];
+    }
+
+    subgraph cluster_pr {
+        label="forgejo_create_pr Tool";
+        style=dashed;
+        color="#999999";
+        fontname="Helvetica";
+        fontsize=11;
+
+        CreatePR [label="create PR", fillcolor="#d0021b", fontcolor="white"];
+        StaleGate [label="Stale Gate\n+ Auto-Rebase", fillcolor="#bd10e0", fontcolor="white"];
+        MergeQ [label="Merge Queue\n(file gate)", fillcolor="#bd10e0", fontcolor="white"];
+    }
+
+    subgraph cluster_post {
+        label="On PR Merged";
+        style=dashed;
+        color="#999999";
+        fontname="Helvetica";
+        fontsize=11;
+
+        Scheduler [label="Scheduler\n(Depends on: #N)", fillcolor="#50e3c2"];
+    }
+
+    Forgejo [label="Forgejo API", fillcolor="#4a90d9", fontcolor="white", shape=cylinder];
+
+    SM -> Scaffold [label="IssueOpened\non empty repo"];
+    Scaffold -> Forgejo [label="create scaffold\nissue + block others"];
+    SM -> Lifecycle [label="session start /\nfailure / complete"];
+    Lifecycle -> Forgejo [label="label + comment\non failure"];
+
+    CreatePR -> StaleGate [label="1. check"];
+    StaleGate -> MergeQ [label="2. check"];
+    MergeQ -> Forgejo [label="3. create PR"];
+
+    Forgejo -> Scheduler [label="PR merged\nevent"];
+    Scheduler -> Forgejo [label="unblock\ndependent issues"];
+}

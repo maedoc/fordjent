@@ -1,6 +1,6 @@
 # Fordjent: Forgejo-Driven Agent Harness
 
-> A Go implementation of the asynchronous agent system described in PLAN.md, informed by the designs of Forgejo's webhook/actions infrastructure, OpenCode's ACP protocol, and Pi's SDK/extension architecture.
+> A Go implementation of an asynchronous agent system, informed by the designs of Forgejo's webhook/actions infrastructure, OpenCode's ACP protocol, and Pi's SDK/extension architecture.
 
 ## Architecture
 
@@ -16,10 +16,10 @@
 │   (HTTP Server)     │     │  (in-memory fanout)    │
 │   /acp/v1/events    │     └──────────┬─────────────┘
 │   /healthz          │                │
-└─────────────────────┘                │
-                                       ▼
+│   /status            │                │
+└─────────────────────┘                ▼
                             ┌─────────────────────┐
-                            │   Session Manager    │
+                            │   Session Manager   │
                             │                      │
                             │  session_key ──────┐ │
                             │  "org/repo/issues  │ │
@@ -33,19 +33,22 @@
                             │          ▼         │ │
                             │  ┌────────────────┐│ │
                             │  │  LLM Provider  ││ │
-                            │  │ (OpenAI-compat)││ │
+                            │  │ (role-routed)  ││ │
                             │  └───────┬────────┘│ │
                             │          │         │ │
                             │          ▼         │ │
                             │  ┌────────────────┐│ │
                             │  │ Tool Registry  ││ │
                             │  │ ┌────────────┐ ││ │
-                            │  │ │ Forgejo API│ ││ │
-                            │  │ │ Bash       │ ││ │
-                            │  │ │ Git        │ ││ │
-                            │  │ │ Read/Write │ ││ │
-                            │  │ │ Search     │ ││ │
-                            │  │ │ Reactions  │ ││ │
+                            │  │ │ Forgejo API │ ││ │
+                            │  │ │ Bash        │ ││ │
+                            │  │ │ Git         │ ││ │
+                            │  │ │ Read/Write  │ ││ │
+                            │  │ │ Search      │ ││ │
+                            │  │ │ Reactions   │ ││ │
+                            │  │ │ Branches    │ ││ │
+                            │  │ │ Hooks       │ ││ │
+                            │  │ │ Files       │ ││ │
                             │  │ └────────────┘ ││ │
                             │  └────────────────┘│ │
                             └─────────────────────┘ │
@@ -63,6 +66,25 @@
                   └────────────────────┘
 ```
 
+### Coordination Layer
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  Session Manager                       │
+│                                                       │
+│  IssueOpened ──▶ Scaffold Detection (empty repo?)     │
+│                       │                               │
+│                  Session Start ──▶ Lifecycle (state)  │
+│                       │                               │
+│  forgejo_create_pr ──▶ Stale Gate (auto-rebase)       │
+│                       │                               │
+│                  Merge Queue (file overlap check)     │
+│                       │                               │
+│  PR Merged ──▶ Scheduler (unblock dependents)         │
+│                                                       │
+└──────────────────────────────────────────────────────┘
+```
+
 ## Design Decisions
 
 ### Why Go?
@@ -72,44 +94,59 @@
 3. **Concurrency** — Goroutines map naturally to the session-per-issue model
 4. **Performance** — Low memory footprint for many concurrent sessions
 
-### Key Design Patterns (borrowed from research)
+### Key Design Patterns
 
-| Pattern | Source | Fordjent Implementation |
-|---------|--------|------------------------|
-| ACP endpoint | OpenCode | `/acp/v1/events` webhook receiver |
-| Event bus fanout | OpenCode | `event.Bus` with buffered channels |
-| Session affinity | PLAN.md | `SessionManager` maps `session_key → Agent` |
-| Serial event processing | PLAN.md | Per-session event channel with queuing |
-| Emoji reaction protocol | PLAN.md | 👀 → ⏳ → ✅ (or ❌) via Forgejo reactions API |
-| Git log as memory | PLAN.md | JSONL + git notes, queryable by session key |
-| Tool registry | Pi SDK | `tool.Registry` with `Tool` interface |
-| OpenAI-compatible provider | Pi/opencode | `provider.Client` with tool calling |
-| Loop prevention | PLAN.md | Commit prefix filtering + sender identity check |
-| Branch protection | PLAN.md | `gitTool` blocks direct push to protected branches |
-| Idle session reaping | PLAN.md | 1-minute reaper ticker with configurable timeout |
+| Pattern | Fordjent Implementation |
+|---------|------------------------|
+| ACP endpoint | `/acp/v1/events` webhook receiver |
+| Event bus fanout | `event.Bus` with buffered channels + backpressure |
+| Session affinity | `SessionManager` maps `session_key → Agent` |
+| Serial event processing | Per-session event channel with queuing |
+| Role-based provider routing | `ProviderForRole(role)` selects LLM per detected role |
+| Context compaction | `ContextTracker` truncates at configurable threshold |
+| Emoji reaction protocol | 👀 → ⏳ → ✅ (or ❌) via Forgejo reactions API |
+| Git log as memory | JSONL + git notes, queryable by session key |
+| Tool registry | `tool.Registry` with `Tool` interface (20 tools) |
+| OpenAI-compatible provider | `provider.Client` with tool calling + retry |
+| Loop prevention | `<!-- ford -->` marker + sender identity + branch protection |
+| Branch protection | `bash`/`git` tools block push to protected branches |
+| Stale gate + auto-rebase | `stalegate.IsStale()` detects + rebase + force-push |
+| Merge queue | File-gate checks overlap with open PRs |
+| Dependency scheduler | Parses `Depends on: #N`, transitions `blocked` → `ready` |
+| Scaffold detection | Blocks issues on empty repos, creates scaffold issue |
+| Lifecycle state machine | SQLite transitions, auto-labels on failure |
+| Cost tracking + budget | Per-session/repo/month SQLite, enforceable limits |
+| Idle session reaping | Configurable timeout with periodic reaper |
 
 ### Session Key Affinity
 
 Events are routed by `session_key` (format: `org/repo/issues/42` or `org/repo/pulls/7`). All events for the same key go to the same agent session, processed serially. This prevents race conditions where two agent instances try to comment on the same issue simultaneously.
 
+### Role Detection
+
+The session manager detects the agent's role from issue labels (`role:pm`, `role:implementer`, etc.) or title prefixes (`[pm]`, `[decompose]`). Each role can be routed to a different LLM provider via `role_providers` in config. Roles also get different turn budgets (`max_turns_pm`, `max_turns_implementer`).
+
+### PR Creation Pipeline
+
+Before `forgejo_create_pr` posts to the Forgejo API, it passes through multiple gates:
+
+1. **Stale gate** — `git merge-base --is-ancestor origin/main HEAD` checks if the branch is behind; if so, auto-rebase + force-push
+2. **Auto-push** — Ensures the branch exists on the remote
+3. **Merge queue** — Compares changed files against all open PRs; blocks if any file overlap
+4. **Build/test/lint verify** — Runs `go build`, `go test`, `golangci-lint`; blocks on failure
+
+If any gate fails, the agent receives an error message explaining what went wrong and can fix it.
+
 ### Tool System
 
 The tool system follows Pi's design: each tool implements a `Tool` interface with `Name()`, `Description()`, `Parameters()` (JSON Schema), and `Execute()`. Tools are registered in a `Registry` and exposed to the LLM as OpenAI function-calling tools.
 
-**Available tools:**
+**Available tools (20):**
 
-| Tool | Purpose |
-|------|---------|
-| `forgejo_comment` | Post comments on issues/PRs |
-| `forgejo_list_issues` | List issues in a repository |
-| `forgejo_get_issue` | Get issue/PR details |
-| `forgejo_create_pr` | Create pull requests |
-| `forgejo_search_code` | Search code in a repository |
-| `forgejo_add_reaction` | Add emoji reactions |
-| `bash` | Execute shell commands |
-| `read_file` | Read file contents |
-| `write_file` | Write file contents |
-| `git` | Execute git operations |
+| Category | Tools |
+|----------|-------|
+| Forgejo API | `forgejo_comment`, `forgejo_create_issue`, `forgejo_list_issues`, `forgejo_get_issue`, `forgejo_create_pr`, `forgejo_merge_pr`, `forgejo_list_prs`, `forgejo_search_code`, `forgejo_add_reaction`, `forgejo_list_branches`, `forgejo_delete_branch`, `forgejo_list_hooks`, `forgejo_create_hook`, `forgejo_delete_hook`, `forgejo_list_files`, `forgejo_pr_files`, `forgejo_list_collabs`, `forgejo_version`, `forgejo_user`, `forgejo_create_token` |
+| Local | `bash`, `read_file`, `write_file`, `git` |
 
 ### Memory System
 
@@ -117,23 +154,27 @@ Three-layer memory:
 
 1. **JSONL log** (`memory.jsonl`) — Every reasoning trace and tool call recorded as JSON lines
 2. **Git notes** — Agent thoughts attached to commits via `git notes --ref=fordjent`
-3. **Compaction** — Nightly compaction to `docs/issues/XXXX-summary.md` (to be implemented as Forgejo workflow)
+3. **Compaction** — Nightly compaction to `docs/issues/XXXX-summary.md`
 
 ### Loop Prevention
 
 Multi-layer defense:
 
-1. **Commit prefix filter** — Events from commits with `[agent-automation]` prefix are dropped
+1. **`<!-- ford -->` marker** — Hidden HTML marker appended to every comment/PR body; webhook router detects and drops self-originated events
 2. **Sender identity** — Events from `fordjent[bot]` are filtered
-3. **Branch protection** — `git` tool blocks direct push to `main`/`master`
-4. **Workflow PR requirement** — Agent must PR workflow file changes
+3. **Branch protection** — `bash` and `git` tools block push to `main`/`master`
+4. **Commit prefix filter** — Events from commits with `[agent-automation]` prefix are dropped
 
 ### LLM Provider
 
-Uses OpenAI-compatible API (works with OpenAI, Ollama, LiteLLM, any compatible endpoint). Supports:
+Uses OpenAI-compatible API (works with OpenAI, Ollama Cloud, Wafer, LiteLLM, any compatible endpoint). Supports:
 - Tool calling (function calling)
 - Multi-turn conversations with tool results
-- Configurable model, max tokens, temperature
+- Configurable model, max tokens, temperature per provider
+- Role-based provider routing via `role_providers`
+- Retry with exponential backoff + jitter for transient errors
+- Concurrency semaphore to limit parallel LLM calls
+- `reasoning_content` fallback for models that return reasoning in a separate field
 
 ## File Structure
 
@@ -142,19 +183,35 @@ fordjent/
 ├── cmd/fordjent/main.go           # CLI entry point
 ├── fordjent.yaml                   # Configuration file
 ├── internal/
-│   ├── config/config.go            # YAML config with env expansion
+│   ├── agent/
+│   │   ├── context.go              # Context window tracking + compaction
+│   │   └── turn.go                 # Per-turn execution with cost/latency logging
+│   ├── config/config.go            # YAML config with env expansion, hot-reload
+│   ├── cost/cost.go                # SQLite cost tracker + budget enforcement
 │   ├── event/event.go              # Event types and bus
-│   ├── webhook/router.go           # HTTP webhook receiver
-│   ├── session/manager.go          # Session lifecycle + agent loop
+│   ├── forgejo/client.go           # Forgejo REST API client
+│   ├── lifecycle/lifecycle.go      # Session state machine, failure labeling
+│   ├── memory/memory.go            # JSONL + git notes memory
+│   ├── mergequeue/queue.go         # File-gate merge queue
+│   ├── metrics/metrics.go          # Prometheus counters + JSON snapshot
+│   ├── provider/
+│   │   ├── client.go               # OpenAI-compatible LLM client
+│   │   └── retry.go                # Exponential backoff with jitter
+│   ├── scaffold/scaffold.go        # Empty-repo protection
+│   ├── scheduler/scheduler.go      # Dependency parser, label transitions
+│   ├── sentinel/sentinel.go        # Typed sentinel errors
+│   ├── session/
+│   │   ├── manager.go              # Session lifecycle, key affinity
+│   │   ├── store.go                # SQLite-backed session persistence
+│   │   └── agent.go                # Agent loop — LLM turns, tool dispatch
+│   ├── stalegate/stalegate.go      # Git-plumbing staleness + auto-rebase
 │   ├── tool/
 │   │   ├── registry.go             # Tool interface and registry
 │   │   ├── adapter.go              # Session/config adapters
-│   │   ├── forgejo_tools.go        # Forgejo API tools
-│   │   └── local_tools.go          # Bash, file, git tools
-│   ├── provider/client.go          # OpenAI-compatible LLM client
-│   ├── forgejo/client.go           # Forgejo API client
-│   └── memory/memory.go            # JSONL + git notes memory
-└── tests/                          # Unit tests per package
+│   │   ├── forgejo_tools.go        # 20 Forgejo API tools
+│   │   └── local_tools.go          # 4 local tools
+│   ├── webhook/router.go           # HTTP webhook receiver, /status, /metrics
+│   └── webui/webui.go             # HTML admin dashboard
 ```
 
 ## Running
@@ -178,31 +235,8 @@ FORGEJO_TOKEN=your-token OPENAI_API_KEY=your-key ./fordjent -config my-config.ya
 
 ## Future Enhancements
 
-### Phase 1: Forgejo Integration
-- [ ] Forgejo Actions workflow for nightly compaction
-- [ ] Deploy key management for git operations
-- [ ] Repository-scoped tokens via Forgejo API
-
-### Phase 2: Observability
-- [ ] Prometheus metrics (events processed, tool calls, LLM tokens)
-- [ ] OpenTelemetry tracing (event_id correlation)
-- [ ] Structured logging to file
-
-### Phase 3: Scale
-- [ ] SQLite persistence for routing table (survive restarts)
-- [ ] Rate limiting (Forgejo API, LLM API)
-- [ ] Multi-node support via Redis event bus
-- [ ] Forgejo runner integration (spawn agents as Action jobs)
-
-### Phase 4: Intelligence
-- [ ] Subagent orchestration (spawn explore agents for research)
-- [ ] Plan mode (read-only agent that creates plans)
-- [ ] Context compaction via LLM summarization
-- [ ] Skill system (like Pi's skill files for specialized tasks)
-
-### Forgejo Patches (minor)
-These would be simple patches to Forgejo to improve agent harness feasibility:
-1. **Bot user type** — Add `bot: true` field to user model, filter in webhook delivery
-2. **Agent session API** — Expose active agent sessions in Forgejo admin UI
-3. **Webhook event filtering** — Allow webhook to filter by commit message prefix
-4. **Reaction webhook events** — Emit events when reactions are added (for agent status tracking)
+- [ ] **Multi-node** — Redis event bus for horizontal scaling
+- [ ] **CI integration** — Forgejo Actions runner for test-gated merges
+- [ ] **Summarization compaction** — LLM-based context summarization instead of truncation
+- [ ] **Subagent orchestration** — Spawn explore/research agents for complex tasks
+- [ ] **Skill system** — Like Pi's skill files for specialized agent capabilities

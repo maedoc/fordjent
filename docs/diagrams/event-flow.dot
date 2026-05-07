@@ -1,0 +1,29 @@
+digraph EventFlow {
+    rankdir=LR;
+    node [fontname="Helvetica", fontsize=11, style=filled, fillcolor="#f0f0f0", shape=box, penwidth=0.5];
+    edge [fontname="Helvetica", fontsize=9, penwidth=0.8, color="#555555"];
+
+    Forgejo [label="Forgejo\n(Webhooks + API)", fillcolor="#4a90d9", fontcolor="white"];
+    HMAC [label="HMAC\nValidation", fillcolor="#e8e8e8", shape=diamond];
+    Bus [label="Event Bus\n(fanout)", fillcolor="#7bc47f"];
+    Filter [label="Agent Event\nFilter", fillcolor="#e8e8e8", shape=diamond];
+    SM [label="Session\nManager", fillcolor="#f5a623", fontcolor="white"];
+    Agent [label="Agent Loop\n(role → provider)", fillcolor="#d0021b", fontcolor="white"];
+    LLM [label="LLM Provider\n(OpenAI-compat)", fillcolor="#bd10e0", fontcolor="white"];
+    Tools [label="Tool Registry\n(~20 tools)", fillcolor="#50e3c2"];
+    ForgejoAPI [label="Forgejo REST\nAPI", fillcolor="#4a90d9", fontcolor="white"];
+    Repo [label="Repo Clone\n(git workdir)", fillcolor="#8b572a", fontcolor="white"];
+    Memory [label="Memory\n(JSONL)", fillcolor="#7bc47f"];
+
+    Forgejo -> HMAC [label="HTTP POST"];
+    HMAC -> Bus [label="verified"];
+    Bus -> Filter;
+    Filter -> SM [label="new event"];
+    SM -> Agent;
+    Agent -> LLM [label="prompt"];
+    LLM -> Agent [label="tool_calls"];
+    Agent -> Tools [label="execute"];
+    Tools -> ForgejoAPI [label="comments, PRs,\nreactions, labels"];
+    Tools -> Repo [label="read/write,\ngit ops, bash"];
+    Agent -> Memory [label="audit log"];
+}

@@ -1,19 +1,65 @@
 # Fordjent
 
-A Forgejo-driven AI agent harness written in Go. Fordjent listens for Forgejo webhook events (and Telegram messages), spawns per-issue agent sessions, and uses an LLM with tool-calling to autonomously triage, comment, and create pull requests.
+A Forgejo-driven AI agent harness written in Go. Fordjent listens for Forgejo webhook events, spawns per-issue agent sessions, and uses an LLM with tool-calling to autonomously triage, comment, create issues, and submit pull requests.
 
 ## Features
 
 - **Webhook-driven** — Receives Forgejo events via HMAC-validated HTTP webhooks
-- **Telegram interface** — Chat with the agent via Telegram forum topics mapped to issues/PRs
 - **Session affinity** — Events for the same issue/PR route to the same agent session for serial processing
-- **Crash recovery** — Session metadata persisted to SQLite; sessions survive restarts
-- **Tool calling** — 10 built-in tools (Forgejo API, bash, file I/O, git, code search, reactions)
-- **Loop prevention** — Multi-layer defense: commit prefix filtering, bot sender filtering, branch protection
-- **Memory system** — JSONL audit log + git notes for persistent agent reasoning traces
-- **Observability** — Prometheus `/metrics`, `/healthz`, and `/readyz` endpoints
+- **Role-based providers** — Detects agent role (PM, implementer, reviewer, devops, tester) from labels/titles and routes to the best LLM for that role
+- **20 built-in tools** — Forgejo API, bash, file I/O, git, code search, reactions, branch/hook management, and more
+- **PR creation pipeline** — Multi-gate: stale gate + auto-rebase, merge queue (file overlap), build/test/lint verify, then create PR
+- **Dependency scheduler** — Parses `Depends on: #N` in issue bodies; auto-unblocks dependents when PRs merge
+- **Lifecycle tracking** — SQLite state machine tracks every session; auto-labels issues on failure
+- **Cost tracking + budget** — Per-session/repo/month cost in SQLite; enforceable spend limits
+- **Context compaction** — Auto-truncates old turns at configurable threshold to avoid context overflow
+- **Auto-rebase** — Stale gate detects when a branch is behind `origin/main` and rebase + force-pushes automatically
+- **Scaffold detection** — Blocks issues on empty repos; creates a scaffold issue first
+- **Loop prevention** — Multi-layer: `<!-- ford -->` marker, bot sender filtering, branch protection, commit prefix filtering
+- **Observability** — `/metrics` (Prometheus), `/status` (JSON), `/activity` (HTML), `/admin` dashboard, `/healthz`, `/readyz`
+- **Crash recovery** — Session metadata persisted to SQLite; sessions survive restarts with rebase-abort cleanup
+- **Config hot-reload** — Watcher polls disk and applies changes without restart
 - **Single binary** — Pure Go, no CGO required (SQLite via modernc.org/sqlite)
 - **Docker-ready** — Multi-stage Dockerfile and Compose stack included
+
+## Architecture
+
+### Event Flow
+
+![Event Flow](docs/diagrams/event-flow.jpg)
+
+1. **Ingest** — Forgejo webhooks are validated via HMAC-SHA256
+2. **Filter** — Agent-originated events (marked with `<!-- ford -->`) are dropped to prevent loops
+3. **Route** — The session manager maps events to sessions by key (e.g. `org/repo/issues/42`)
+4. **Process** — Each session runs a serial agent loop; role detection selects the LLM provider
+5. **Act** — The LLM decides which tools to call; results feed back into the conversation
+6. **Record** — Reasoning traces and tool outputs are written to JSONL audit logs
+
+### PR Creation Pipeline
+
+![PR Pipeline](docs/diagrams/pr-pipeline.jpg)
+
+Before `forgejo_create_pr` posts to the API, it passes through multiple gates:
+1. **Stale gate** — Detects if the branch is behind `origin/main`; auto-rebases and force-pushes
+2. **Auto-push** — Ensures the branch is pushed to the remote
+3. **Merge queue** — Checks for file overlap with other open PRs; blocks if conflicts exist
+4. **Build/test/lint verify** — Runs `go build`, `go test`, and `golangci-lint`; blocks on failure
+
+### Session Lifecycle
+
+![Lifecycle](docs/diagrams/lifecycle.jpg)
+
+Every session tracks through a state machine: `created` → `working` → `pr_created` → `completed`. On failure (max turns or error), the lifecycle system auto-labels the issue `fordjent/failed:*` + `blocked` and posts a comment explaining the failure.
+
+### Coordination Layer
+
+![Coordination](docs/diagrams/coordination.jpg)
+
+Four coordination subsystems work together around the session manager:
+- **Scaffold detection** — Blocks issues on empty repos; creates a `[scaffold]` issue first
+- **Stale gate** — Prevents stale-branch PRs; auto-rebases when possible
+- **Merge queue** — File-gate prevents PRs that conflict with open PRs
+- **Scheduler** — On PR merge, scans dependent issues and transitions `blocked` → `ready`
 
 ## Quick Start
 
@@ -52,98 +98,49 @@ The Compose stack binds to `127.0.0.1:8080` by default — put it behind a rever
 4. Select events: `issues`, `issue_comment`, `pull_request`, `pull_request_review_comment`
 5. Create a repository-scoped access token and set it as `FORGEJO_TOKEN`
 
-### Telegram Setup (optional)
+## Tools
 
-1. Create a bot via [@BotFather](https://t.me/BotFather)
-2. Create a supergroup and enable **Topics** (forum mode)
-3. Add the bot as an admin with "Manage Topics" permission
-4. Configure in `fordjent.yaml`:
+The agent has access to 20 tools exposed via OpenAI function calling:
 
-```yaml
-telegram:
-  enabled: true
-  token: "${TELEGRAM_BOT_TOKEN}"
-  allowed_chats: [-1001234567890]
-  chat_bindings:
-    -1001234567890:
-      repository: "org/repo"
-      allowed_users: ["your_username"]
-```
+### Forgejo API Tools
 
-5. When an issue or PR is opened, Fordjent creates a forum topic for it. Messages in that topic are routed to the agent session for that issue.
+| Tool | Description |
+|------|-------------|
+| `forgejo_comment` | Post comments on issues and pull requests |
+| `forgejo_create_issue` | Create new issues (with dedup check and dependency linking) |
+| `forgejo_list_issues` | List and filter issues in a repository |
+| `forgejo_get_issue` | Get issue or PR details by number |
+| `forgejo_create_pr` | Create pull requests (stale gate → merge queue → verify gate) |
+| `forgejo_merge_pr` | Merge a PR (mergeability check + human approval gate; bot PRs auto-bypass) |
+| `forgejo_list_prs` | List pull requests in a repository |
+| `forgejo_search_code` | Search code within a repository |
+| `forgejo_add_reaction` | Add emoji reactions to issues/comments |
+| `forgejo_list_branches` | List branches with protection status |
+| `forgejo_delete_branch` | Delete a branch (e.g., after merge) |
+| `forgejo_list_hooks` | List webhooks for a repository |
+| `forgejo_create_hook` | Create a webhook |
+| `forgejo_delete_hook` | Delete a webhook |
+| `forgejo_list_files` | List files/directories in a repo |
+| `forgejo_pr_files` | List files changed in a PR |
+| `forgejo_list_collabs` | List repository collaborators |
+| `forgejo_version` | Get the Forgejo server version |
+| `forgejo_user` | Get the currently authenticated user |
+| `forgejo_create_token` | Create an access token |
 
-## Architecture
+### Local Tools
 
-```
-                          ┌──────────────────┐
-                          │     Forgejo      │
-                          │  (Webhooks, API) │
-                          └────────┬─────────┘
-                                   │ HTTP POST (HMAC)
-                                   ▼
-┌──────────────┐         ┌──────────────────┐
-│   Telegram   │────────▶│   Event Bus      │
-│   (Long Poll)│         │  (fanout + back  │
-└──────────────┘         │   pressure)      │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │ Session Manager   │
-                         │                  │
-                         │ session_key:     │
-                         │ "org/repo/       │
-                         │  issues/42"      │
-                         │     │            │
-                         │     ▼            │
-                         │ ┌────────────┐   │
-                         │ │   Agent    │   │
-                         │ │ (serial q) │   │
-                         │ └─────┬──────┘   │
-                         │       │          │
-                         │       ▼          │
-                         │ ┌───────────┐    │
-                         │ │   LLM     │    │
-                         │ │ (OpenAI)  │    │
-                         │ └─────┬─────┘    │
-                         │       │          │
-                         │       ▼          │
-                         │ ┌────────────┐   │
-                         │ │   Tools    │   │
-                         │ │ (10 built) │   │
-                         │ └────────────┘   │
-                         └──────────────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │     Memory       │
-                         │ (JSONL + git     │
-                         │  notes)          │
-                         └──────────────────┘
-```
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute shell commands in the repo directory (protected branch push blocked) |
+| `read_file` | Read file contents (with offset/limit; batch mode via `paths` array) |
+| `write_file` | Create or overwrite files in the repository |
+| `git` | Execute git operations (push blocked; auto-push after commit on feature branches) |
 
-### Event Flow
-
-1. **Ingest** — Forgejo webhooks and Telegram messages are normalized into `event.Event` structs
-2. **Route** — The session manager maps events to sessions by `session_key` (e.g. `org/repo/issues/42`)
-3. **Process** — Each session has a serial queue; the agent processes one event at a time
-4. **Act** — The LLM decides which tools to call; tool results feed back into the conversation
-5. **Record** — Reasoning traces and tool outputs are written to JSONL and git notes
-
-### Emoji Reaction Protocol
-
-The agent uses Forgejo reactions to communicate status:
-
-| Reaction | Meaning |
-|----------|---------|
-| 👀 | Agent has seen the event |
-| ⏳ | Agent is processing |
-| ✅ | Agent finished successfully |
-| ❌ | Agent encountered an error |
+All Forgejo API tools sanitize repository names via per-segment `url.PathEscape` to prevent URL injection. The `git` tool blocks push to protected branches — the agent creates PRs via `forgejo_create_pr` instead.
 
 ## Configuration
 
-Configuration is a single YAML file with environment variable expansion via `${VAR}` syntax in **any** field.
+Configuration is a single YAML file with environment variable expansion via `${VAR}` syntax in any field.
 
 ```yaml
 server:
@@ -151,26 +148,41 @@ server:
   port: 8080
 
 webhook:
-  secret: "${WEBHOOK_SECRET}"          # HMAC shared secret
+  secret: "${WEBHOOK_SECRET}"
 
 forgejo:
   url: "${FORGEJO_URL}"
-  token: "${FORGEJO_TOKEN}"            # Repository-scoped token
+  token: "${FORGEJO_TOKEN}"
+  admin_token: "${FORGEJO_ADMIN_TOKEN}"   # For admin API calls (optional)
   rate_limit: 60
 
-telegram:
-  enabled: false
-  token: "${TELEGRAM_BOT_TOKEN}"
-  poll_timeout: 10
-  allowed_chats: []
-  chat_bindings: {}
-
 agent:
-  max_sessions: 10
+  max_sessions: 25
   idle_timeout: "4h"
-  workdir: "/var/lib/fordjent/work"    # Base directory for clones
-  max_turns: 25
+  workdir: "/var/lib/fordjent/work"
+  max_turns: 75                            # Default turn budget per session
+  max_turns_pm: 15                         # PM sessions get fewer turns
+  max_turns_implementer: 50                # Implementer sessions get more
   commit_prefix: "[agent-automation]"
+  context_window: 131072                   # Token window size for compaction
+  compaction_threshold: 0.85              # Compact when 85% full
+  compaction_keep_turns: 8                # Keep last N turns on compaction
+  enable_lifecycle: true                   # Track session state machine
+  enable_stale_gate: true                  # Auto-rebase stale branches
+  enable_scaffold_detection: true          # Block issues on empty repos
+  enable_session_recovery: true            # Resume sessions after crash
+  enable_context_injection: true           # Inject issue context into prompt
+  enable_auto_collaborator: true           # Auto-add agent as collaborator
+  session_timeout: "30m"
+  role_providers:                          # Route roles to specific providers
+    pm: "openai"
+    reviewer: "openai"
+    implementer: "openai"
+
+budget:
+  enabled: false
+  max_session_cost: 0.50                  # USD per session
+  max_monthly_cost: 10.00                 # USD per month
 
 providers:
   - name: "openai"
@@ -178,6 +190,13 @@ providers:
     api_key: "${OPENAI_API_KEY}"
     model: "${OPENAI_MODEL:-gpt-4o-mini}"
     max_tokens: 16384
+    request_timeout: "60s"
+    max_retries: 3
+    retry_base_delay: "2s"
+    retry_max_delay: "30s"
+    max_concurrent_llm_calls: 3
+    cost_per_1m_input_tokens: 0.30
+    cost_per_1m_output_tokens: 1.20
 
 events:
   - "issues"
@@ -191,6 +210,7 @@ security:
   protected_branches: ["main", "master"]
   require_pr_for_workflows: true
   filter_agent_events: true
+  admin_token: "${ADMIN_TOKEN}"            # Protects admin endpoints
 
 memory:
   enabled: true
@@ -198,59 +218,23 @@ memory:
   compaction_path: "docs/issues"
 
 database:
-  path: ""                            # Defaults to sessions.db next to workdir
+  path: ""                                # Defaults to sessions.db next to workdir
+
+log_level: "info"
 ```
 
 See [`fordjent.yaml`](fordjent.yaml) for the full reference with comments.
 
-## Tools
+### Emoji Reaction Protocol
 
-The agent has access to 10 tools exposed via OpenAI function calling:
+The agent uses Forgejo reactions to communicate status:
 
-### Forgejo API Tools
-
-| Tool | Description |
-|------|-------------|
-| `forgejo_comment` | Post comments on issues and pull requests |
-| `forgejo_list_issues` | List and filter issues in a repository |
-| `forgejo_get_issue` | Get issue or PR details by number |
-| `forgejo_create_pr` | Create pull requests from a head branch |
-| `forgejo_search_code` | Search code within a repository |
-| `forgejo_add_reaction` | Add emoji reactions to issues/comments |
-
-### Local Tools
-
-| Tool | Description |
-|------|-------------|
-| `bash` | Execute shell commands in the repository working directory |
-| `read_file` | Read file contents (with offset/limit for large files) |
-| `write_file` | Create or overwrite files in the repository |
-| `git` | Execute git operations (push blocked on protected branches) |
-
-All Forgejo API tools sanitize repository names via `url.PathEscape` to prevent URL injection. The `git` tool blocks all push operations — the agent creates PRs via `forgejo_create_pr` instead.
-
-## Telegram Integration
-
-Fordjent can act as a Telegram bot, mapping forum topics to Forgejo issues and PRs:
-
-- **Supergroup (forum mode)** maps to a repository
-- **Forum topic** maps to a specific issue or PR session
-- Messages in a topic are normalized to events and routed through the same event bus
-- The agent can respond in both Forgejo (comments) and Telegram (topic replies)
-
-### Telegram Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Show help message |
-| `/status` | Health check |
-| `/bind <repo>` | Show how to bind this chat to a repository |
-
-### Topic Lifecycle
-
-1. When an issue/PR is opened, Fordjent auto-creates a forum topic (Phase 2)
-2. Messages in that topic are routed to the agent session for that issue
-3. Agent responses are posted back to the topic (Phase 3)
+| Reaction | Meaning |
+|----------|---------|
+| 👀 | Agent has seen the event |
+| ⏳ | Agent is processing |
+| ✅ | Agent finished successfully |
+| ❌ | Agent encountered an error |
 
 ## Project Structure
 
@@ -258,37 +242,44 @@ Fordjent can act as a Telegram bot, mapping forum topics to Forgejo issues and P
 fordjent/
 ├── cmd/fordjent/main.go              # Entry point — wires all components
 ├── fordjent.yaml                      # Reference configuration
-├── Dockerfile                         # Multi-stage Go build (pinned, non-root)
+├── Dockerfile                         # Multi-stage Go build (non-root user)
 ├── docker-compose.yaml                # Compose stack with env secrets
 ├── .env.example                       # Template for environment variables
-├── scripts/
-│   └── fordjent.service                 # systemd unit for bare-metal deploy
-├── .forgejo/workflows/ci.yaml         # Build, test, and Docker push CI
+├── docs/
+│   ├── deployment.md                  # Docker, systemd, backup, monitoring
+│   └── diagrams/                      # Graphviz architecture diagrams
 ├── internal/
-│   ├── config/config.go               # YAML config with ${VAR} expansion
+│   ├── agent/
+│   │   ├── context.go                 # Context window tracking + compaction
+│   │   └── turn.go                    # Per-turn execution with cost/latency logging
+│   ├── config/config.go               # YAML config with env expansion, hot-reload
+│   ├── cost/cost.go                   # SQLite cost tracker + budget enforcement
 │   ├── event/event.go                 # Event types, bus (fanout + backpressure)
-│   ├── webhook/router.go              # HTTP server, HMAC validation, /metrics, /readyz
+│   ├── forgejo/client.go              # Forgejo REST API client
+│   ├── lifecycle/lifecycle.go         # Session state machine, failure labeling
+│   ├── memory/memory.go               # JSONL audit log + git notes memory
+│   ├── mergequeue/queue.go            # File-gate merge queue
+│   ├── metrics/metrics.go             # Prometheus counters + JSON snapshot
+│   ├── provider/
+│   │   ├── client.go                  # OpenAI-compatible LLM client
+│   │   └── retry.go                   # Exponential backoff with jitter
+│   ├── scaffold/scaffold.go           # Empty-repo protection + scaffold issue
+│   ├── scheduler/scheduler.go         # Dependency parser, label transitions
+│   ├── sentinel/sentinel.go          # Typed sentinel errors
 │   ├── session/
 │   │   ├── manager.go                 # Session lifecycle, key affinity, idle reaping
 │   │   ├── store.go                   # SQLite-backed session persistence
 │   │   └── agent.go                   # Agent loop — LLM turns, tool dispatch
-│   ├── provider/client.go             # OpenAI-compatible LLM client
-│   ├── forgejo/client.go              # Forgejo REST API client
+│   ├── stalegate/stalegate.go         # Git-plumbing staleness check + auto-rebase
 │   ├── tool/
 │   │   ├── registry.go                # Tool interface and registry
 │   │   ├── adapter.go                 # Session info and agent config adapters
-│   │   ├── forgejo_tools.go           # Forgejo API tools (6 tools)
-│   │   └── local_tools.go             # Shell, file, git tools (4 tools)
-│   ├── metrics/metrics.go             # Prometheus text-format metrics
-│   ├── memory/memory.go               # JSONL log + git notes memory
-│   └── telegram/
-│       ├── router.go                  # Long polling, message→event normalization
-│       ├── topics.go                  # SQLite-backed topic↔session mapping store
-│       └── responder.go              # Message splitting, acknowledge/error
-├── docs/
-│   ├── deployment.md                  # Docker, systemd, backup, monitoring
-│   └── telegram-plan.md               # Telegram integration design notes
-└── DESIGN.md                          # Detailed architecture document
+│   │   ├── forgejo_tools.go           # 20 Forgejo API tools
+│   │   └── local_tools.go             # 4 local tools (bash, read, write, git)
+│   ├── webhook/router.go              # HTTP server, HMAC, event normalization, /status
+│   └── webui/webui.go                # HTML admin dashboard at /admin
+└── scripts/
+    └── fordjent.service               # systemd unit for bare-metal deploy
 ```
 
 ## Security
@@ -297,27 +288,60 @@ fordjent/
 
 Four layers prevent the agent from triggering itself in an infinite loop:
 
-1. **Commit prefix filter** — Events from commits with `[agent-automation]` prefix are dropped
+1. **`<!-- ford -->` marker** — Every comment, PR, and issue body created by the agent includes a hidden HTML marker. The webhook router detects this marker and drops the event.
 2. **Bot sender filter** — Events from `fordjent[bot]` are ignored
-3. **Branch protection** — The `git` tool blocks all push operations; agent uses `forgejo_create_pr`
-4. **Workflow PR requirement** — Agent must create a PR for any workflow file changes
+3. **Branch protection** — The `bash` and `git` tools block pushes to `main`/`master`; agent uses feature branches + `forgejo_create_pr`
+4. **Commit prefix filter** — Events from commits with `[agent-automation]` prefix are dropped
 
 ### Input Sanitization
 
-- Repository names from LLM tool calls are sanitized via `url.PathEscape` before URL construction
+- Repository names from LLM tool calls are sanitized via per-segment `url.PathEscape` before URL construction
+- File paths in `read_file`/`write_file` are validated against path traversal (must stay inside repo root)
 - Shell arguments in the `bash` tool are passed via `exec.Command` argument vector (no shell injection)
-- Webhook payloads are validated via HMAC-SHA256 before processing
+- Dangerous commands (`rm -rf /`, `mkfs`, `dd`, `shutdown`) are blocked by pattern
+- Tool output is capped at a configurable byte limit (default 64KB) to prevent context bloat
 
 ### Secret Management
 
 | Secret | Scope | Purpose |
 |--------|-------|---------|
 | `FORGEJO_TOKEN` | Repository-scoped | Forgejo API calls |
-| `OPENAI_API_KEY` | LLM provider | Model inference |
-| `TELEGRAM_BOT_TOKEN` | Bot identity | Telegram long polling |
+| `FORGEJO_ADMIN_TOKEN` | Admin-scoped | Admin API calls (optional) |
+| Provider API key | LLM provider | Model inference |
 | `webhook.secret` | Shared HMAC | Webhook authenticity |
+| `security.admin_token` | Fordjent admin | Protects `/admin`, `/status` endpoints |
 
 Secrets are injected via environment variables and expanded in config with `${VAR}` syntax. Never commit secrets to the repository.
+
+## Monitoring & Operations
+
+Fordjent exposes HTTP endpoints on the configured port:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/healthz` | Liveness probe — returns `ok` |
+| `/readyz` | Readiness probe — returns `ready` |
+| `/metrics` | Prometheus text-format metrics |
+| `/status` | JSON snapshot: costs, lifecycle, metrics |
+| `/activity` | HTML activity feed (recent sessions) |
+| `/admin` | HTML admin dashboard |
+
+### Prometheus Metrics
+
+```
+fordjent_events_total          — webhook events received
+fordjent_sessions_total        — cumulative sessions created
+fordjent_sessions_active       — gauge of current sessions
+fordjent_tool_calls_total      — all tool executions
+fordjent_llm_calls_total       — all LLM calls
+fordjent_llm_retries_total    — cumulative LLM retries
+fordjent_tokens_total{type}    — input/output token counts
+fordjent_cost_total_total      — cumulative spend in USD
+```
+
+### Deployment
+
+See [`docs/deployment.md`](docs/deployment.md) for Docker Compose with reverse-proxy, systemd installation, backup strategy, and monitoring.
 
 ## Development
 
@@ -339,7 +363,7 @@ go test -race -count=1 ./...
 go test -v -race ./internal/session/...
 ```
 
-The test suite includes **108 tests** covering all packages with `-race` clean.
+The test suite includes **112+ tests** covering all packages with `-race` clean.
 
 ### Adding a Tool
 
@@ -353,7 +377,7 @@ type myTool struct {
 func (t *myTool) Name() string         { return "my_tool" }
 func (t *myTool) Description() string  { return "Does something useful" }
 func (t *myTool) Parameters() map[string]interface{} { /* JSON Schema */ }
-func (t *myTool) Execute(ctx context.Context, params map[string]interface{}, info tool.SessionInfo) (*tool.Result, error) {
+func (t *myTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
     // Implementation
 }
 ```
@@ -375,36 +399,21 @@ docker compose logs -f
 # Health check
 curl http://localhost:8080/healthz
 
-# Metrics
-curl http://localhost:8080/metrics
+# Status dashboard
+curl http://localhost:8080/status | jq .
 ```
-
-## Monitoring & Operations
-
-Fordjent exposes three HTTP endpoints on the configured port:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `/healthz` | Liveness probe — returns `ok` |
-| `/readyz` | Readiness probe — returns `ready` |
-| `/metrics` | Prometheus text-format metrics (`fordjent_events_total`, `fordjent_sessions_active`, etc.) |
-
-### Deployment
-
-See [`docs/deployment.md`](docs/deployment.md) for:
-- Docker Compose setup with reverse-proxy notes
-- systemd installation and hardening
-- Backup strategy (`/var/lib/fordjent/work`)
-- Monitoring endpoint usage
 
 ## Roadmap
 
-- [ ] **Phase 2** — Auto-create Telegram topics when issues/PRs open; `ResponseWriter` interface for dual output
-- [ ] **Phase 3** — Topic lifecycle (close/reopen with issues), streaming responses, rate limiting
-- [x] **Observability** — Prometheus metrics, `/readyz`, structured logging
+- [x] **Observability** — Prometheus metrics, `/readyz`, `/status`, `/admin` dashboard
 - [x] **Persistence** — SQLite-backed session state for crash recovery
-- [ ] **Scale** — Redis event bus for multi-node, Forgejo runner integration
-- [ ] **Intelligence** — Subagent orchestration, plan mode, context compaction via summarization
+- [x] **Intelligence** — Role-based provider routing, context compaction, dependency scheduling
+- [x] **Coordination** — Merge queue, stale gate + auto-rebase, scaffold detection, lifecycle tracking
+- [x] **Cost tracking** — Per-session/repo/month cost with budget enforcement
+- [ ] **Multi-node** — Redis event bus for horizontal scaling
+- [ ] **CI integration** — Forgejo Actions runner integration for test-gated merges
+- [ ] **Summarization compaction** — LLM-based context summarization instead of truncation
+- [ ] **Subagent orchestration** — Spawn explore/research agents for complex tasks
 
 ## License
 

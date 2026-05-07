@@ -1,0 +1,37 @@
+digraph PRPipeline {
+    rankdir=LR;
+    node [fontname="Helvetica", fontsize=10, style=filled, fillcolor="#f0f0f0", shape=box, penwidth=0.5];
+    edge [fontname="Helvetica", fontsize=9, penwidth=0.8, color="#555555"];
+
+    Start [label="forgejo_create_pr\ncalled by agent", fillcolor="#d0021b", fontcolor="white", shape=oval];
+
+    subgraph cluster_gates {
+        label="PR Creation Gates";
+        style=dashed;
+        color="#999999";
+        fontname="Helvetica";
+        fontsize=10;
+
+        Stale [label="Stale Gate\n(git merge-base)", fillcolor="#f5a623", fontcolor="white", shape=diamond];
+        Rebase [label="Auto-Rebase\n+ Force Push", fillcolor="#7bc47f"];
+        Push [label="Auto-Push\n(git push -u)", fillcolor="#7bc47f"];
+        MergeQ [label="Merge Queue\n(file overlap?)", fillcolor="#f5a623", fontcolor="white", shape=diamond];
+        Verify [label="Build + Test\nVerify Gate", fillcolor="#f5a623", fontcolor="white", shape=diamond];
+        Create [label="POST PR\n(with <!-- ford -->)", fillcolor="#4a90d9", fontcolor="white"];
+    }
+
+    Blocked1 [label="BLOCKED\nrebase conflicts", fillcolor="#e0e0e0", fontcolor="#999999"];
+    Blocked2 [label="BLOCKED\nfile conflict with\nopen PR", fillcolor="#e0e0e0", fontcolor="#999999"];
+    Blocked3 [label="BLOCKED\nbuild/test failure", fillcolor="#e0e0e0", fontcolor="#999999"];
+
+    Start -> Stale;
+    Stale -> Rebase [label="stale"];
+    Stale -> Push [label="current"];
+    Rebase -> Push [label="success"];
+    Rebase -> Blocked1 [label="conflict"];
+    Push -> MergeQ;
+    MergeQ -> Verify [label="no overlap"];
+    MergeQ -> Blocked2 [label="overlap"];
+    Verify -> Create [label="pass"];
+    Verify -> Blocked3 [label="fail"];
+}

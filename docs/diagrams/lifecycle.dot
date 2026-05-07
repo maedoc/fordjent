@@ -1,0 +1,24 @@
+digraph Lifecycle {
+    rankdir=TB;
+    node [fontname="Helvetica", fontsize=10, style=filled, fillcolor="#f0f0f0", shape=box, penwidth=0.5];
+    edge [fontname="Helvetica", fontsize=9, penwidth=0.8, color="#555555"];
+
+    Created [label="created", fillcolor="#4a90d9", fontcolor="white"];
+    Working [label="working", fillcolor="#f5a623", fontcolor="white"];
+    PRCreated [label="pr_created", fillcolor="#7bc47f", fontcolor="white"];
+    Completed [label="completed", fillcolor="#7bc47f", fontcolor="white", peripheries=2];
+    FailedTurns [label="failed_max_turns", fillcolor="#d0021b", fontcolor="white"];
+    FailedError [label="failed_error", fillcolor="#d0021b", fontcolor="white"];
+    Label [label="auto-label issue\nfordjent/failed:*\n+ blocked", fillcolor="#e8e8e8", shape=note];
+    Comment [label="post failure\ncomment on issue", fillcolor="#e8e8e8", shape=note];
+
+    Created -> Working;
+    Working -> PRCreated [label="PR created"];
+    Working -> FailedTurns [label="max_turns hit"];
+    Working -> FailedError [label="unrecoverable error"];
+    PRCreated -> Completed [label="PR merged"];
+    FailedTurns -> Label;
+    FailedTurns -> Comment;
+    FailedError -> Label;
+    FailedError -> Comment;
+}

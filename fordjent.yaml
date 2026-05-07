@@ -9,23 +9,10 @@ webhook:
 forgejo:
   url: "https://forgejo.example.com"
   token: "${FORGEJO_TOKEN}"
+  # Admin token for admin API calls (optional)
+  admin_token: "${FORGEJO_ADMIN_TOKEN}"
   # API rate limit (requests per minute)
   rate_limit: 60
-
-telegram:
-  enabled: false
-  token: "${TELEGRAM_BOT_TOKEN}"
-  # Long polling timeout in seconds
-  poll_timeout: 10
-  # Allowed chats (supergroup IDs). Empty = allow all.
-  allowed_chats: []
-  # Repository binding per chat
-  chat_bindings: {}
-  # Example:
-  # chat_bindings:
-  #   -1001234567890:
-  #     repository: "org/repo"
-  #     allowed_users: []
 
 agent:
   # Maximum concurrent agent sessions
@@ -34,10 +21,47 @@ agent:
   idle_timeout: "4h"
   # Working directory base for clones
   workdir: "/var/lib/fordjent/work"
-  # Maximum LLM turns per event
-  max_turns: 25
+  # Maximum LLM turns per event (default)
+  max_turns: 75
+  # Per-role turn budgets (optional, override max_turns for that role)
+  # max_turns_pm: 15
+  # max_turns_implementer: 50
   # Commit message prefix for agent commits
   commit_prefix: "[agent-automation]"
+  # Context window size in tokens (for compaction threshold calculation)
+  context_window: 131072
+  # Compact when estimated token usage exceeds this fraction of context_window
+  compaction_threshold: 0.85
+  # Number of recent turns to keep during compaction
+  compaction_keep_turns: 8
+  # Session lifecycle state machine (tracks created/working/failed/completed)
+  enable_lifecycle: true
+  # Stale gate: detect branches behind origin/main and auto-rebase
+  enable_stale_gate: true
+  # Scaffold detection: block issues on empty repos, create scaffold issue first
+  enable_scaffold_detection: true
+  # Session recovery: resume interrupted sessions after crash
+  enable_session_recovery: true
+  # Context injection: inject issue context into agent prompt
+  enable_context_injection: true
+  # Auto-add agent as collaborator when working on a repo
+  enable_auto_collaborator: true
+  # Session timeout (force-close idle sessions beyond idle_timeout)
+  session_timeout: "30m"
+  # Role-based provider routing: map agent roles to provider names
+  # Detected roles: pm, reviewer, implementer, devops, tester
+  # role_providers:
+  #   pm: "openai"
+  #   reviewer: "anthropic"
+  #   implementer: "openai"
+
+budget:
+  # Enable cost tracking and budget enforcement
+  enabled: false
+  # Maximum cost per session (USD)
+  max_session_cost: 0.50
+  # Maximum cost per month (USD)
+  max_monthly_cost: 10.00
 
 providers:
   # Default provider (first listed)
@@ -46,6 +70,17 @@ providers:
     api_key: "${OPENAI_API_KEY}"
     model: "gpt-4o"
     max_tokens: 16384
+    # Request timeout
+    request_timeout: "60s"
+    # Retry policy for transient errors (429, 502, 503, timeouts)
+    max_retries: 3
+    retry_base_delay: "2s"
+    retry_max_delay: "30s"
+    # Concurrency limit for parallel LLM calls
+    max_concurrent_llm_calls: 3
+    # Cost tracking (USD per 1M tokens)
+    cost_per_1m_input_tokens: 2.50
+    cost_per_1m_output_tokens: 10.00
 
   # Anthropic provider
   # - name: "anthropic"
@@ -53,6 +88,13 @@ providers:
   #   api_key: "${ANTHROPIC_API_KEY}"
   #   model: "claude-sonnet-4-20250514"
   #   max_tokens: 16384
+  #   request_timeout: "90s"
+  #   max_retries: 3
+  #   retry_base_delay: "3s"
+  #   retry_max_delay: "60s"
+  #   max_concurrent_llm_calls: 2
+  #   cost_per_1m_input_tokens: 3.00
+  #   cost_per_1m_output_tokens: 15.00
 
   # Local/Ollama provider
   # - name: "ollama"
@@ -60,6 +102,27 @@ providers:
   #   api_key: "ollama"
   #   model: "codellama"
   #   max_tokens: 8192
+  #   request_timeout: "120s"
+  #   max_retries: 3
+  #   retry_base_delay: "2s"
+  #   retry_max_delay: "30s"
+  #   max_concurrent_llm_calls: 2
+  #   cost_per_1m_input_tokens: 0
+  #   cost_per_1m_output_tokens: 0
+
+  # Ollama Cloud provider
+  # - name: "ollama-cloud"
+  #   api_base: "https://ollama.com/v1"
+  #   api_key: "${OLLAMA_API_KEY}"
+  #   model: "minimax-m2.5"
+  #   max_tokens: 8192
+  #   request_timeout: "120s"
+  #   max_retries: 3
+  #   retry_base_delay: "2s"
+  #   retry_max_delay: "30s"
+  #   max_concurrent_llm_calls: 3
+  #   cost_per_1m_input_tokens: 0
+  #   cost_per_1m_output_tokens: 0
 
 # Events that trigger agent sessions
 events:
@@ -82,6 +145,8 @@ security:
   require_pr_for_workflows: true
   # Reject events from the agent itself (loop prevention)
   filter_agent_events: true
+  # Admin token to protect /admin, /status endpoints
+  # admin_token: "${ADMIN_TOKEN}"
 
 # Memory: git log audit trail
 memory:
@@ -90,3 +155,10 @@ memory:
   compaction_cron: "0 2 * * *"
   # Compaction output path within repo
   compaction_path: "docs/issues"
+
+# SQLite database path (defaults to sessions.db next to workdir)
+database:
+  path: ""
+
+# Log level: debug, info, warn, error
+log_level: "info"
