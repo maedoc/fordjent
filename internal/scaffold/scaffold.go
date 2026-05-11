@@ -34,6 +34,11 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 		writeClient = adminClient
 	}
 
+	// Ensure required labels exist before any label operations
+	if err := writeClient.EnsureLabels(ctx, repo); err != nil {
+		slog.Warn("scaffold: failed to ensure labels exist", "error", err, "repo", repo)
+	}
+
 	files, err := client.ListRepoFiles(ctx, repo, "")
 	if err != nil {
 		slog.Warn("scaffold: failed to list repo files", "error", err, "repo", repo)

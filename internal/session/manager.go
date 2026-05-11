@@ -4,6 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/fordjent/fordjent/internal/agent"
+	"github.com/fordjent/fordjent/internal/config"
+	"github.com/fordjent/fordjent/internal/cost"
+	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/lifecycle"
+	"github.com/fordjent/fordjent/internal/mergequeue"
+	"github.com/fordjent/fordjent/internal/metrics"
+	"github.com/fordjent/fordjent/internal/scaffold"
+	"github.com/fordjent/fordjent/internal/scheduler"
+	"github.com/fordjent/fordjent/internal/sentinel"
+	"github.com/fordjent/fordjent/internal/tool"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,18 +23,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"github.com/fordjent/fordjent/internal/agent"
-	"github.com/fordjent/fordjent/internal/config"
-	"github.com/fordjent/fordjent/internal/cost"
-	"github.com/fordjent/fordjent/internal/event"
-	"github.com/fordjent/fordjent/internal/forgejo"
-	"github.com/fordjent/fordjent/internal/lifecycle"
-	"github.com/fordjent/fordjent/internal/scaffold"
-	"github.com/fordjent/fordjent/internal/mergequeue"
-	"github.com/fordjent/fordjent/internal/metrics"
-	"github.com/fordjent/fordjent/internal/scheduler"
-	"github.com/fordjent/fordjent/internal/sentinel"
-	"github.com/fordjent/fordjent/internal/tool"
 )
 
 // Session represents an active agent session bound to a session key.
@@ -50,7 +50,7 @@ type sessionInfoAdapter struct {
 }
 
 func (s *sessionInfoAdapter) WorkDir() string { return s.workDir }
-func (s *sessionInfoAdapter) RepoDir() string  { return s.repoDir }
+func (s *sessionInfoAdapter) RepoDir() string { return s.repoDir }
 
 // agentConfigAdapter adapts Config to tool.AgentConfig
 type agentConfigAdapter struct {
@@ -58,12 +58,16 @@ type agentConfigAdapter struct {
 	isScaffold bool
 }
 
-func (a *agentConfigAdapter) CommitPrefix() string       { return a.cfg.Agent.CommitPrefix }
+func (a *agentConfigAdapter) CommitPrefix() string        { return a.cfg.Agent.CommitPrefix }
 func (a *agentConfigAdapter) ProtectedBranches() []string { return a.cfg.Security.ProtectedBranches }
-func (a *agentConfigAdapter) RequirePRForWorkflows() bool { return a.cfg.Security.RequirePRForWorkflows }
-func (a *agentConfigAdapter) DryRun() bool               { return a.cfg.Agent.DryRun }
-func (a *agentConfigAdapter) AllowProtectedPush() bool   { return a.cfg.Agent.AllowProtectedPush || a.isScaffold }
-func (a *agentConfigAdapter) IsScaffold() bool          { return a.isScaffold }
+func (a *agentConfigAdapter) RequirePRForWorkflows() bool {
+	return a.cfg.Security.RequirePRForWorkflows
+}
+func (a *agentConfigAdapter) DryRun() bool { return a.cfg.Agent.DryRun }
+func (a *agentConfigAdapter) AllowProtectedPush() bool {
+	return a.cfg.Agent.AllowProtectedPush || a.isScaffold
+}
+func (a *agentConfigAdapter) IsScaffold() bool { return a.isScaffold }
 
 // Manager manages agent session lifecycle.
 type Manager struct {
@@ -84,7 +88,7 @@ type Manager struct {
 // Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
 func (m *Manager) Lifecycle() *lifecycle.Lifecycle { return m.lc }
 func (m *Manager) ForgejoClient() *forgejo.Client  { return m.forgejoClient }
-func (m *Manager) AdminClient() *forgejo.Client     { return m.adminClient }
+func (m *Manager) AdminClient() *forgejo.Client    { return m.adminClient }
 
 func resolveDBPath(cfgPath, workDir string) string {
 	if cfgPath != "" {
@@ -148,6 +152,7 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	m.mqClient = mergequeue.NewClient(forgejoAdapter)
 	m.scheduler = scheduler.New(forgejoAdapter)
+	m.scheduler.SetForgejoClient(adminClient)
 
 	if err := m.restoreSessions(); err != nil {
 		slog.Warn("failed to restore sessions from database", "error", err)
@@ -718,7 +723,6 @@ func (m *Manager) Drain(ctx context.Context) {
 func (m *Manager) CleanSessions(_ context.Context) error {
 	return m.store.DeleteAll()
 }
-
 
 // detectRoleFromSession inspects the issue or PR associated with this session
 // and returns a role label (pm, reviewer, devops, tester, implementer).

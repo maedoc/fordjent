@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -23,9 +24,10 @@ var dependsOnKeywordRegex = regexp.MustCompile(`(?i)depends\s+on`)
 
 // Scheduler wraps a Forgejo client and provides dependency management.
 type Scheduler struct {
-	BaseURL string
-	Token   string
-	HTTP    *http.Client
+	BaseURL       string
+	Token         string
+	HTTP          *http.Client
+	forgejoClient *forgejo.Client
 }
 
 // New creates a Scheduler from a ForgejoAdapter.
@@ -37,13 +39,19 @@ func New(adapter *tool.ForgejoAdapter) *Scheduler {
 	}
 }
 
+// SetForgejoClient sets the underlying Forgejo API client used for label
+// auto-creation (EnsureLabels). Call this after New if label guarantees are needed.
+func (s *Scheduler) SetForgejoClient(c *forgejo.Client) {
+	s.forgejoClient = c
+}
+
 // Issue mirrors the minimal Forgejo issue representation.
 type Issue struct {
-	Number  int      `json:"number"`
-	Title   string   `json:"title"`
-	Body    string   `json:"body"`
-	Labels  []Label  `json:"labels"`
-	State   string   `json:"state"`
+	Number int     `json:"number"`
+	Title  string  `json:"title"`
+	Body   string  `json:"body"`
+	Labels []Label `json:"labels"`
+	State  string  `json:"state"`
 }
 
 // Label is a Forgejo label.
@@ -70,6 +78,13 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 	issues, err := s.listOpenIssues(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("list open issues: %w", err)
+	}
+
+	// Ensure required labels exist before any label operations
+	if s.forgejoClient != nil {
+		if err := s.forgejoClient.EnsureLabels(ctx, repo); err != nil {
+			slog.Warn("scheduler: failed to ensure labels exist", "error", err, "repo", repo)
+		}
 	}
 
 	var unblocked []int
