@@ -1,12 +1,13 @@
 #!/bin/sh
 set -e
 
-git config --global user.email "${FORDJENT_GIT_EMAIL:-fordjent@forgejo.local}"
-git config --global user.name "${FORDJENT_GIT_NAME:-Fordjent Agent}"
-git config --global push.default current
+# Configure git identity — write to the fordjent user's home directly
+# since the entrypoint runs as the fordjent user (not root)
+GIT_EMAIL="${FORDJENT_GIT_EMAIL:-fordjent@forgejo.local}"
+GIT_NAME="${FORDJENT_GIT_NAME:-Fordjent Agent}"
 
-# Copy gitconfig to fordjent home for non-root user
-cp /root/.gitconfig /var/lib/fordjent/.gitconfig 2>/dev/null || true
-chown fordjent:fordjent /var/lib/fordjent/.gitconfig 2>/dev/null || true
+git config --global user.email "$GIT_EMAIL"
+git config --global user.name "$GIT_NAME"
+git config --global push.default current
 
 exec fordjent -config /etc/fordjent/fordjent.yaml "$@"

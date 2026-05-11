@@ -1,6 +1,8 @@
 services:
   fordjent:
-    build: .
+    build:
+      context: .
+      target: full
     container_name: fordjent
     restart: unless-stopped
     ports:
