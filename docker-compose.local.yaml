@@ -45,16 +45,31 @@ services:
       - "127.0.0.1:${FORDJENT_PORT:-8080}:8080"
     volumes:
       - fordjent-data:/var/lib/fordjent
+      - go-cache:/var/cache
       - ./fordjent.local.yaml:/etc/fordjent/fordjent.yaml:ro
     environment:
       - FORGEJO_URL=${FORGEJO_URL:-http://forgejo:3000}
       - FORGEJO_TOKEN=${FORGEJO_TOKEN:-}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_API_BASE=${OPENAI_API_BASE:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - GOMODCACHE=/var/cache/go-mod
+      - GOCACHE=/var/cache/go-build
+      - FORDJENT_GIT_NAME=${FORDJENT_GIT_NAME:-Fordjent Agent}
+      - FORDJENT_GIT_EMAIL=${FORDJENT_GIT_EMAIL:-fordjent@forgejo.local}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
     networks:
       - fordjent-net
 
@@ -62,6 +77,8 @@ volumes:
   forgejo-data:
   ollama-data:
   fordjent-data:
+  go-cache:
+    driver: local
 
 networks:
   fordjent-net:
