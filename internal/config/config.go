@@ -66,6 +66,7 @@ type AgentConfig struct {
 	// session is forcibly terminated. Use for bounding runaway sessions.
 	// Different from idle_timeout which closes inactive sessions.
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
+	CleanupArchiveDays      int           `yaml:"cleanup_archive_days"`
 	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
 	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 }
@@ -152,6 +153,7 @@ func Load(path string) (*Config, error) {
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
 			SessionTimeout:          60 * time.Minute,
+			CleanupArchiveDays:      30,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

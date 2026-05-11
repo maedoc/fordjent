@@ -642,6 +642,7 @@ func (m *Manager) cleanupOldWorkDirs(ctx context.Context) {
 	if m.cfg.Agent.WorkDir == "" {
 		return
 	}
+	archiveBase := filepath.Join(m.cfg.Agent.WorkDir, "..", "archive")
 	const maxAge = 7 * 24 * time.Hour
 
 	records, err := m.store.ListAll()
@@ -659,6 +660,15 @@ func (m *Manager) cleanupOldWorkDirs(ctx context.Context) {
 		}
 		if _, err := os.Stat(rec.WorkDir); err != nil {
 			continue // already gone
+		}
+		// Archive audit trail before cleanup
+		safeKey := strings.ReplaceAll(rec.SessionKey, "/", "_")
+		archiveDir := filepath.Join(archiveBase, safeKey)
+		if err := os.MkdirAll(archiveDir, 0755); err == nil {
+			memFile := filepath.Join(rec.WorkDir, "memory.jsonl")
+			if data, err := os.ReadFile(memFile); err == nil {
+				_ = os.WriteFile(filepath.Join(archiveDir, "memory.jsonl"), data, 0644)
+			}
 		}
 		if err := os.RemoveAll(rec.WorkDir); err != nil {
 			slog.Warn("failed to clean up old workdir", "error", err, "dir", rec.WorkDir)

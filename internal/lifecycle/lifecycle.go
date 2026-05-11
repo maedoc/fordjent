@@ -201,7 +201,7 @@ func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, is
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:max-turns"})
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
-	body := "This session reached the maximum turn limit and could not finish the task. A human may need to pick up the remaining work or split this issue into smaller pieces.\n\n<!-- ford -->"
+	body := "This session reached the maximum turn limit and could not finish the task. A human may need to pick up the remaining work or split this issue into smaller pieces.\n\nSession audit trail has been archived and is available for review.\n\n<!-- ford -->"
 	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
 		slog.Warn("lifecycle: failed to post max-turns comment", "error", err, "issue", issueNumber)
 	}
@@ -225,7 +225,7 @@ func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issue
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:error"})
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
-	body := fmt.Sprintf("The agent session failed with an error:\n\n```\n%s\n```\n\nA human may need to investigate or retry.\n\n<!-- ford -->", reason)
+	body := fmt.Sprintf("The agent session failed with an error:\n\n```\n%s\n```\n\nA human may need to investigate or retry.\n\nSession audit trail has been archived and is available for review.\n\n<!-- ford -->", reason)
 	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
 		slog.Warn("lifecycle: failed to post error comment", "error", err, "issue", issueNumber)
 	}
