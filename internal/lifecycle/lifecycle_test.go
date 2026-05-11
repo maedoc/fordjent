@@ -11,7 +11,7 @@ func TestLifecycleRecordAndGet(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "lifecycle.db")
 
 	// Pass nil forgejo client — we only test persistence here
-	lc, err := New(dbPath, nil)
+	lc, err := New(dbPath, nil, nil)
 	if err != nil {
 		t.Fatalf("new lifecycle: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestLifecycleFailedSessions(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "lifecycle.db")
 
-	lc, err := New(dbPath, nil)
+	lc, err := New(dbPath, nil, nil)
 	if err != nil {
 		t.Fatalf("new lifecycle: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestNewWithMissingDir(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "subdir", "lifecycle.db")
 
 	// Create the parent dir first
-	lc, err := New(dbPath, nil)
+	lc, err := New(dbPath, nil, nil)
 	if err != nil {
 		t.Fatalf("new lifecycle with nested dir: %v", err)
 	}

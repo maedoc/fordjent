@@ -22,10 +22,6 @@ const (
 	PullRequestSync          Type = "pull_request.synchronize"
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
 	Push                     Type = "push"
-
-	// Telegram events
-	TelegramMessage Type = "telegram.message"
-	TelegramCommand Type = "telegram.command"
 )
 
 // Event is the normalized internal representation of a Forgejo webhook event.
