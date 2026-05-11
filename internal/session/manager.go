@@ -398,6 +398,52 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		return
 	}
 
+	// Role gate: require a role tag or label before creating a session
+	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+		if err != nil || issue == nil {
+			_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, buildRoleGuidance())
+			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
+			return
+		}
+		role := detectRoleFromIssue(issue)
+		if role == "" {
+			_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, buildRoleGuidance())
+			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
+			return
+		}
+	}
+
+	// Role assignment via label or title edit
+	if (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
+		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+		if err != nil || issue == nil {
+			return
+		}
+		hasNeedsRole := false
+		for _, l := range issue.Labels {
+			if l.Name == "needs-role" {
+				hasNeedsRole = true
+				break
+			}
+		}
+		if !hasNeedsRole {
+			return
+		}
+		role := detectRoleFromIssue(issue)
+		if role == "" {
+			return
+		}
+		_ = m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.IssueNumber, "needs-role")
+		synthetic := event.NewEvent(event.IssueOpened, evt.Repository, evt.IssueNumber, 0, evt.Sender, "opened")
+		synthetic.SessionKey = evt.SessionKey
+		if issueMap, ok := evt.Payload["issue"].(map[string]interface{}); ok {
+			synthetic.Payload = map[string]interface{}{"issue": issueMap}
+		}
+		m.handleEvent(ctx, synthetic)
+		return
+	}
+
 	sess, err := m.getOrCreate(ctx, evt)
 	if err != nil {
 		slog.Error("failed to create session", "error", err, "session_key", evt.SessionKey)
@@ -839,6 +885,10 @@ func detectRoleFromTitle(title string) string {
 		return "tester"
 	}
 	return ""
+}
+
+func buildRoleGuidance() string {
+	return "Please assign a role to this issue by adding a label like `role:pm`, `role:implementer`, `role:reviewer`, `role:devops`, or `role:tester`, or by editing the title to include a tag like `[pm]`, `[implementer]`, `[reviewer]`, `[devops]`, or `[tester]`."
 }
 
 // extractIssueTitle pulls the issue title from the webhook payload.

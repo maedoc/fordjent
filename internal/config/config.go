@@ -61,6 +61,7 @@ type AgentConfig struct {
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 	DryRun                  bool          `yaml:"dry_run"`
 	AllowProtectedPush      bool          `yaml:"allow_protected_push"`
+	RequireRoleTag          bool          `yaml:"require_role_tag"`
 	// SessionTimeout is a hard wall-clock limit per session. If exceeded, the
 	// session is forcibly terminated. Use for bounding runaway sessions.
 	// Different from idle_timeout which closes inactive sessions.
@@ -141,6 +142,7 @@ func Load(path string) (*Config, error) {
 			EnableSessionRecovery:   true,
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
+			RequireRoleTag:          true,
 			SessionTimeout:          60 * time.Minute,
 			RequireRoleTag:          true,
 			CleanupArchiveDays:      30,
