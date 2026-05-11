@@ -15,7 +15,6 @@ type Config struct {
 	Server   ServerConfig     `yaml:"server"`
 	Webhook  WebhookConfig    `yaml:"webhook"`
 	Forgejo  ForgejoConfig    `yaml:"forgejo"`
-	Telegram TelegramConfig   `yaml:"telegram"`
 	Agent    AgentConfig      `yaml:"agent"`
 	Budget   BudgetConfig     `yaml:"budget"`
 	Providers []ProviderConfig `yaml:"providers"`
@@ -63,6 +62,8 @@ type AgentConfig struct {
 	DryRun                  bool          `yaml:"dry_run"`
 	AllowProtectedPush      bool          `yaml:"allow_protected_push"`
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
+	GitName                 string        `yaml:"git_name"`
+	GitEmail                string        `yaml:"git_email"`
 	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
 	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 }
@@ -104,19 +105,6 @@ type DatabaseConfig struct {
 	Path string `yaml:"path"`
 }
 
-type TelegramConfig struct {
-	Enabled      bool                       `yaml:"enabled"`
-	Token        string                     `yaml:"token"`
-	PollTimeout  int                        `yaml:"poll_timeout"`
-	AllowedChats []int64                    `yaml:"allowed_chats"`
-	ChatBindings map[int64]TelegramChatBind `yaml:"chat_bindings"`
-}
-
-type TelegramChatBind struct {
-	Repository   string  `yaml:"repository"`
-	AllowedUsers []string `yaml:"allowed_users"`
-}
-
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -149,6 +137,8 @@ func Load(path string) (*Config, error) {
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
 			SessionTimeout:          30 * time.Minute,
+			GitName:                 "Fordjent Agent",
+			GitEmail:                "fordjent@forgejo.local",
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,
@@ -324,51 +314,6 @@ func (c *Config) ProviderForRole(role string) *ProviderConfig {
 		}
 	}
 	return c.DefaultProvider()
-}
-
-// RepositoryForChat returns the bound repository for a Telegram chat ID.
-// Returns ("", false) if no binding exists.
-func (c *Config) RepositoryForChat(chatID int64) (string, bool) {
-	if c.Telegram.ChatBindings == nil {
-		return "", false
-	}
-	bind, ok := c.Telegram.ChatBindings[chatID]
-	if !ok || bind.Repository == "" {
-		return "", false
-	}
-	return bind.Repository, true
-}
-
-// IsChatAllowed returns true if the chat ID is in the allowed list.
-// An empty list means all chats are allowed.
-func (c *Config) IsChatAllowed(chatID int64) bool {
-	if len(c.Telegram.AllowedChats) == 0 {
-		return true
-	}
-	for _, id := range c.Telegram.AllowedChats {
-		if id == chatID {
-			return true
-		}
-	}
-	return false
-}
-
-// IsUserAllowed returns true if the user is allowed to trigger the agent in the given chat.
-// An empty AllowedUsers list means everyone is allowed.
-func (c *Config) IsUserAllowed(chatID int64, username string) bool {
-	if c.Telegram.ChatBindings == nil {
-		return true
-	}
-	bind, ok := c.Telegram.ChatBindings[chatID]
-	if !ok || len(bind.AllowedUsers) == 0 {
-		return true
-	}
-	for _, u := range bind.AllowedUsers {
-		if u == username {
-			return true
-		}
-	}
-	return false
 }
 
 // Watcher periodically reloads config from disk when the file changes.

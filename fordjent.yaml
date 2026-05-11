@@ -48,6 +48,9 @@ agent:
   enable_auto_collaborator: true
   # Session timeout (force-close idle sessions beyond idle_timeout)
   session_timeout: "30m"
+  # Git identity for agent commits (overridden by FORDJENT_GIT_NAME/FORDJENT_GIT_EMAIL env vars)
+  git_name: "${FORDJENT_GIT_NAME:-Fordjent Agent}"
+  git_email: "${FORDJENT_GIT_EMAIL:-fordjent@forgejo.local}"
   # Role-based provider routing: map agent roles to provider names
   # Detected roles: pm, reviewer, implementer, devops, tester
   # role_providers:
@@ -57,11 +60,11 @@ agent:
 
 budget:
   # Enable cost tracking and budget enforcement
-  enabled: false
+  enabled: true
   # Maximum cost per session (USD)
-  max_session_cost: 0.50
+  max_session_cost: 1.00
   # Maximum cost per month (USD)
-  max_monthly_cost: 10.00
+  max_monthly_cost: 25.00
 
 providers:
   # Default provider (first listed)
