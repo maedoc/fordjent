@@ -358,6 +358,28 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// Role gate: if require_role_tag is enabled and the issue has no role tag/label,
+	// post a guidance comment and wait for the user to assign one.
+	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+		if err != nil {
+			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
+			// Proceed anyway — don't block on API errors
+		} else if detectRoleFromIssue(issue) == "" {
+			slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
+			m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
+			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
+			return
+		}
+	}
+
+	// Role assignment detection: when a needs-role issue gets a label or title edit,
+	// check if a role is now present and create a session.
+	if m.cfg.Agent.RequireRoleTag && (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
+		m.handleRoleAssignment(ctx, evt)
+		return
+	}
+
 	// Session recovery: if a scheduler unblocks an issue whose session died, re-trigger.
 	if m.cfg.Agent.EnableSessionRecovery && evt.Type == event.IssueCommentCreated && evt.IssueNumber > 0 {
 		body := ""
@@ -832,4 +854,71 @@ func extractIssueTitle(evt *event.Event) string {
 		}
 	}
 	return ""
+}
+
+func (m *Manager) postRoleGuidance(ctx context.Context, repo string, issueNumber int) {
+	body := `Thanks for creating this issue! Before I start implementing, please tag it with a role so I know how to approach it.
+
+**Available roles:**
+
+| Tag in title | Label | What I'll do |
+|---|---|---|
+| [pm] or [decompose] | role:pm | Analyze and create sub-issues |
+| [review] or [code review] | role:reviewer | Review code and approve/merge PRs |
+| [test] or [testing] | role:tester | Write comprehensive tests |
+| [devops] or [docker] | role:devops | Docker, CI/CD, deployment changes |
+| (no tag, any label) | role:implementer | Write production code and open a PR |
+
+**To assign a role, either:**
+- Edit the issue title to include one of the tags above (e.g., "[pm] Add auth system")
+- Add one of the matching labels
+
+Once a role is assigned, I'll start working on this automatically.
+
+<!-- ford -->`
+	if err := m.forgejoClient.PostIssueComment(ctx, repo, issueNumber, body); err != nil {
+		slog.Warn("role gate: failed to post guidance comment", "error", err, "issue", issueNumber)
+	}
+}
+
+func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) {
+	// Check if this issue has the needs-role label
+	issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+	if err != nil {
+		slog.Warn("role assignment: failed to get issue", "error", err, "issue", evt.IssueNumber)
+		return
+	}
+
+	hasNeedsRole := false
+	for _, label := range issue.Labels {
+		if label.Name == "needs-role" {
+			hasNeedsRole = true
+			break
+		}
+	}
+	if !hasNeedsRole {
+		return
+	}
+
+	role := detectRoleFromIssue(issue)
+	if role == "" {
+		return
+	}
+
+	slog.Info("role assignment: role detected, creating session", "issue", evt.IssueNumber, "role", role)
+
+	// Remove the needs-role label
+	_ = m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.IssueNumber, "needs-role")
+
+	// Build a synthetic IssueOpened event from the label/edit payload
+	openedEvt := event.NewEvent(event.IssueOpened, evt.Repository, evt.IssueNumber, 0, evt.Sender, "synthetic_opened")
+	openedEvt.Payload = evt.Payload
+	openedEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
+
+	// Post confirmation comment
+	body := fmt.Sprintf("Role assigned: **%s**. Starting work now.\n\n<!-- ford -->", role)
+	_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, body)
+
+	// Process the synthetic event (will create session via getOrCreate)
+	m.handleEvent(ctx, openedEvt)
 }
