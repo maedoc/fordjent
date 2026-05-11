@@ -47,7 +47,9 @@ type fakeForgejo struct {
 	issueLabels   []string
 	comments      []string
 	addedLabels   []string
+	addedLabelIDs []int64
 	removedLabels []string
+	createdLabels []string
 	srv           *httptest.Server
 }
 
@@ -82,16 +84,30 @@ func (f *fakeForgejo) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeForgejo) handleGetIssue(w http.ResponseWriter, r *http.Request) {
-	labels := make([]map[string]string, 0, len(f.issueLabels))
+	// Merge added labels into the issue response so role detection works.
+	// addedLabelIDs track labels resolved by the Forgejo API (via ListLabels first).
+	// We rebuild the label-name list from IDs by checking what's been registered.
+	allAddedLabels := append([]string{}, f.addedLabels...)
+	allAddedLabels = append(allAddedLabels, f.createdLabels...)
+	allAddedLabels = append(allAddedLabels, f.labelNamesFromIDs(f.addedLabelIDs)...)
+	roleLabels := make([]map[string]string, 0, len(f.issueLabels)+len(allAddedLabels))
+	seen := make(map[string]bool)
 	for _, l := range f.issueLabels {
-		labels = append(labels, map[string]string{"name": l})
+		roleLabels = append(roleLabels, map[string]string{"name": l})
+		seen[l] = true
+	}
+	for _, l := range allAddedLabels {
+		if !seen[l] {
+			roleLabels = append(roleLabels, map[string]string{"name": l})
+			seen[l] = true
+		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"number": 42,
 		"title":  f.issueTitle,
 		"body":   "Test body",
 		"state":  "open",
-		"labels": labels,
+		"labels": roleLabels,
 	})
 }
 
@@ -104,9 +120,15 @@ func (f *fakeForgejo) handlePostComment(w http.ResponseWriter, r *http.Request) 
 }
 
 func (f *fakeForgejo) handleListLabels(w http.ResponseWriter, r *http.Request) {
+	// Combine all label sources: initial, added via API, created via API
+	allLbls := append([]string{}, f.issueLabels...)
+	allLbls = append(allLbls, f.addedLabels...)
+	allLbls = append(allLbls, f.createdLabels...)
 	labels := []map[string]interface{}{}
-	for _, l := range append(f.issueLabels, "needs-role") {
-		labels = append(labels, map[string]interface{}{"id": 1, "name": l})
+	id := int64(1)
+	for _, l := range allLbls {
+		labels = append(labels, map[string]interface{}{"id": id, "name": l})
+		id++
 	}
 	_ = json.NewEncoder(w).Encode(labels)
 }
@@ -114,27 +136,30 @@ func (f *fakeForgejo) handleListLabels(w http.ResponseWriter, r *http.Request) {
 func (f *fakeForgejo) handleCreateLabel(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.createdLabels = append(f.createdLabels, body["name"])
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 1, "name": body["name"]})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": int64(len(f.createdLabels)), "name": body["name"]})
 }
 
 func (f *fakeForgejo) handleAddLabels(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
-	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(raw, &bodyMap); err == nil {
-		if lbls, ok := bodyMap["labels"].([]interface{}); ok {
-			for range lbls {
-				f.addedLabels = append(f.addedLabels, "needs-role")
+	// Forgejo sends {"labels": [id1, id2, ...]} — label IDs resolved from prior ListLabels call.
+	var body struct {
+		Labels []int64 `json:"labels"`
+	}
+	if json.Unmarshal(raw, &body) == nil && len(body.Labels) > 0 {
+		f.addedLabelIDs = append(f.addedLabelIDs, body.Labels...)
+		// For test compatibility, also record as named labels.
+		// In real Forgejo, these IDs map to the labels returned by ListLabels.
+		for _, id := range body.Labels {
+			name := f.labelNameForID(id)
+			if name != "" {
+				f.addedLabels = append(f.addedLabels, name)
 			}
-		}
-	} else {
-		var names []string
-		if json.Unmarshal(raw, &names) == nil && len(names) > 0 {
-			f.addedLabels = append(f.addedLabels, names...)
 		}
 	}
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "needs-role"}})
+	_ = json.NewEncoder(w).Encode([]map[string]interface{}{{"id": 1, "name": "needs-role"}})
 }
 
 func (f *fakeForgejo) handleRemoveLabel(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +170,33 @@ func (f *fakeForgejo) handleRemoveLabel(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+
+// labelNamesFromIDs maps label IDs back to names using the registered labels.
+// This simulates Forgejo's label resolution: AddIssueLabels first calls
+// ListLabels to get name→id, then sends IDs. We reverse-lookup here.
+func (f *fakeForgejo) labelNamesFromIDs(ids []int64) []string {
+	var names []string
+	for _, id := range ids {
+		if name := f.labelNameForID(id); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// labelNameForID returns the label name for a given ID.
+// The fake assigns sequential IDs starting at 1 for all labels.
+// Labels are stored in this order: issueLabels first, then addedLabels.
+func (f *fakeForgejo) labelNameForID(id int64) string {
+	allLabels := append([]string{}, f.issueLabels...)
+	allLabels = append(allLabels, f.addedLabels...)
+	allLabels = append(allLabels, f.createdLabels...)
+	idx := int(id) - 1
+	if idx >= 0 && idx < len(allLabels) {
+		return allLabels[idx]
+	}
+	return "needs-role" // fallback for simple test cases
+}
 func TestRoleGateBlocked(t *testing.T) {
 	f := newFakeForgejo(t, "Fix login bug", nil)
 	defer f.srv.Close()
