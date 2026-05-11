@@ -64,7 +64,8 @@ type AgentConfig struct {
 	// SessionTimeout is a hard wall-clock limit per session. If exceeded, the
 	// session is forcibly terminated. Use for bounding runaway sessions.
 	// Different from idle_timeout which closes inactive sessions.
-	SessionTimeout     time.Duration     `yaml:"session_timeout"`
+	SessionTimeout   time.Duration     `yaml:"session_timeout"`
+	RequireRoleTag   bool              `yaml:"require_role_tag"` // Require role tag/label before agent starts implementing
 	CleanupArchiveDays int               `yaml:"cleanup_archive_days"`
 	GitName            string            `yaml:"git_name"`
 	GitEmail           string            `yaml:"git_email"`
@@ -141,6 +142,7 @@ func Load(path string) (*Config, error) {
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
 			SessionTimeout:          60 * time.Minute,
+			RequireRoleTag:          true,
 			CleanupArchiveDays:      30,
 			GitName:                 "Fordjent Agent",
 			GitEmail:                "fordjent@forgejo.local",

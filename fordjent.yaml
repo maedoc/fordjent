@@ -46,6 +46,8 @@ agent:
   enable_context_injection: true
   # Auto-add agent as collaborator when working on a repo
   enable_auto_collaborator: true
+  # Require role tag/label before agent starts implementing
+  require_role_tag: true
   # Session timeout (force-close idle sessions beyond idle_timeout)
   session_timeout: "30m"
   # Git identity for agent commits (overridden by FORDJENT_GIT_NAME/FORDJENT_GIT_EMAIL env vars)
