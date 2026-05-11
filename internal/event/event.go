@@ -14,6 +14,8 @@ const (
 	IssueOpened              Type = "issues.opened"
 	IssueClosed              Type = "issues.closed"
 	IssueReopened            Type = "issues.reopened"
+	IssueLabelUpdated        Type = "issues.label_updated"
+	IssueEdited              Type = "issues.edited"
 	IssueCommentCreated      Type = "issue_comment.created"
 	IssueCommentEdited       Type = "issue_comment.edited"
 	PullRequestOpened        Type = "pull_request.opened"
