@@ -177,7 +177,13 @@ func (m *Manager) restoreSessions() error {
 		if state == lifecycle.StateCompleted || strings.HasPrefix(state, "failed") {
 			continue
 		}
-		sessCtx, cancel := context.WithCancel(context.Background())
+		var sessCtx context.Context
+		var cancel context.CancelFunc
+		if m.cfg.Agent.SessionTimeout > 0 {
+			sessCtx, cancel = context.WithTimeout(context.Background(), m.cfg.Agent.SessionTimeout)
+		} else {
+			sessCtx, cancel = context.WithCancel(context.Background())
+		}
 		sess := &Session{
 			Key:         rec.SessionKey,
 			Repository:  rec.Repository,
@@ -472,7 +478,13 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		}
 	}
 
-	sessCtx, cancel := context.WithCancel(context.Background())
+	var sessCtx context.Context
+	var cancel context.CancelFunc
+	if m.cfg.Agent.SessionTimeout > 0 {
+		sessCtx, cancel = context.WithTimeout(context.Background(), m.cfg.Agent.SessionTimeout)
+	} else {
+		sessCtx, cancel = context.WithCancel(context.Background())
+	}
 	sess = &Session{
 		Key:         evt.SessionKey,
 		Repository:  evt.Repository,
@@ -543,6 +555,12 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	for {
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				slog.Warn("session timed out: hard wall-clock limit reached", "session_key", sess.Key, "limit", m.cfg.Agent.SessionTimeout)
+				lcCtx, lcCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout))
+				lcCancel()
+			}
 			return
 		case evt, ok := <-sess.events:
 			if !ok {

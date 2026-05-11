@@ -62,6 +62,9 @@ type AgentConfig struct {
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
 	DryRun                  bool          `yaml:"dry_run"`
 	AllowProtectedPush      bool          `yaml:"allow_protected_push"`
+	// SessionTimeout is a hard wall-clock limit per session. If exceeded, the
+	// session is forcibly terminated. Use for bounding runaway sessions.
+	// Different from idle_timeout which closes inactive sessions.
 	SessionTimeout          time.Duration `yaml:"session_timeout"`
 	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
 	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
@@ -148,7 +151,7 @@ func Load(path string) (*Config, error) {
 			EnableSessionRecovery:   true,
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
-			SessionTimeout:          30 * time.Minute,
+			SessionTimeout:          60 * time.Minute,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,
