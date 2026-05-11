@@ -11,9 +11,6 @@ forgejo:
   admin_token: "${FORGEJO_ADMIN_TOKEN}"
   rate_limit: 60
 
-telegram:
-  enabled: false
-
 agent:
   max_sessions: 25
   idle_timeout: "4h"
@@ -36,6 +33,8 @@ agent:
   enable_context_injection: true
   enable_auto_collaborator: true
   session_timeout: "60m"
+  git_name: "Fordjent Dev Agent"
+  git_email: "fordjent-dev@forgejo.local"
 
 budget:
   enabled: true
