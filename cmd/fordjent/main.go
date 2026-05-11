@@ -14,7 +14,6 @@ import (
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/session"
-	"github.com/fordjent/fordjent/internal/telegram"
 	"github.com/fordjent/fordjent/internal/webhook"
 )
 
@@ -73,25 +72,10 @@ func main() {
 	// Session manager
 	go mgr.Run(ctx)
 
-	// Telegram bot (optional)
-	if cfg.Telegram.Enabled {
-		tgRouter, err := telegram.NewRouter(cfg, bus)
-		if err != nil {
-			slog.Error("failed to init telegram bot", "error", err)
-			os.Exit(1)
-		}
-		if tgRouter != nil {
-			defer tgRouter.Close()
-			go tgRouter.Start(ctx)
-			slog.Info("telegram bot started", "bot_user", tgRouter.Bot().Me.Username)
-		}
-	}
-
 	slog.Info("fordjent agent harness started",
 		"forgejo_url", cfg.Forgejo.URL,
 		"provider", cfg.DefaultProvider().Name,
 		"model", cfg.DefaultProvider().Model,
-		"telegram", cfg.Telegram.Enabled,
 	)
 
 	<-ctx.Done()
