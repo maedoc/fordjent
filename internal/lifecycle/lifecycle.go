@@ -30,10 +30,10 @@ const (
 // Lifecycle tracks session state transitions and surfaces failures via
 // Forgejo API labels and comments.
 type Lifecycle struct {
-	db           *sql.DB
-	forgejo      *forgejo.Client
-	costTracker  *cost.Tracker
-	labelPrefix  string
+	db          *sql.DB
+	forgejo     *forgejo.Client
+	costTracker *cost.Tracker
+	labelPrefix string
 }
 
 // New opens (or creates) the lifecycle SQLite DB and returns a tracker.

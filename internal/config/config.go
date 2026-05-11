@@ -12,18 +12,18 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig     `yaml:"server"`
-	Webhook  WebhookConfig    `yaml:"webhook"`
-	Forgejo  ForgejoConfig    `yaml:"forgejo"`
-	Agent    AgentConfig      `yaml:"agent"`
-	Budget   BudgetConfig     `yaml:"budget"`
-	Providers []ProviderConfig `yaml:"providers"`
-	Events   []string         `yaml:"events"`
-	SessionKeyTemplate string `yaml:"session_key_template"`
-	Security SecurityConfig   `yaml:"security"`
-	Memory   MemoryConfig     `yaml:"memory"`
-	Database DatabaseConfig   `yaml:"database"`
-	LogLevel string           `yaml:"log_level"`
+	Server             ServerConfig     `yaml:"server"`
+	Webhook            WebhookConfig    `yaml:"webhook"`
+	Forgejo            ForgejoConfig    `yaml:"forgejo"`
+	Agent              AgentConfig      `yaml:"agent"`
+	Budget             BudgetConfig     `yaml:"budget"`
+	Providers          []ProviderConfig `yaml:"providers"`
+	Events             []string         `yaml:"events"`
+	SessionKeyTemplate string           `yaml:"session_key_template"`
+	Security           SecurityConfig   `yaml:"security"`
+	Memory             MemoryConfig     `yaml:"memory"`
+	Database           DatabaseConfig   `yaml:"database"`
+	LogLevel           string           `yaml:"log_level"`
 }
 
 type ServerConfig struct {
@@ -64,12 +64,12 @@ type AgentConfig struct {
 	// SessionTimeout is a hard wall-clock limit per session. If exceeded, the
 	// session is forcibly terminated. Use for bounding runaway sessions.
 	// Different from idle_timeout which closes inactive sessions.
-	SessionTimeout          time.Duration `yaml:"session_timeout"`
-	CleanupArchiveDays      int           `yaml:"cleanup_archive_days"`
-	GitName                 string        `yaml:"git_name"`
-	GitEmail                string        `yaml:"git_email"`
-	FastProvider            string        `yaml:"fast_provider"` // DEPRECATED: use role_providers instead
-	RoleProviders           map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
+	SessionTimeout     time.Duration     `yaml:"session_timeout"`
+	CleanupArchiveDays int               `yaml:"cleanup_archive_days"`
+	GitName            string            `yaml:"git_name"`
+	GitEmail           string            `yaml:"git_email"`
+	FastProvider       string            `yaml:"fast_provider"`  // DEPRECATED: use role_providers instead
+	RoleProviders      map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 }
 
 type BudgetConfig struct {
@@ -79,18 +79,18 @@ type BudgetConfig struct {
 }
 
 type ProviderConfig struct {
-	Name                  string  `yaml:"name"`
-	APIBase               string  `yaml:"api_base"`
-	APIKey                string  `yaml:"api_key"`
-	Model                 string  `yaml:"model"`
-	MaxTokens             int     `yaml:"max_tokens"`
+	Name                  string        `yaml:"name"`
+	APIBase               string        `yaml:"api_base"`
+	APIKey                string        `yaml:"api_key"`
+	Model                 string        `yaml:"model"`
+	MaxTokens             int           `yaml:"max_tokens"`
 	RequestTimeout        time.Duration `yaml:"request_timeout"`
-	MaxRetries            int     `yaml:"max_retries"`
+	MaxRetries            int           `yaml:"max_retries"`
 	RetryBaseDelay        time.Duration `yaml:"retry_base_delay"`
 	RetryMaxDelay         time.Duration `yaml:"retry_max_delay"`
 	MaxConcurrentLLMCalls int           `yaml:"max_concurrent_llm_calls"`
-	CostPer1MInputTokens  float64 `yaml:"cost_per_1m_input_tokens"`
-	CostPer1MOutputTokens float64 `yaml:"cost_per_1m_output_tokens"`
+	CostPer1MInputTokens  float64       `yaml:"cost_per_1m_input_tokens"`
+	CostPer1MOutputTokens float64       `yaml:"cost_per_1m_output_tokens"`
 }
 
 type SecurityConfig struct {
@@ -153,7 +153,7 @@ func Load(path string) (*Config, error) {
 		Forgejo: ForgejoConfig{
 			RateLimit: 60,
 		},
-		Events: []string{"issues", "issue_comment", "pull_request", "pull_request_review_comment"},
+		Events:             []string{"issues", "issue_comment", "pull_request", "pull_request_review_comment"},
 		SessionKeyTemplate: "{{.Repository}}/issues/{{.IssueNumber}}",
 		Security: SecurityConfig{
 			ProtectedBranches:     []string{"main", "master"},
@@ -306,8 +306,8 @@ func (c *Config) ProviderForRole(role string) *ProviderConfig {
 			for _, p := range c.Providers {
 				if p.Name == name {
 					return &p
+				}
 			}
-		}
 		}
 	}
 	// Legacy fast_provider fallback for pm/reviewer
