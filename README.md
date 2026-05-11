@@ -343,6 +343,8 @@ fordjent_cost_total_total      — cumulative spend in USD
 
 See [`docs/deployment.md`](docs/deployment.md) for Docker Compose with reverse-proxy, systemd installation, backup strategy, and monitoring.
 
+> **Recovery:** If sessions become corrupted, restart with `./fordjent -config my-config.yaml -clean` to wipe all session state.
+
 ## Development
 
 ### Prerequisites
