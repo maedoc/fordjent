@@ -19,6 +19,28 @@ type bashTool struct {
 	agentCfg AgentConfig
 }
 
+const maxBashOutput = 64 * 1024
+
+type limitedWriter struct {
+	w         *strings.Builder
+	remain    int
+	truncated bool
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.remain <= 0 {
+		lw.truncated = true
+		return len(p), nil
+	}
+	if len(p) > lw.remain {
+		p = p[:lw.remain]
+		lw.truncated = true
+	}
+	n, err := lw.w.Write(p)
+	lw.remain -= n
+	return len(p), err
+}
+
 func NewBashTool(info SessionInfo, cfg AgentConfig) *bashTool {
 	return &bashTool{repoDir: info.RepoDir(), agentCfg: cfg}
 }
@@ -101,14 +123,22 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	cmd := exec.CommandContext(ctx, shell, "-c", params.Command)
 	cmd.Dir = t.repoDir
 
-	var stdout, stderr strings.Builder
+	var stdout, stderr limitedWriter
+	stdout = limitedWriter{w: &strings.Builder{}, remain: maxBashOutput}
+	stderr = limitedWriter{w: &strings.Builder{}, remain: maxBashOutput}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		output += "\n[stderr]\n" + stderr.String()
+	output := stdout.w.String()
+	if stderr.w.Len() > 0 {
+		output += "\n[stderr]\n" + stderr.w.String()
+	}
+	if stdout.truncated {
+		output += "\n[stdout truncated at 65536 bytes]"
+	}
+	if stderr.truncated {
+		output += "\n[stderr truncated at 65536 bytes]"
 	}
 
 	if err != nil {
@@ -215,6 +245,13 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 		}
 	}
 
+	// Containment check: ensure the resolved path does not escape the repository root.
+	absPath = filepath.Join(t.repoDir, filepath.Clean(absPath))
+	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(absPath, repoClean) {
+		return "", fmt.Errorf("path escapes repository root: %s", path)
+	}
+
 	f, err := os.Open(absPath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
@@ -299,7 +336,11 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return fmt.Sprintf("[dry-run] Would write %d bytes to %s", len(params.Content), params.Path), nil
 	}
 
-	absPath := filepath.Join(t.repoDir, params.Path)
+	absPath := filepath.Join(t.repoDir, filepath.Clean(params.Path))
+	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(absPath, repoClean) {
+		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return "", fmt.Errorf("create directories: %w", err)

@@ -49,7 +49,7 @@ func IsStale(repoDir, base string) (bool, string, error) {
 	rebOut, rebErr := exec.Command("git", "-C", repoDir, "rebase", "origin/"+base).CombinedOutput()
 	if rebErr == nil {
 		// Rebase succeeded — push the rebased branch.
-		pushOut, pushErr := exec.Command("git", "-C", repoDir, "push", "-f", "-u", "origin", "HEAD").CombinedOutput()
+		pushOut, pushErr := exec.Command("git", "-C", repoDir, "push", "--force-with-lease", "-u", "origin", "HEAD").CombinedOutput()
 		if pushErr != nil {
 			slog.Warn("stalegate: push after rebase failed", "error", pushErr, "output", strings.TrimSpace(string(pushOut)), "repoDir", repoDir)
 			return true, fmt.Sprintf(

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -174,7 +175,9 @@ func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
 			var ts, et, act, repo, sender, status string
 			var num int
 			rows.Scan(&ts, &et, &act, &repo, &num, &sender, &status)
-			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td></tr>\n", ts, et, act, repo, num, sender, status)
+			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(ts), html.EscapeString(et), html.EscapeString(act),
+				html.EscapeString(repo), num, html.EscapeString(sender), html.EscapeString(status))
 		}
 	}
 	fmt.Fprintln(w, "</table>")
@@ -187,7 +190,9 @@ func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
 		for rows2.Next() {
 			var ts, sk, from, to, reason string
 			rows2.Scan(&ts, &sk, &from, &to, &reason)
-			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", ts, sk, from, to, reason)
+			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(ts), html.EscapeString(sk), html.EscapeString(from),
+				html.EscapeString(to), html.EscapeString(reason))
 		}
 	}
 	fmt.Fprintln(w, "</table></body></html>")

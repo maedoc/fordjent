@@ -211,3 +211,29 @@ func TestGitToolEmptyCommand(t *testing.T) {
 		t.Error("expected error for empty command")
 	}
 }
+
+func TestReadFileTraversalBlocked(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0644)
+	repoDir := filepath.Join(dir, "repo")
+	os.MkdirAll(repoDir, 0755)
+	tool := &readFileTool{repoDir: repoDir}
+
+	_, err := tool.readFile(context.Background(), "../../secret.txt", 0, 0)
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+}
+
+func TestWriteFileTraversalBlocked(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	os.MkdirAll(repoDir, 0755)
+	tool := &writeFileTool{repoDir: repoDir}
+
+	args := json.RawMessage(`{"path":"../../evil.txt","content":"pwned"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+}
