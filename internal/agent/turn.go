@@ -91,9 +91,6 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 	response, usage, err := te.llm.Chat(ctx, systemPrompt, messages, te.tools.Tools())
 	latency := time.Since(start)
 
-	// Retry count not directly exposed by Client.Chat; we log what we can.
-	// TODO: expose retry count from provider client if needed.
-
 	if err != nil {
 		return nil, messages, fmt.Errorf("LLM chat failed: %w", err)
 	}
@@ -132,13 +129,14 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 	)
 
 	result := &TurnResult{
-		Turn:      te.tracker.TotalTurns(),
-		Response:  response,
-		Usage:     usage,
-		CostUSD:   costUSD,
-		Latency:   latency,
-		ToolCalls: toolCount,
-		Compacted: compacted,
+		Turn:       te.tracker.TotalTurns(),
+		Response:   response,
+		Usage:      usage,
+		CostUSD:    costUSD,
+		Latency:    latency,
+		RetryCount: 0,
+		ToolCalls:  toolCount,
+		Compacted:  compacted,
 	}
 
 	return result, messages, nil

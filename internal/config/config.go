@@ -71,6 +71,7 @@ type AgentConfig struct {
 	GitEmail           string            `yaml:"git_email"`
 	FastProvider       string            `yaml:"fast_provider"`  // DEPRECATED: use role_providers instead
 	RoleProviders      map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
+	ReflectionInterval int             `yaml:"reflection_interval"`
 }
 
 type BudgetConfig struct {
@@ -146,6 +147,7 @@ func Load(path string) (*Config, error) {
 			CleanupArchiveDays:      30,
 			GitName:                 "Fordjent Agent",
 			GitEmail:                "fordjent@forgejo.local",
+			ReflectionInterval:      5,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,
