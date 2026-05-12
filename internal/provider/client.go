@@ -13,6 +13,13 @@ import (
 	"github.com/fordjent/fordjent/internal/config"
 )
 
+// ChatCompleter is the interface for LLM chat completion. Both Client and
+// FallbackClient satisfy this interface.
+type ChatCompleter interface {
+	Chat(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, *Usage, error)
+	Cfg() *config.ProviderConfig
+}
+
 // Message represents a chat message in the LLM conversation.
 type Message struct {
 	Role       string     `json:"role"`

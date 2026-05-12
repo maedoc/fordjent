@@ -380,6 +380,67 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		return
 	}
 
+	// FSM state detection: derive issue state from labels and react
+	if evt.Type == event.IssueLabelUpdated && evt.IssueNumber > 0 {
+		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+		if err == nil && issue != nil {
+			labelNames := make([]string, len(issue.Labels))
+			for i, l := range issue.Labels {
+				labelNames[i] = l.Name
+			}
+			newState := lifecycle.StateFromLabels(labelNames)
+			slog.Info("issue state from labels",
+				"issue", evt.IssueNumber,
+				"repo", evt.Repository,
+				"new_state", newState,
+				"labels", labelNames,
+			)
+			switch newState {
+			case lifecycle.StateDone:
+				if issue.State != "closed" {
+					if err := m.forgejoClient.CloseIssue(ctx, evt.Repository, evt.IssueNumber); err != nil {
+						slog.Warn("failed to close done issue", "error", err, "issue", evt.IssueNumber)
+					}
+				}
+			}
+		}
+	}
+
+	// Automerge label detection on PRs
+	if evt.Type == event.PullRequestLabelUpdated && evt.PRNumber > 0 {
+		pr, err := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+		if err == nil && pr.State != "closed" {
+			issue, issueErr := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.PRNumber)
+			if issueErr == nil && issue != nil {
+				hasAutomerge := false
+				for _, l := range issue.Labels {
+					if l.Name == "automerge" {
+						hasAutomerge = true
+						break
+					}
+				}
+				if hasAutomerge {
+					slog.Info("automerge label detected on PR, spawning reviewer", "pr", evt.PRNumber, "repo", evt.Repository)
+					synthEvt := event.NewEvent(
+						event.IssueCommentCreated,
+						evt.Repository,
+						evt.IssueNumber,
+						evt.PRNumber,
+						"automerge-trigger",
+						"created",
+					)
+					synthEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
+					synthEvt.Payload = map[string]interface{}{
+						"comment": map[string]interface{}{
+							"body": "[System] This PR has the 'automerge' label. Review the code and merge if it passes all checks.",
+						},
+					}
+					m.handleEvent(ctx, synthEvt)
+				}
+			}
+		}
+	}
+
 	// Session recovery: if a scheduler unblocks an issue whose session died, re-trigger.
 	if m.cfg.Agent.EnableSessionRecovery && evt.Type == event.IssueCommentCreated && evt.IssueNumber > 0 {
 		body := ""

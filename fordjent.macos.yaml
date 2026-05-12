@@ -1,0 +1,90 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+
+webhook:
+  secret: "${WEBHOOK_SECRET}"
+
+forgejo:
+  url: "${FORGEJO_URL}"
+  token: "${FORGEJO_TOKEN}"
+  admin_token: "${FORGEJO_ADMIN_TOKEN}"
+  rate_limit: 30
+
+agent:
+  max_sessions: 5
+  idle_timeout: "1h"
+  workdir: "${HOME}/.fordjent/work"
+  max_turns: 50
+  max_turns_pm: 15
+  max_turns_implementer: 40
+  role_providers:
+    pm: "fast"
+    reviewer: "strong"
+    implementer: "strong"
+  fallback_provider: "fast"
+  commit_prefix: "[fordjent]"
+  context_window: 128000
+  compaction_threshold: 0.85
+  compaction_keep_turns: 8
+  reflection_interval: 5
+  enable_lifecycle: true
+  enable_stale_gate: true
+  enable_scaffold_detection: false
+  enable_session_recovery: true
+  enable_context_injection: true
+  enable_auto_collaborator: false
+  require_role_tag: true
+  session_timeout: "30m"
+  git_name: "Fordjent Dev"
+  git_email: "fordjent-dev@local"
+
+budget:
+  enabled: false
+
+providers:
+  - name: "strong"
+    api_base: "https://api.openai.com/v1"
+    api_key: "${STRONG_API_KEY}"
+    model: "gpt-4o"
+    max_tokens: 16384
+    request_timeout: "120s"
+    max_retries: 3
+    retry_base_delay: "2s"
+    retry_max_delay: "30s"
+    max_concurrent_llm_calls: 2
+    tier: "strong"
+    cost_per_1m_input_tokens: 2.50
+    cost_per_1m_output_tokens: 10.00
+  - name: "fast"
+    api_base: "https://api.openai.com/v1"
+    api_key: "${FAST_API_KEY}"
+    model: "gpt-4o-mini"
+    max_tokens: 8192
+    request_timeout: "60s"
+    max_retries: 5
+    retry_base_delay: "2s"
+    retry_max_delay: "30s"
+    max_concurrent_llm_calls: 3
+    tier: "fast"
+    cost_per_1m_input_tokens: 0.15
+    cost_per_1m_output_tokens: 0.60
+
+events:
+  - "issues"
+  - "issue_comment"
+  - "pull_request"
+  - "pull_request_review_comment"
+
+security:
+  protected_branches: ["main", "master"]
+  require_pr_for_workflows: true
+  filter_agent_events: true
+
+memory:
+  enabled: true
+
+database:
+  path: ""
+
+log_level: "info"

@@ -387,6 +387,13 @@ func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
 		{"scaffold", "fbca04"},
 		{"fordjent/failed:max-turns", "b60205"},
 		{"fordjent/failed:error", "5319e7"},
+		{"needs-role", "ededed"},
+		{"planning", "1d76db"},
+		{"plan-approved", "0e8a16"},
+		{"implementing", "5319e7"},
+		{"review", "fbca04"},
+		{"automerge", "0e8a16"},
+		{"done", "ededed"},
 	}
 	for _, l := range labels {
 		if err := c.CreateLabel(ctx, repo, l.Name, l.Color); err != nil {
