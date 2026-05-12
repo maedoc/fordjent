@@ -36,19 +36,28 @@ type Agent struct {
 	cfg         *config.Config
 	sess        *Session
 	forgejo     *forgejo.Client
-	llm         *provider.Client
+	llm         provider.ChatCompleter
 	tools       *tool.Registry
 	mem         *memory.Memory
 	costTracker *cost.Tracker
 	executor    *agent.TurnExecutor
 	lc          *lifecycle.Lifecycle
-	role        string // pm, reviewer, devops, tester, implementer
+	role        string
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.ProviderForRole(role)
-	llmClient := provider.NewClient(prov)
+	var llmClient provider.ChatCompleter = provider.NewClient(prov)
+
+	if cfg.Agent.FallbackProvider != "" {
+		fallbackProv := cfg.ProviderByName(cfg.Agent.FallbackProvider)
+		if fallbackProv != nil && fallbackProv.Name != prov.Name {
+			fallbackClient := provider.NewClient(fallbackProv)
+			llmClient = provider.NewFallbackClient(llmClient.(*provider.Client), fallbackClient)
+		}
+	}
+
 	mem := memory.New(cfg, sess.WorkDir, forgejoClient)
 
 	sessionInfo := &sessionInfoAdapter{workDir: sess.WorkDir, repoDir: sess.RepoDir}
@@ -92,7 +101,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	analysisMode := a.detectAnalysisMode(ctx, evt)
 
 	// Step 3: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(evt, analysisMode, a.role)
+	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role)
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
@@ -343,7 +352,7 @@ func (a *Agent) effectiveMaxTurns() int {
 	return a.cfg.Agent.MaxTurns
 }
 
-func (a *Agent) buildSystemPrompt(evt *event.Event, analysisMode bool, role string) string {
+func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string) string {
 	toolsDesc := a.tools.Descriptions()
 
 	var modeInstructions string
@@ -406,6 +415,26 @@ You are in Code Review mode. You do NOT write code. Your job is:
 - If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_merge_pr IMMEDIATELY.
 - If issues found, post a comment describing what needs to change.
 - DO NOT leave PRs open indefinitely — either merge or request changes.`
+
+		hasAutomerge := false
+		if evt.IssueNumber > 0 {
+			issue, err := a.forgejo.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+			if err == nil && issue != nil {
+				for _, l := range issue.Labels {
+					if l.Name == "automerge" {
+						hasAutomerge = true
+						break
+					}
+				}
+			}
+		}
+		if hasAutomerge {
+			modeInstructions += `
+
+- This PR has the 'automerge' label. Review the diff, verify build and tests pass.
+- If the code is correct and there are no conflicts, call forgejo_merge_pr immediately.
+- If issues are found, post a comment describing them and remove the 'automerge' label.`
+		}
 	case "devops":
 		modeInstructions += `
 
@@ -427,6 +456,8 @@ You are in Test Engineering mode. Your focus is test quality and coverage:
 - Create PRs with test-only changes.`
 	}
 
+	stateInstructions := a.issueStateInstructions(ctx, evt)
+
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
 
 ## Current Context
@@ -434,6 +465,7 @@ You are in Test Engineering mode. Your focus is test quality and coverage:
 - Event: %s (action: %s)
 - Sender: @%s
 - Target: %s
+%s
 %s
 
 ## Your Capabilities
@@ -471,6 +503,7 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		evt.Sender,
 		a.targetDescription(evt),
 		modeInstructions,
+		stateInstructions,
 		toolsDesc,
 		a.cfg.Agent.CommitPrefix,
 		strings.Join(a.cfg.Security.ProtectedBranches, ", "),
@@ -587,6 +620,22 @@ func (a *Agent) detectAnalysisMode(ctx context.Context, evt *event.Event) bool {
 	return false
 }
 
+// detectIssueState derives the FSM state from the issue's current labels.
+func (a *Agent) detectIssueState(ctx context.Context, evt *event.Event) lifecycle.IssueState {
+	if evt.IssueNumber == 0 {
+		return lifecycle.StateOpened
+	}
+	issue, err := a.forgejo.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+	if err != nil || issue == nil {
+		return lifecycle.StateOpened
+	}
+	labelNames := make([]string, len(issue.Labels))
+	for i, l := range issue.Labels {
+		labelNames[i] = l.Name
+	}
+	return lifecycle.StateFromLabels(labelNames)
+}
+
 // isImplementationTool returns true for tools that write code or create PRs.
 func isImplementationTool(name string) bool {
 	switch name {
@@ -672,4 +721,28 @@ func allSameSignature(sigs []turnSignature) bool {
 		}
 	}
 	return true
+}
+
+// issueStateInstructions returns state-aware prompt additions based on the
+// issue's current FSM state (derived from labels).
+func (a *Agent) issueStateInstructions(ctx context.Context, evt *event.Event) string {
+	state := a.detectIssueState(ctx, evt)
+	switch state {
+	case lifecycle.StatePlanning:
+		return `
+
+## STATE: Planning
+This issue is in planning mode. You MUST:
+1. Read and understand the codebase
+2. Propose a concrete implementation plan
+3. Break into sub-issues if needed
+4. Post a summary comment
+5. STOP — do not write code`
+	case lifecycle.StateBlocked:
+		return `
+
+## STATE: Blocked
+This issue is blocked. Check the issue body for 'Depends on: #N' to understand what's blocking it. Post a comment explaining the current blocker. Do not attempt implementation.`
+	}
+	return ""
 }

@@ -31,7 +31,7 @@ type TurnResult struct {
 // TurnExecutor runs the LLM loop for a session with compaction, retries, and cost tracking.
 type TurnExecutor struct {
 	cfg          *config.Config
-	llm          *provider.Client
+	llm          provider.ChatCompleter
 	tools        *tool.Registry
 	tracker      *ContextTracker
 	costTracker  *cost.Tracker
@@ -39,10 +39,9 @@ type TurnExecutor struct {
 	repository   string
 }
 
-// NewTurnExecutor creates a configured turn executor for a session.
 func NewTurnExecutor(
 	cfg *config.Config,
-	llm *provider.Client,
+	llm provider.ChatCompleter,
 	tools *tool.Registry,
 	costTracker *cost.Tracker,
 	sessionKey, repository string,

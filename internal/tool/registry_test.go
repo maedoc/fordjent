@@ -24,6 +24,9 @@ type mockAgentConfig struct {
 func (m *mockAgentConfig) CommitPrefix() string        { return m.prefix }
 func (m *mockAgentConfig) ProtectedBranches() []string  { return m.protected }
 func (m *mockAgentConfig) RequirePRForWorkflows() bool  { return true }
+func (m *mockAgentConfig) DryRun() bool                 { return false }
+func (m *mockAgentConfig) AllowProtectedPush() bool      { return false }
+func (m *mockAgentConfig) IsScaffold() bool              { return false }
 
 func TestRegistryRegisterAndGet(t *testing.T) {
 	registry := NewRegistry()

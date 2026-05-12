@@ -71,7 +71,8 @@ type AgentConfig struct {
 	GitEmail           string            `yaml:"git_email"`
 	FastProvider       string            `yaml:"fast_provider"`  // DEPRECATED: use role_providers instead
 	RoleProviders      map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
-	ReflectionInterval int             `yaml:"reflection_interval"`
+	FallbackProvider   string            `yaml:"fallback_provider"`
+	ReflectionInterval int               `yaml:"reflection_interval"`
 }
 
 type BudgetConfig struct {
@@ -91,6 +92,7 @@ type ProviderConfig struct {
 	RetryBaseDelay        time.Duration `yaml:"retry_base_delay"`
 	RetryMaxDelay         time.Duration `yaml:"retry_max_delay"`
 	MaxConcurrentLLMCalls int           `yaml:"max_concurrent_llm_calls"`
+	Tier                  string        `yaml:"tier"`
 	CostPer1MInputTokens  float64       `yaml:"cost_per_1m_input_tokens"`
 	CostPer1MOutputTokens float64       `yaml:"cost_per_1m_output_tokens"`
 }
@@ -287,6 +289,25 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if c.Agent.FallbackProvider != "" {
+		found := false
+		for _, p := range c.Providers {
+			if p.Name == c.Agent.FallbackProvider {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("agent.fallback_provider %q not found in providers list", c.Agent.FallbackProvider))
+		}
+	}
+
+	for i, p := range c.Providers {
+		if p.Tier != "" && p.Tier != "strong" && p.Tier != "fast" {
+			errs = append(errs, fmt.Sprintf("providers[%d].tier must be 'strong' or 'fast', got %q", i, p.Tier))
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 	}
@@ -299,6 +320,15 @@ func (c *Config) DefaultProvider() *ProviderConfig {
 		return nil
 	}
 	return &c.Providers[0]
+}
+
+func (c *Config) ProviderByName(name string) *ProviderConfig {
+	for _, p := range c.Providers {
+		if p.Name == name {
+			return &p
+		}
+	}
+	return nil
 }
 
 // ProviderForRole returns the provider to use for a given agent role.

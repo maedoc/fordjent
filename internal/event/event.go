@@ -21,6 +21,7 @@ const (
 	PullRequestOpened        Type = "pull_request.opened"
 	PullRequestClosed        Type = "pull_request.closed"
 	PullRequestMerged        Type = "pull_request.merged"
+	PullRequestLabelUpdated  Type = "pull_request.label_updated"
 	PullRequestSync          Type = "pull_request.synchronize"
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
 	Push                     Type = "push"

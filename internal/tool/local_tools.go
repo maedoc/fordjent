@@ -246,7 +246,7 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 	}
 
 	// Containment check: ensure the resolved path does not escape the repository root.
-	absPath = filepath.Join(t.repoDir, filepath.Clean(absPath))
+	absPath = filepath.Clean(absPath)
 	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
 	if !strings.HasPrefix(absPath, repoClean) {
 		return "", fmt.Errorf("path escapes repository root: %s", path)

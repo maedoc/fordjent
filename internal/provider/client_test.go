@@ -20,17 +20,19 @@ func TestChatNoToolCalls(t *testing.T) {
 		resp := openAIResponse{
 			Choices: []struct {
 				Message struct {
-					Role      string         `json:"role"`
-					Content   string         `json:"content"`
-					ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+					Role             string         `json:"role"`
+					Content          string         `json:"content"`
+					ReasoningContent string         `json:"reasoning_content"`
+					ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{
 				{
 					Message: struct {
-						Role      string         `json:"role"`
-						Content   string         `json:"content"`
-						ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+						Role             string         `json:"role"`
+						Content          string         `json:"content"`
+						ReasoningContent string         `json:"reasoning_content"`
+						ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
 					}{
 						Role:    "assistant",
 						Content: "I've analyzed the issue. Here's what I found...",
@@ -72,17 +74,19 @@ func TestChatWithToolCalls(t *testing.T) {
 		resp := openAIResponse{
 			Choices: []struct {
 				Message struct {
-					Role      string         `json:"role"`
-					Content   string         `json:"content"`
-					ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+					Role             string         `json:"role"`
+					Content          string         `json:"content"`
+					ReasoningContent string         `json:"reasoning_content"`
+					ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{
 				{
 					Message: struct {
-						Role      string         `json:"role"`
-						Content   string         `json:"content"`
-						ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+						Role             string         `json:"role"`
+						Content          string         `json:"content"`
+						ReasoningContent string         `json:"reasoning_content"`
+						ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
 					}{
 						Role:    "assistant",
 						Content: "",
