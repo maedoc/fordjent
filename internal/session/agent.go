@@ -2,11 +2,14 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +26,10 @@ import (
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
+
+type turnSignature struct {
+	tools string
+}
 
 // Agent is the per-session agent that processes events via LLM + tools.
 type Agent struct {
@@ -143,6 +150,17 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	a.addReaction(ctx, evt, "hourglass_flowing_sand")
 
 	maxTurns := a.effectiveMaxTurns()
+
+	consecutiveErrors := 0
+	maxConsecutiveErrors := 3
+
+	recentSigs := make([]turnSignature, 0, 3)
+
+	reflectEvery := a.cfg.Agent.ReflectionInterval
+	if reflectEvery <= 0 {
+		reflectEvery = 5
+	}
+
 	for turn := 0; turn < maxTurns; turn++ {
 		slog.Info("LLM turn begin",
 			"session_key", a.sess.Key,
@@ -154,9 +172,41 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		messages = updatedMessages
 
 		if err != nil {
-			slog.Error("LLM turn failed", "session_key", a.sess.Key, "turn", turn, "error", err)
-			a.addReaction(ctx, evt, "x")
-			return fmt.Errorf("turn %d failed: %w", turn, err)
+			consecutiveErrors++
+			slog.Warn("turn failed",
+				"session_key", a.sess.Key,
+				"turn", turn,
+				"consecutive_errors", consecutiveErrors,
+				"error", err,
+			)
+			if consecutiveErrors >= maxConsecutiveErrors {
+				a.addReaction(ctx, evt, "x")
+				return fmt.Errorf("aborted after %d consecutive failures: %w", consecutiveErrors, err)
+			}
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[System] The previous turn failed: %s. Adjust your approach and try again.", err),
+			})
+			continue
+		}
+
+		consecutiveErrors = 0
+
+		if turn > 0 && turn%reflectEvery == 0 {
+			messages = append(messages, provider.Message{
+				Role: "user",
+				Content: `[System] REFLECTION CHECKPOINT
+
+Pause and reflect on your progress:
+1. What has been accomplished so far?
+2. What's working well?
+3. What's not working or blocking progress?
+4. Should the approach be adjusted?
+5. What are the next priorities?
+
+Update the issue comment with your reflection, then continue working.`,
+			})
+			slog.Info("reflection checkpoint injected", "session_key", a.sess.Key, "turn", turn)
 		}
 
 		// Track metrics
@@ -225,7 +275,6 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
 			if terr != nil {
 				if errors.Is(terr, sentinel.ErrBlocked) {
-					// Merge queue block signals the session should stop cleanly.
 					body := fmt.Sprintf("This issue is blocked by the merge queue. %v\n\n<!-- ford -->", terr)
 					_ = a.forgejo.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, body)
 					_ = a.forgejo.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"blocked"})
@@ -245,6 +294,19 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 				ToolCallID: tc.ID,
 				Content:    res,
 			})
+		}
+
+		sig := buildTurnSignature(result.Response.ToolCalls)
+		recentSigs = append(recentSigs, sig)
+		if len(recentSigs) > 3 {
+			recentSigs = recentSigs[1:]
+		}
+		if len(recentSigs) == 3 && allSameSignature(recentSigs) {
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: "[System] WARNING: Your last 3 turns performed identical actions. You may be stuck in a loop. Try a completely different approach, or describe the blocker and stop.",
+			})
+			slog.Warn("stall detected", "session_key", a.sess.Key, "turn", turn)
 		}
 	}
 
@@ -588,4 +650,26 @@ func buildRoleRegistry(
 	}
 
 	return registry
+}
+
+func buildTurnSignature(calls []provider.ToolCall) turnSignature {
+	var parts []string
+	for _, tc := range calls {
+		h := sha256.Sum256([]byte(tc.Function.Arguments))
+		parts = append(parts, tc.Function.Name+"("+hex.EncodeToString(h[:4])+")")
+	}
+	sort.Strings(parts)
+	return turnSignature{tools: strings.Join(parts, ",")}
+}
+
+func allSameSignature(sigs []turnSignature) bool {
+	if len(sigs) < 2 {
+		return false
+	}
+	for i := 1; i < len(sigs); i++ {
+		if sigs[i].tools != sigs[0].tools {
+			return false
+		}
+	}
+	return true
 }
