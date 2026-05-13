@@ -62,6 +62,11 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	return r
 }
 
+// Handler returns the http.Handler for the router's mux.
+func (r *Router) Handler() http.Handler {
+	return r.mux
+}
+
 // SetLifecycle wires the lifecycle tracker for webhook delivery logging.
 func (r *Router) SetLifecycle(lc *lifecycle.Lifecycle) {
 	r.lc = lc

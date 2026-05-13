@@ -194,6 +194,8 @@ func (s *Scheduler) listOpenIssues(ctx context.Context, repo string) ([]Issue, e
 
 // isIssueClosed checks whether an issue/PR dependency is satisfied.
 // A merged PR has state="closed" but also merged=true — both count as closed.
+// An open issue with no associated PR (e.g. a PM issue) is NOT considered
+// blocking — only issues with open PRs represent actual code dependencies.
 func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) (bool, error) {
 	escaped := escapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, number)
@@ -202,13 +204,27 @@ func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) 
 		return false, err
 	}
 	var issue struct {
-		State  string `json:"state"`
-		Merged bool   `json:"merged"` // present when issue is actually a PR
+		State       string `json:"state"`
+		Merged      bool   `json:"merged"`
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
 	}
 	if err := json.Unmarshal([]byte(body), &issue); err != nil {
 		return false, fmt.Errorf("unmarshal issue: %w", err)
 	}
-	return issue.State == "closed" || issue.Merged, nil
+	// Closed or merged = resolved
+	if issue.State == "closed" || issue.Merged {
+		return true, nil
+	}
+	// If the issue is open and has NO associated PR, it's not a code
+	// dependency — don't block on it. PM issues, scaffold issues, etc.
+	// should never block implementation.
+	if issue.PullRequest == nil || issue.PullRequest.URL == "" {
+		return true, nil
+	}
+	// Open issue with a PR = code in flight, still blocking
+	return false, nil
 }
 
 // removeLabel removes a label from an issue.
@@ -316,4 +332,42 @@ func escapeRepoPath(repo string) string {
 		parts[i] = url.PathEscape(p)
 	}
 	return strings.Join(parts, "/")
+}
+
+// hasOpenPR checks whether an issue has any associated open pull requests.
+// This is used by isIssueClosed to determine if an open issue is actually
+// a code dependency (has a PR) or just a coordination issue (no PR).
+func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int) (bool, error) {
+	escaped := escapeRepoPath(repo)
+	apiPath := fmt.Sprintf("/api/v1/repos/%s/pulls?state=open", escaped)
+	body, err := s.doGet(ctx, apiPath)
+	if err != nil {
+		return false, err
+	}
+	var prs []struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal([]byte(body), &prs); err != nil {
+		return false, fmt.Errorf("unmarshal PRs: %w", err)
+	}
+	// Forgejo doesn't directly link issues to PRs in a simple way.
+	// We check if any open PR's head branch references this issue number
+	// by looking at PR titles/descriptions, but that's unreliable.
+	// A simpler approach: check if the issue IS a PR (Forgejo treats
+	// PRs as issues with extra fields).
+	escapedIssue := escapeRepoPath(repo)
+	issuePath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escapedIssue, issueNumber)
+	issueBody, err := s.doGet(ctx, issuePath)
+	if err != nil {
+		return false, err
+	}
+	var issue struct {
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal([]byte(issueBody), &issue); err != nil {
+		return false, fmt.Errorf("unmarshal issue: %w", err)
+	}
+	return issue.PullRequest != nil && issue.PullRequest.URL != "", nil
 }

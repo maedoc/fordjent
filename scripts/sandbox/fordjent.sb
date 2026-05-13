@@ -1,0 +1,25 @@
+(version 1)
+(allow default)
+
+(allow network-inbound (local tcp))
+(allow network-bind (local tcp))
+(allow network-outbound)
+
+(allow process-exec (literal "/usr/bin/git"))
+(allow process-exec (literal "/usr/local/bin/git"))
+(allow process-exec (subpath "/opt/homebrew/bin"))
+(allow process-exec (subpath "/opt/homebrew/Cellar"))
+
+(allow file-read* (subpath "/opt/homebrew"))
+(allow file-read* (subpath "/usr"))
+(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (literal "/etc"))
+(allow file-read* (subpath "/Users/duke/src/fordjent"))
+(allow file-read* (literal "/Users/duke/.gitconfig"))
+
+(deny file-write* (regex "^/Users/duke(?!/fordjent-local)(?!/src/fordjent)"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR/fordjent-work"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR/logs"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR"))

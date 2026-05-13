@@ -247,24 +247,33 @@ func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, comm
 func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber int, labels []string) error {
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
 
-	// Resolve label names to IDs
-	existing, err := c.ListLabels(ctx, repo)
+	existingLabels, err := c.ListLabels(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("list labels: %w", err)
 	}
 	nameToID := make(map[string]int64)
-	for _, l := range existing {
+	for _, l := range existingLabels {
 		nameToID[l.Name] = l.ID
+	}
+
+	issue, err := c.GetIssue(ctx, repo, issueNumber)
+	if err != nil {
+		return fmt.Errorf("get issue for dedup: %w", err)
+	}
+	alreadyOnIssue := make(map[string]bool)
+	for _, l := range issue.Labels {
+		alreadyOnIssue[l.Name] = true
 	}
 
 	var ids []int64
 	for _, name := range labels {
+		if alreadyOnIssue[name] {
+			continue
+		}
 		if id, ok := nameToID[name]; ok {
 			ids = append(ids, id)
 		} else {
-			// Label doesn't exist yet — try to create it first
 			if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
-				// If creation failed, try to list again in case of race
 				existing2, listErr := c.ListLabels(ctx, repo)
 				if listErr == nil {
 					for _, l := range existing2 {
@@ -276,7 +285,6 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 				}
 				continue
 			}
-			// Re-list to get the new label's ID
 			existing3, _ := c.ListLabels(ctx, repo)
 			for _, l := range existing3 {
 				if l.Name == name {
@@ -288,7 +296,7 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 	}
 
 	if len(ids) == 0 {
-		return nil // nothing to add
+		return nil
 	}
 
 	_, err = c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{"labels": ids})

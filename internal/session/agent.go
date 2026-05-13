@@ -502,7 +502,7 @@ You have access to the following tools:
 8. **Pre-flight check**: Before writing code, verify the repo state using bash or read_file. Check what packages exist, recent commits on origin/main, your current branch, and whether listed dependencies are merged. If dependencies aren't merged, post a comment and STOP.
 9. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
 10. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
-11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Sub-issues are auto-tagged 'blocked' when their parent code hasn't been merged yet. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues.
+11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues. Do NOT add 'blocked' labels to sub-issues — the scheduler will manage blocking/unblocking automatically based on 'Depends on: #N' declarations.
 12. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
 13. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
 14. **Merged PRs show state "closed" in the API.** When checking if a dependency PR is resolved, look at the 'merged' field (true = merged), not the 'state' field. A PR with 'state: closed' may still be merged and ready.
@@ -760,9 +760,15 @@ Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are 
 		return `
 
 ## STATE: Blocked
-This issue is blocked. Check the issue body for 'Depends on: #N' to understand what's blocking it. Post a comment explaining the current blocker. Do not attempt implementation.
+This issue has a 'blocked' label. Before giving up:
+1. Check the issue body for 'Depends on: #N' references
+2. For each dependency, use forgejo_get_issue to check if it's actually blocking:
+   - If the dependency issue is CLOSED or has a MERGED PR → it's resolved, proceed
+   - If the dependency has NO associated PR → it's a coordination issue, not a code dependency — proceed
+   - If the dependency has an OPEN PR → it's genuinely blocking, post a comment explaining the blocker and STOP
+3. If all dependencies are resolved, remove the 'blocked' label and proceed with implementation
 
-Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this state.`
+Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED while the 'blocked' label is present. If you verify dependencies are resolved, you may use forgejo tools to remove the 'blocked' label and add 'ready'.`
 	}
 	return ""
 }

@@ -766,3 +766,36 @@ func TestScaffoldDetection_PassesOnPopulatedRepo(t *testing.T) {
 		t.Error("scaffold issue should NOT be created on populated repo")
 	}
 }
+
+func TestLabelUpdatedDoesNotCreateSession(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.issueTitle = "[implementer] Add a feature"
+	f.issueLabels = []string{"blocked"}
+	f.repoFiles = []string{"go.mod", "main.go"}
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	evt := event.NewEvent(event.IssueLabelUpdated, "fjadmin/testbed", 1, 0, "fjadmin", "label_updated")
+	evt.SessionKey = "fjadmin/testbed/issues/1"
+
+	mgr.handleEvent(ctx, evt)
+
+	_, exists := mgr.sessions["fjadmin/testbed/issues/1"]
+	if exists {
+		t.Error("label_updated events should NOT create sessions (only FSM state tracking)")
+	}
+}

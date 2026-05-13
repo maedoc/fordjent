@@ -121,3 +121,88 @@ func TestParseDependsOn(t *testing.T) {
 	}
 	fmt.Println("✅ parseDependsOn tests passed")
 }
+
+func TestIsIssueClosed_PMIssueNotBlocking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/4"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":       "open",
+				"merged":      false,
+				"pull_request": nil,
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	closed, err := s.isIssueClosed(context.Background(), "fjadmin/testbed", 4)
+	if err != nil {
+		t.Fatalf("isIssueClosed error: %v", err)
+	}
+	if !closed {
+		t.Error("PM issue with no PR should be treated as satisfied (not blocking)")
+	}
+}
+
+func TestIsIssueClosed_OpenPRIsBlocking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/5"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":  "open",
+				"merged": false,
+				"pull_request": map[string]interface{}{
+					"url": "http://localhost:3000/api/v1/repos/fjadmin/testbed/pulls/3",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	closed, err := s.isIssueClosed(context.Background(), "fjadmin/testbed", 5)
+	if err != nil {
+		t.Fatalf("isIssueClosed error: %v", err)
+	}
+	if closed {
+		t.Error("open PR dependency should be treated as NOT satisfied (blocking)")
+	}
+}
+
+func TestIsIssueClosed_MergedPRIsSatisfied(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/5"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":  "closed",
+				"merged": true,
+				"pull_request": map[string]interface{}{
+					"url": "http://localhost:3000/api/v1/repos/fjadmin/testbed/pulls/3",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	closed, err := s.isIssueClosed(context.Background(), "fjadmin/testbed", 5)
+	if err != nil {
+		t.Fatalf("isIssueClosed error: %v", err)
+	}
+	if !closed {
+		t.Error("merged PR dependency should be treated as satisfied")
+	}
+}

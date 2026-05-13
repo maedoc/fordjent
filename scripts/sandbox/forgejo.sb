@@ -1,0 +1,18 @@
+(version 1)
+(allow default)
+
+(allow network-inbound (local tcp))
+(allow network-bind (local tcp))
+(allow network-outbound (local tcp))
+
+(allow file-read* (subpath "/opt/homebrew"))
+(allow file-read* (subpath "/usr"))
+(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (literal "/etc"))
+
+(deny file-write* (regex "^/Users/duke(?!/fordjent-local)"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR/forgejo-data"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR/logs"))
+(allow file-write* (subpath "FORDJENT_LOCAL_DIR"))

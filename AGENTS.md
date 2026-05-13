@@ -1054,3 +1054,161 @@ Added `TestScaffoldDetection_BlocksOnEmptyRepo` and `TestScaffoldDetection_Passe
 | `internal/session/interaction_test.go` | Scaffold detection tests; role assignment error test; `interactionForgejo` extended with tree/issues/create-issue handlers |
 | `internal/webhook/router_test.go` | Closed-PR comment guard tests; added `forgejo` import |
 | `AGENTS.md` | This update |
+
+---
+
+## Bug Fix 16 — `detectRoleFromTitle` Missing `[implementer]` Tag (May 13, 2026)
+
+**Problem**: `detectRoleFromTitle()` in `internal/session/manager.go` only recognized `[pm]`, `[review]`, `[devops]`, and `[test]` title tags. The `[implementer]`, `[implement]`, `[dev]`, and `[developer]` tags were **missing** — the most common role tag for code-writing issues was completely ignored by the role gate, causing all implementer-tagged issues to be blocked as "untagged" when `require_role_tag: true`.
+
+**Fix**: Added the implementer branch to `detectRoleFromTitle()`:
+```go
+if strings.Contains(lower, "[implementer]") || strings.Contains(lower, "[implement]") || strings.Contains(lower, "[dev]") || strings.Contains(lower, "[developer]") {
+    return "implementer"
+}
+```
+
+This matches the label-based detection in `detectRoleFromIssue()` which already had `role:implementer` and `role:developer`.
+
+**Impact**: Without this fix, `[implementer]`-tagged issues were blocked by the role gate and a `needs-role` label was added, requiring manual intervention. The guidance comment told users to add `[implementer]` — which didn't work.
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | Added `[implementer]`, `[implement]`, `[dev]`, `[developer]` to `detectRoleFromTitle()` |
+
+---
+
+## Native Local Deployment (May 13, 2026)
+
+### What Was Built
+A one-command bootstrap script that sets up Forgejo + Fordjent locally on macOS, both running natively (no Docker) inside `sandbox-exec` profiles.
+
+### Architecture
+
+```
+Forgejo (brew) :3000  ←→  Fordjent (go build) :8080
+     sandbox-exec            sandbox-exec
+         ↓                        ↓
+  ~/fordjent-local/forgejo-data/  ~/fordjent-local/fordjent-work/
+```
+
+Webhook delivery is trivial: `http://127.0.0.1:8080/acp/v1/events` — no tunnels needed.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/bootstrap-local.sh` | One-command setup: installs Forgejo via brew, generates config, creates admin user + tokens, builds Fordjent, creates test repo with FSM labels, registers webhook, fires test issue, waits for agent activity |
+| `scripts/teardown-local.sh` | Kills Forgejo + Fordjent, optionally `--clean` wipes `~/fordjent-local/` |
+| `scripts/sandbox/forgejo.sb` | Sandbox profile: allow local TCP only, restrict writes to `~/fordjent-local/` |
+| `scripts/sandbox/fordjent.sb` | Sandbox profile: allow outbound network (LLM APIs), restrict writes |
+
+### Usage
+
+```bash
+export WAFER_API_KEY=wfr_...
+./scripts/bootstrap-local.sh          # set up everything
+./scripts/teardown-local.sh           # stop services
+./scripts/teardown-local.sh --clean   # stop + wipe data
+```
+
+### Key Design Decisions
+
+- **Tokens hardcoded in YAML** (not `${ENV_VAR}`): `sandbox-exec` doesn't inherit parent env vars. The bootstrap writes actual values into the config file.
+- **Forgejo stopped briefly for user creation**: SQLite DB locks prevent `forgejo admin user create` while `forgejo web` is running. Bootstrap stops Forgejo, creates user + tokens, then restarts.
+- **Repo seeding**: The test repo is pre-seeded with `go.mod` + `.gitignore` (via Forgejo contents API) so scaffold detection doesn't block the first issue.
+- **Test issue uses `[implementer]` tag**: Required because `require_role_tag: true` in config.
+
+### Issues Found During Bootstrap
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | `sandbox-exec` profile syntax: `network-listen` is not valid | Changed to `(allow network-inbound (local tcp))` + `(allow network-bind (local tcp))` + `(allow network-outbound)` |
+| 2 | `sandbox-exec` doesn't inherit env vars | Config uses hardcoded values, not `${ENV_VAR}` expansion |
+| 3 | `forgejo admin user create` can't run while `forgejo web` holds SQLite | Stop Forgejo → create user → restart |
+| 4 | `detectRoleFromTitle` missing `[implementer]` | Bug Fix 16 — added implementer tags to title detection |
+| 5 | Auto-initialized repo triggers scaffold detection | Seed `go.mod` + `.gitignore` via API before creating issues |
+
+### Smoke Test Result
+
+Issue #2 `[implementer] Write a hello world Go program`:
+1. ✅ Agent picked up the issue (role gate passed)
+2. ✅ Created feature branch `feature/hello-world`
+3. ✅ Wrote `main.go` + `Makefile`
+4. ✅ Created PR #3 — "Add hello world Go program and Makefile"
+5. ✅ Entered PR review mode, verified `go build` + `./testbed`
+6. ✅ Posted review comment: "Ready to Merge"
+7. ✅ Session completed: 65K tokens, $0 cost (Wafer free tier)
+
+---
+
+## Bug Fixes 17–20 + Test Hardening (May 13, 2026)
+
+### Bug Fix 17 — Label Updated Feedback Loop
+**Problem**: Non-role `IssueLabelUpdated` events (e.g., FSM transitions adding `blocked`) created new sessions, which triggered more label updates, which created more sessions — infinite feedback loop.
+
+**Fix**: In `Manager.handleEvent`, before session creation, non-role `IssueLabelUpdated` and `PullRequestLabelUpdated` events are dropped (only FSM state tracking updates proceed). The `automerge` label on PRs still creates sessions (for reviewer activation).
+
+### Bug Fix 18 — PM Prompt Added `blocked` Labels to Sub-Issues
+**Problem**: The PM system prompt instructed the agent to add `blocked` labels to sub-issues. This conflicted with the scheduler's ownership of blocking/unblocking.
+
+**Fix**: Removed `blocked` label instructions from PM system prompt. The scheduler manages blocking via `Depends on:` dependency tracking.
+
+### Bug Fix 19 — Scheduler `isIssueClosed` Treated All Open Issues as Blocking
+**Problem**: `isIssueClosed` checked if a dependency issue was "open" and treated ALL open issues as blocking — even PM/coordination issues that would never have a PR. This caused permanent blocking.
+
+**Fix**: `isIssueClosed` now checks the `pull_request` field on the issue API response directly. Issues with no associated PR (PM issues, coordination issues) are treated as satisfied (not blocking). The `hasOpenPR()` helper was removed — single API call approach.
+
+### Bug Fix 20 — `blocked` State Instructions Inadequate
+**Problem**: When an issue was in `blocked` FSM state, the agent was told it couldn't work but had no guidance on how to resolve the blockage.
+
+**Fix**: Updated `issueStateInstructions(StateFSMBlocked)` to guide the agent through verifying whether dependencies actually have open PRs, and removing the `blocked` label if the dependency is resolved.
+
+### Additional Fixes in This Pass
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 21 | `AddIssueLabels` created duplicate labels | Added dedup: `GetIssue` checks existing labels before POST; only adds labels not already on the issue |
+| 22 | `internal/e2e` build errors: `bus.Run`/`router.ServeHTTP` undefined | Added `Router.Handler()` method; fixed e2e test to use proper HMAC, shared bus, `log/slog.Default()` logger |
+| 23 | Fake Forgejo `handleGetIssue` returned repo-level `createdLabels` as issue labels | Fixed to only return `issueLabels + addedLabels` (labels actually on the issue) |
+| 24 | `TestLabelUpdatedDoesNotCreateSession` used undefined `baseTestConfig`/`GetSession` | Changed to `testConfig(t, f.URL(), true)` and `mgr.sessions[key]` direct access |
+
+### Files Changed in This Pass
+
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | Drop non-role label_updated events before session creation; `detectRoleFromTitle` includes `[implementer]`/`[implement]`/`[dev]`/`[developer]` (Bug #16); `blocked` state instructions guide dependency verification (Bug #20) |
+| `internal/session/agent.go` | FSM state tool blocking for planning/blocked; `issueStateInstructions` standalone; `buildSystemPrompt` takes `fsmState` |
+| `internal/scheduler/scheduler.go` | `isIssueClosed` refactored — checks `pull_request` field directly; `hasOpenPR()` removed (Bug #19) |
+| `internal/forgejo/client.go` | `AddIssueLabels` dedup: calls `GetIssue` first to check existing labels (Bug #21) |
+| `internal/webhook/router.go` | Added `Handler()` method for external access to mux |
+| `internal/e2e/e2e_test.go` | Fixed: proper HMAC, shared bus, real logger, `Router.Handler()` |
+| `internal/session/role_gate_test.go` | Fixed fake `handleGetIssue` to not include `createdLabels` as issue labels |
+| `internal/session/interaction_test.go` | `TestLabelUpdatedDoesNotCreateSession` — uses `testConfig` + `mgr.sessions` |
+| `internal/session/manager_test.go` | Added `TestDetectRoleFromTitle` with 20 test cases covering all role tags |
+| `internal/session/agent_test.go` | Role prompt tests (devops/tester/pm); simplified state instruction tests |
+| `internal/session/interaction_test.go` | Scaffold detection tests; role assignment error test; extended `interactionForgejo` fake |
+| `internal/webhook/router_test.go` | Closed-PR comment guard tests |
+
+### Test Results
+
+```
+ok  github.com/fordjent/fordjent/internal/agent
+ok  github.com/fordjent/fordjent/internal/config
+ok  github.com/fordjent/fordjent/internal/cost
+ok  github.com/fordjent/fordjent/internal/e2e
+ok  github.com/fordjent/fordjent/internal/event
+ok  github.com/fordjent/fordjent/internal/forgejo
+ok  github.com/fordjent/fordjent/internal/lifecycle
+ok  github.com/fordjent/fordjent/internal/memory
+ok  github.com/fordjent/fordjent/internal/mergequeue
+ok  github.com/fordjent/fordjent/internal/provider
+ok  github.com/fordjent/fordjent/internal/scheduler
+ok  github.com/fordjent/fordjent/internal/session
+ok  github.com/fordjent/fordjent/internal/stalegate
+ok  github.com/fordjent/fordjent/internal/tool
+ok  github.com/fordjent/fordjent/internal/webhook
+```
+
+All 15 internal packages pass.

@@ -365,7 +365,6 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil {
 			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
-			// Proceed anyway — don't block on API errors
 		} else if detectRoleFromIssue(issue) == "" {
 			slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
 			m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
@@ -423,6 +422,16 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// check if a role is now present and create a session.
 	if m.cfg.Agent.RequireRoleTag && (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
 		m.handleRoleAssignment(ctx, evt)
+		return
+	}
+
+	// Non-role label_updated events should NOT create sessions.
+	// FSM state tracking above (lines 379-419) already updates the state machine.
+	// Creating sessions for label additions (e.g. "blocked") causes feedback loops:
+	// agent adds "blocked" → label_updated → session → agent adds "blocked" again.
+	// Only role-assignment label updates (handled above) should create sessions.
+	if evt.Type == event.IssueLabelUpdated {
+		slog.Debug("dropping non-role label_updated event", "event_id", evt.ID, "issue", evt.IssueNumber, "repo", evt.Repository)
 		return
 	}
 
@@ -935,6 +944,9 @@ func detectRoleFromTitle(title string) string {
 	}
 	if strings.Contains(lower, "[test]") || strings.Contains(lower, "[tester]") || strings.Contains(lower, "[testing]") || strings.Contains(lower, "[qa]") {
 		return "tester"
+	}
+	if strings.Contains(lower, "[implementer]") || strings.Contains(lower, "[implement]") || strings.Contains(lower, "[dev]") || strings.Contains(lower, "[developer]") {
+		return "implementer"
 	}
 	return ""
 }

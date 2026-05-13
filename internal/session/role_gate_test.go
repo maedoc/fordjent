@@ -84,19 +84,13 @@ func (f *fakeForgejo) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeForgejo) handleGetIssue(w http.ResponseWriter, r *http.Request) {
-	// Merge added labels into the issue response so role detection works.
-	// addedLabelIDs track labels resolved by the Forgejo API (via ListLabels first).
-	// We rebuild the label-name list from IDs by checking what's been registered.
-	allAddedLabels := append([]string{}, f.addedLabels...)
-	allAddedLabels = append(allAddedLabels, f.createdLabels...)
-	allAddedLabels = append(allAddedLabels, f.labelNamesFromIDs(f.addedLabelIDs)...)
-	roleLabels := make([]map[string]string, 0, len(f.issueLabels)+len(allAddedLabels))
+	roleLabels := make([]map[string]string, 0, len(f.issueLabels)+len(f.addedLabels))
 	seen := make(map[string]bool)
 	for _, l := range f.issueLabels {
 		roleLabels = append(roleLabels, map[string]string{"name": l})
 		seen[l] = true
 	}
-	for _, l := range allAddedLabels {
+	for _, l := range f.addedLabels {
 		if !seen[l] {
 			roleLabels = append(roleLabels, map[string]string{"name": l})
 			seen[l] = true

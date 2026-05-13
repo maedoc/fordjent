@@ -3,3 +3,6 @@
 .fj
 .gitignore
 __pycache__/
+*.db
+*.db-shm
+*.db-wal

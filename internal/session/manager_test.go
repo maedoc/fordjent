@@ -320,3 +320,37 @@ func TestManager_RestoreSessions(t *testing.T) {
 		t.Errorf("repo mismatch")
 	}
 }
+
+func TestDetectRoleFromTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  string
+	}{
+		{"[pm] Plan the sprint", "pm"},
+		{"[project manager] Organize backlog", "pm"},
+		{"[decompose] Break down feature", "pm"},
+		{"[review] Check the code", "reviewer"},
+		{"[code review] Review PR #5", "reviewer"},
+		{"[reviewer] Audit codebase", "reviewer"},
+		{"[devops] Set up CI pipeline", "devops"},
+		{"[infra] Provision servers", "devops"},
+		{"[ci/cd] Configure actions", "devops"},
+		{"[docker] Build container image", "devops"},
+		{"[test] Write unit tests", "tester"},
+		{"[tester] QA the release", "tester"},
+		{"[testing] Integration tests", "tester"},
+		{"[qa] Quality check", "tester"},
+		{"[implementer] Add login feature", "implementer"},
+		{"[implement] Build auth module", "implementer"},
+		{"[dev] Fix the bug", "implementer"},
+		{"[developer] Refactor API", "implementer"},
+		{"No tag here", ""},
+		{"Random issue title", ""},
+	}
+	for _, tt := range tests {
+		got := detectRoleFromTitle(tt.title)
+		if got != tt.want {
+			t.Errorf("detectRoleFromTitle(%q) = %q, want %q", tt.title, got, tt.want)
+		}
+	}
+}
