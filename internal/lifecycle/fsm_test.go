@@ -8,6 +8,7 @@ func TestStateFromLabels(t *testing.T) {
 		want   IssueState
 	}{
 		{nil, StateOpened},
+		{[]string{}, StateOpened},
 		{[]string{"needs-role"}, StateNeedsRole},
 		{[]string{"ready"}, StateReady},
 		{[]string{"blocked", "ready"}, StateFSMBlocked},
@@ -16,6 +17,11 @@ func TestStateFromLabels(t *testing.T) {
 		{[]string{"done"}, StateDone},
 		{[]string{"planning"}, StatePlanning},
 		{[]string{"plan-approved"}, StatePlanApproved},
+		{[]string{"bug", "enhancement"}, StateOpened},
+		{[]string{"bug", "implementing"}, StateImplementing},
+		{[]string{"Planning"}, StatePlanning},
+		{[]string{"  planning  "}, StatePlanning},
+		{[]string{"BLOCKED"}, StateFSMBlocked},
 	}
 	for _, tt := range tests {
 		got := StateFromLabels(tt.labels)
@@ -26,16 +32,53 @@ func TestStateFromLabels(t *testing.T) {
 }
 
 func TestIsTransitionValid(t *testing.T) {
-	if !IsTransitionValid(StateReady, StateImplementing) {
-		t.Error("ready -> implementing should be valid")
+	valid := []struct{ from, to IssueState }{
+		{StateOpened, StateNeedsRole},
+		{StateOpened, StateReady},
+		{StateOpened, StatePlanning},
+		{StateOpened, StateFSMBlocked},
+		{StateNeedsRole, StateReady},
+		{StateReady, StateImplementing},
+		{StateReady, StatePlanning},
+		{StatePlanning, StatePlanApproved},
+		{StatePlanning, StateDone},
+		{StatePlanApproved, StateImplementing},
+		{StateImplementing, StateReview},
+		{StateImplementing, StateDone},
+		{StateFSMBlocked, StateReady},
+		{StateFSMBlocked, StateImplementing},
+		{StateFSMBlocked, StateDone},
+		{StateReview, StateMerging},
+		{StateReview, StateDone},
+		{StateReview, StateFSMBlocked},
+		{StateMerging, StateDone},
+		{StateDone, StateReady},
+		{StateDone, StateImplementing},
 	}
-	if !IsTransitionValid(StatePlanning, StatePlanApproved) {
-		t.Error("planning -> plan-approved should be valid")
+	for _, tt := range valid {
+		if !IsTransitionValid(tt.from, tt.to) {
+			t.Errorf("IsTransitionValid(%s, %s) should be true", tt.from, tt.to)
+		}
 	}
-	if IsTransitionValid(StateDone, StatePlanning) {
-		t.Error("done -> planning should be invalid")
+
+	invalid := []struct{ from, to IssueState }{
+		{StateDone, StatePlanning},
+		{StateDone, StateFSMBlocked},
+		{StateOpened, StateMerging},
+		{StateOpened, StateReview},
+		{StateNeedsRole, StateImplementing},
+		{StatePlanning, StateImplementing},
+		{StateImplementing, StatePlanning},
 	}
-	if !IsTransitionValid(StateFSMBlocked, StateReady) {
-		t.Error("blocked -> ready should be valid")
+	for _, tt := range invalid {
+		if IsTransitionValid(tt.from, tt.to) {
+			t.Errorf("IsTransitionValid(%s, %s) should be false", tt.from, tt.to)
+		}
+	}
+}
+
+func TestIsTransitionValidUnknownFrom(t *testing.T) {
+	if IsTransitionValid(IssueState("unknown"), StateReady) {
+		t.Error("transition from unknown state should be invalid")
 	}
 }

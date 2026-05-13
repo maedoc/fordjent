@@ -43,11 +43,11 @@ var labelToState = map[string]IssueState{
 }
 
 var allowedTransitions = map[IssueState][]IssueState{
-	StateOpened:       {StateNeedsRole, StateReady, StatePlanning, StateFSMBlocked},
-	StateNeedsRole:    {StateReady, StatePlanning, StateFSMBlocked},
-	StateReady:        {StatePlanning, StateImplementing, StateFSMBlocked},
+	StateOpened:       {StateNeedsRole, StateReady, StatePlanning, StateImplementing, StateFSMBlocked, StateDone},
+	StateNeedsRole:    {StateReady, StatePlanning, StateFSMBlocked, StateDone},
+	StateReady:        {StatePlanning, StateImplementing, StateFSMBlocked, StateDone},
 	StatePlanning:     {StatePlanApproved, StateFSMBlocked, StateDone},
-	StatePlanApproved: {StateImplementing, StateFSMBlocked},
+	StatePlanApproved: {StateImplementing, StateFSMBlocked, StateDone},
 	StateImplementing: {StateReview, StateFSMBlocked, StateDone},
 	StateFSMBlocked:   {StateReady, StatePlanning, StateImplementing, StateReview, StateDone},
 	StateReview:       {StateImplementing, StateMerging, StateDone, StateFSMBlocked},

@@ -97,11 +97,12 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Step 1: Acknowledge with 👀 reaction
 	a.addReaction(ctx, evt, "eyes")
 
-	// Step 2: Detect analysis-only mode
+	// Step 2: Detect analysis-only mode and FSM state
 	analysisMode := a.detectAnalysisMode(ctx, evt)
+	fsmState := a.detectIssueState(ctx, evt)
 
 	// Step 3: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role)
+	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState)
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
@@ -274,6 +275,24 @@ Update the issue comment with your reflection, then continue working.`,
 				continue
 			}
 
+			// FSM state: block implementation tools in planning/blocked states
+			if (fsmState == lifecycle.StatePlanning || fsmState == lifecycle.StateFSMBlocked) && isImplementationTool(tc.Function.Name) {
+				slog.Info("blocked implementation tool in FSM state", "tool", tc.Function.Name, "state", string(fsmState), "session_key", a.sess.Key)
+				var blockMsg string
+				switch fsmState {
+				case lifecycle.StateFSMBlocked:
+					blockMsg = "Error: This issue is Blocked. Do not attempt implementation. Post a comment explaining the blocker."
+				case lifecycle.StatePlanning:
+					blockMsg = "Error: This issue is in Planning state. You may only use read-only and planning tools. Post your plan as a comment, then STOP."
+				}
+				messages = append(messages, provider.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    blockMsg,
+				})
+				continue
+			}
+
 			slog.Info("executing tool",
 				"tool", tc.Function.Name,
 				"session_key", a.sess.Key,
@@ -352,7 +371,7 @@ func (a *Agent) effectiveMaxTurns() int {
 	return a.cfg.Agent.MaxTurns
 }
 
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string) string {
+func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState) string {
 	toolsDesc := a.tools.Descriptions()
 
 	var modeInstructions string
@@ -456,7 +475,7 @@ You are in Test Engineering mode. Your focus is test quality and coverage:
 - Create PRs with test-only changes.`
 	}
 
-	stateInstructions := a.issueStateInstructions(ctx, evt)
+	stateInstructions := issueStateInstructions(fsmState)
 
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
 
@@ -723,10 +742,7 @@ func allSameSignature(sigs []turnSignature) bool {
 	return true
 }
 
-// issueStateInstructions returns state-aware prompt additions based on the
-// issue's current FSM state (derived from labels).
-func (a *Agent) issueStateInstructions(ctx context.Context, evt *event.Event) string {
-	state := a.detectIssueState(ctx, evt)
+func issueStateInstructions(state lifecycle.IssueState) string {
 	switch state {
 	case lifecycle.StatePlanning:
 		return `
@@ -737,12 +753,16 @@ This issue is in planning mode. You MUST:
 2. Propose a concrete implementation plan
 3. Break into sub-issues if needed
 4. Post a summary comment
-5. STOP — do not write code`
-	case lifecycle.StateBlocked:
+5. STOP — do not write code
+
+Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this state.`
+	case lifecycle.StateFSMBlocked:
 		return `
 
 ## STATE: Blocked
-This issue is blocked. Check the issue body for 'Depends on: #N' to understand what's blocking it. Post a comment explaining the current blocker. Do not attempt implementation.`
+This issue is blocked. Check the issue body for 'Depends on: #N' to understand what's blocking it. Post a comment explaining the current blocker. Do not attempt implementation.
+
+Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this state.`
 	}
 	return ""
 }

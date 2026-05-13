@@ -83,6 +83,7 @@ type Manager struct {
 	scheduler     *scheduler.Scheduler
 	costTracker   *cost.Tracker
 	labelBoot     sync.Map // repo → bool, tracks which repos have had labels ensured
+	issueStates   sync.Map // "repo/issues/N" → lifecycle.IssueState, tracks previous FSM state
 }
 
 // Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
@@ -373,14 +374,9 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
-	// Role assignment detection: when a needs-role issue gets a label or title edit,
-	// check if a role is now present and create a session.
-	if m.cfg.Agent.RequireRoleTag && (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
-		m.handleRoleAssignment(ctx, evt)
-		return
-	}
-
-	// FSM state detection: derive issue state from labels and react
+	// FSM state detection: derive issue state from labels and react.
+	// This MUST run before the role-assignment return below so that
+	// done→auto-close works regardless of RequireRoleTag.
 	if evt.Type == event.IssueLabelUpdated && evt.IssueNumber > 0 {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err == nil && issue != nil {
@@ -389,21 +385,45 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				labelNames[i] = l.Name
 			}
 			newState := lifecycle.StateFromLabels(labelNames)
-			slog.Info("issue state from labels",
-				"issue", evt.IssueNumber,
-				"repo", evt.Repository,
-				"new_state", newState,
-				"labels", labelNames,
-			)
-			switch newState {
-			case lifecycle.StateDone:
-				if issue.State != "closed" {
-					if err := m.forgejoClient.CloseIssue(ctx, evt.Repository, evt.IssueNumber); err != nil {
-						slog.Warn("failed to close done issue", "error", err, "issue", evt.IssueNumber)
+			stateKey := fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
+			prevStateRaw, _ := m.issueStates.Load(stateKey)
+			prevState, _ := prevStateRaw.(lifecycle.IssueState)
+			if prevState == "" {
+				prevState = lifecycle.StateOpened
+			}
+			if !lifecycle.IsTransitionValid(prevState, newState) {
+				slog.Warn("FSM: invalid state transition, ignoring label change",
+					"issue", evt.IssueNumber,
+					"repo", evt.Repository,
+					"from", prevState,
+					"to", newState,
+				)
+			} else {
+				m.issueStates.Store(stateKey, newState)
+				slog.Info("issue state from labels",
+					"issue", evt.IssueNumber,
+					"repo", evt.Repository,
+					"new_state", newState,
+					"prev_state", prevState,
+					"labels", labelNames,
+				)
+				switch newState {
+				case lifecycle.StateDone:
+					if issue.State != "closed" {
+						if err := m.forgejoClient.CloseIssue(ctx, evt.Repository, evt.IssueNumber); err != nil {
+							slog.Warn("failed to close done issue", "error", err, "issue", evt.IssueNumber)
+						}
 					}
 				}
 			}
 		}
+	}
+
+	// Role assignment detection: when a needs-role issue gets a label or title edit,
+	// check if a role is now present and create a session.
+	if m.cfg.Agent.RequireRoleTag && (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
+		m.handleRoleAssignment(ctx, evt)
+		return
 	}
 
 	// Automerge label detection on PRs
@@ -439,6 +459,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				}
 			}
 		}
+		return
 	}
 
 	// Session recovery: if a scheduler unblocks an issue whose session died, re-trigger.
@@ -473,36 +494,6 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
 			return
 		}
-	}
-
-	// Role assignment via label or title edit
-	if (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
-		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
-		if err != nil || issue == nil {
-			return
-		}
-		hasNeedsRole := false
-		for _, l := range issue.Labels {
-			if l.Name == "needs-role" {
-				hasNeedsRole = true
-				break
-			}
-		}
-		if !hasNeedsRole {
-			return
-		}
-		role := detectRoleFromIssue(issue)
-		if role == "" {
-			return
-		}
-		_ = m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.IssueNumber, "needs-role")
-		synthetic := event.NewEvent(event.IssueOpened, evt.Repository, evt.IssueNumber, 0, evt.Sender, "opened")
-		synthetic.SessionKey = evt.SessionKey
-		if issueMap, ok := evt.Payload["issue"].(map[string]interface{}); ok {
-			synthetic.Payload = map[string]interface{}{"issue": issueMap}
-		}
-		m.handleEvent(ctx, synthetic)
-		return
 	}
 
 	sess, err := m.getOrCreate(ctx, evt)

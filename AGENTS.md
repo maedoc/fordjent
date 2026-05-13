@@ -988,3 +988,69 @@ End-to-end autonomous agent loop across three waves, with progressive fixes:
 | (Future) | GLM-5.1 | wafer | ~6–10s/turn |
 
 Wafer providers are configured in YAML. Switch by changing `role_providers`. Rate-limited to 2 concurrent calls.
+
+---
+
+## Interaction Layer Hardening (May 13, 2026)
+
+### What Was Done
+Hardened the agent/user interaction paths with FSM-enforced tool blocking, expanded test coverage for role-specific prompts, and validated webhook guard rails.
+
+### Changes
+
+#### 1. State-Aware Tool Blocking (Bug Fix 15)
+
+**Problem**: The `planning` and `blocked` FSM states only had **prompt-level** instructions telling the agent not to write code. The agent could still call `write_file`, `git`, `forgejo_create_pr`, or `forgejo_merge_pr` in these states, violating the FSM constraints.
+
+**Fix**: Added hard tool blocking in `Agent.ProcessEvent()` alongside the existing analysis-mode blocking:
+- When `fsmState == StatePlanning || fsmState == StateFSMBlocked`, implementation tools (`write_file`, `git`, `forgejo_create_pr`, `forgejo_merge_pr`) return an error message instead of executing
+- The agent receives `"Error: This issue is in Planning state..."` or `"Error: This issue is Blocked..."` as the tool result
+- FSM state is detected once at session start via `detectIssueState()` and passed through to `buildSystemPrompt()` and the tool execution loop
+- `issueStateInstructions()` refactored to standalone function taking state directly (no more per-call API hit)
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/session/agent.go` | Added `fsmState` detection; hard tool blocking for planning/blocked; refactored `issueStateInstructions` to standalone with BLOCKED language; updated `buildSystemPrompt` signature |
+| `internal/session/agent_test.go` | Updated `buildSystemPrompt` calls with `fsmState`; simplified `issueStateInstructions` tests to standalone; added `TestIssueStateInstructions_Implementing`, `TestBuildSystemPrompt_DevOpsRole`, `TestBuildSystemPrompt_TesterRole`, `TestBuildSystemPrompt_PMRole` |
+
+#### 2. Closed-PR Comment Guard Test
+
+Added `TestClosedPRCommentGuard` and `TestOpenPRCommentNotSkipped` to verify the router skips comments on closed/merged PRs (preventing token burn from cost-summary loops) but processes comments on open PRs normally.
+
+#### 3. Role Assignment Failure Path Test
+
+Added `TestRoleAssignment_ForgejoError` — when Forgejo returns 500 on `GetIssue` during role assignment, the manager logs a warning and returns gracefully instead of crashing.
+
+#### 4. Scaffold Detection Integration Test
+
+Added `TestScaffoldDetection_BlocksOnEmptyRepo` and `TestScaffoldDetection_PassesOnPopulatedRepo` — validates scaffold issue creation on empty repos and passthrough on repos with `go.mod` + `README.md`. Extended `interactionForgejo` fake with `repoFiles`, `openIssues`, `createdIssues` fields and handlers for `git/trees`, list issues, and create issue endpoints.
+
+### Test Coverage Baseline (May 13, 2026)
+
+| Package | Coverage |
+|---------|----------|
+| `internal/agent` | 45.1% |
+| `internal/config` | 35.5% |
+| `internal/cost` | 61.9% |
+| `internal/event` | 94.7% |
+| `internal/forgejo` | 13.5% |
+| `internal/lifecycle` | 35.5% |
+| `internal/memory` | 70.6% |
+| `internal/mergequeue` | 80.4% |
+| `internal/provider` | 65.8% |
+| `internal/scheduler` | 77.7% |
+| `internal/session` | 60.0% |
+| `internal/stalegate` | 61.1% |
+| `internal/tool` | 32.5% |
+| `internal/webhook` | 38.6% |
+
+### Files Changed in This Pass
+
+| File | Change |
+|------|--------|
+| `internal/session/agent.go` | FSM state tool blocking; `issueStateInstructions` standalone; `buildSystemPrompt` takes `fsmState` |
+| `internal/session/agent_test.go` | Role prompt tests (devops/tester/pm); simplified state instruction tests |
+| `internal/session/interaction_test.go` | Scaffold detection tests; role assignment error test; `interactionForgejo` extended with tree/issues/create-issue handlers |
+| `internal/webhook/router_test.go` | Closed-PR comment guard tests; added `forgejo` import |
+| `AGENTS.md` | This update |
