@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,6 +102,8 @@ func main() {
 		cmdInit(cmdArgs)
 	case "detect":
 		cmdDetect()
+	case "stats":
+		cmdStats(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %s\n", cmd)
 		printUsage()
@@ -132,6 +137,7 @@ Commands:
   collab          Collaborator operations (list, add)
   init            Initialize .fj config file
   detect          Show detected repository from git
+  stats           Token and cost usage statistics
 
 Examples:
   fj issue list owner/repo
@@ -1098,4 +1104,126 @@ func cmdDetect() {
 		return
 	}
 	fmt.Printf("Detected: %s\n", repo)
+}
+
+func formatNum(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func cmdStats(args []string) {
+	fordjentURL := os.Getenv("FORDJENT_URL")
+	if fordjentURL == "" {
+		fordjentURL = "http://localhost:8080"
+	}
+
+	since := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--since" && i+1 < len(args) {
+			since = args[i+1]
+			i++
+		}
+		if args[i] == "--url" && i+1 < len(args) {
+			fordjentURL = args[i+1]
+			i++
+		}
+	}
+
+	reqURL := fordjentURL + "/status"
+	if since != "" {
+		reqURL += "?since=" + url.QueryEscape(since)
+	}
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error fetching stats:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error reading response:", err)
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		var v interface{}
+		json.Unmarshal(body, &v)
+		fmt.Println(formatJSON(v))
+		return
+	}
+
+	var data struct {
+		Costs struct {
+			TotalSessions int     `json:"total_sessions"`
+			TotalTokens   int64   `json:"total_tokens"`
+			TotalCostUSD  float64 `json:"total_cost_usd"`
+		} `json:"costs"`
+		ByModel []struct {
+			Provider     string  `json:"provider"`
+			Model        string  `json:"model"`
+			Calls        int64   `json:"calls"`
+			InputTokens  int64   `json:"input_tokens"`
+			OutputTokens int64   `json:"output_tokens"`
+			TotalTokens  int64   `json:"total_tokens"`
+			CostUSD      float64 `json:"cost_usd"`
+		} `json:"by_model"`
+		BySessionModel []struct {
+			SessionKey   string  `json:"session_key"`
+			Provider     string  `json:"provider"`
+			Model        string  `json:"model"`
+			Calls        int64   `json:"calls"`
+			InputTokens  int64   `json:"input_tokens"`
+			OutputTokens int64   `json:"output_tokens"`
+			TotalTokens  int64   `json:"total_tokens"`
+			CostUSD      float64 `json:"cost_usd"`
+		} `json:"by_session_model"`
+		Metrics struct {
+			EventsTotal     int64 `json:"events_total"`
+			SessionsTotal   int64 `json:"sessions_total"`
+			SessionsActive  int64 `json:"sessions_active"`
+			LLMCallsTotal   int64 `json:"llm_calls_total"`
+			LLMRetriesTotal int64 `json:"llm_retries_total"`
+			InputTokens     int64 `json:"input_tokens"`
+			OutputTokens    int64 `json:"output_tokens"`
+		} `json:"metrics"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		fmt.Fprintln(os.Stderr, "Error parsing response:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Sessions: %d (active: %d)  |  LLM calls: %d (retries: %d)\n",
+		data.Metrics.SessionsTotal, data.Metrics.SessionsActive,
+		data.Metrics.LLMCallsTotal, data.Metrics.LLMRetriesTotal)
+	fmt.Printf("Total tokens: %s in / %s out  |  Cost: $%.6f\n\n",
+		formatNum(data.Metrics.InputTokens), formatNum(data.Metrics.OutputTokens), data.Costs.TotalCostUSD)
+
+	fmt.Println("Per Model:")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "PROVIDER\tMODEL\tCALLS\tIN\tOUT\tTOTAL\tCOST\n")
+	for _, m := range data.ByModel {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t$%.6f\n",
+			m.Provider, m.Model, m.Calls,
+			formatNum(m.InputTokens), formatNum(m.OutputTokens), formatNum(m.TotalTokens), m.CostUSD)
+	}
+	tw.Flush()
+
+	if len(data.BySessionModel) > 0 {
+		fmt.Println("\nPer Session:")
+		tw2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(tw2, "SESSION\tMODEL\tCALLS\tIN\tOUT\tTOTAL\tCOST\n")
+		for _, s := range data.BySessionModel {
+			fmt.Fprintf(tw2, "%s\t%s\t%d\t%s\t%s\t%s\t$%.6f\n",
+				s.SessionKey, s.Model, s.Calls,
+				formatNum(s.InputTokens), formatNum(s.OutputTokens), formatNum(s.TotalTokens), s.CostUSD)
+		}
+		tw2.Flush()
+	}
 }

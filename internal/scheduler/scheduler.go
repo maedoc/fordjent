@@ -188,7 +188,14 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 			}
 		}
 
-		// Add 'ready' label if not present
+		for _, lbl := range issue.Labels {
+			if strings.HasPrefix(strings.ToLower(lbl.Name), "fordjent/failed:") {
+				if err := s.removeLabel(ctx, repo, issue.Number, lbl.Name); err != nil {
+					slog.Warn("scheduler: failed to remove failed label", "error", err, "issue", issue.Number, "label", lbl.Name)
+				}
+			}
+		}
+
 		if !s.hasLabel(issue.Labels, "ready") {
 			if err := s.addLabel(ctx, repo, issue.Number, "ready"); err != nil {
 				slog.Warn("scheduler: failed to add ready label", "error", err, "issue", issue.Number)
@@ -304,7 +311,7 @@ func (s *Scheduler) checkParentCompletion(ctx context.Context, repo string, merg
 		for _, childNum := range childrenNums {
 			if childNum == mergedPRNumber {
 				closedCount++
-				continue // just merged, is closed
+				continue
 			}
 			isClosed, cerr := s.isIssueClosed(ctx, repo, childNum)
 			if cerr == nil && isClosed {
@@ -313,7 +320,6 @@ func (s *Scheduler) checkParentCompletion(ctx context.Context, repo string, merg
 				allClosed = false
 			}
 		}
-		closedCount++ // count the just-merged one
 
 		if allClosed && closedCount == len(childrenNums) {
 			// PM parent issues: do NOT auto-close — the PM reactivation session

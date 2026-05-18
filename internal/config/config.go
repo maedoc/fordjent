@@ -57,6 +57,7 @@ type AgentConfig struct {
 	MaxTurns                int           `yaml:"max_turns"`
 	MaxTurnsPM              int           `yaml:"max_turns_pm"`
 	MaxTurnsImplementer     int           `yaml:"max_turns_implementer"`
+	MaxTurnsReviewer       int           `yaml:"max_turns_reviewer"`
 	CommitPrefix            string        `yaml:"commit_prefix"`
 	ContextWindow           int           `yaml:"context_window"`
 	CompactionThreshold     float64       `yaml:"compaction_threshold"`
@@ -84,6 +85,9 @@ type AgentConfig struct {
 	// RecoveryWindowHours is the max age for which a session is considered
 	// recoverable. Sessions idle longer than this are skipped during recovery.
 	RecoveryWindowHours   int               `yaml:"recovery_window_hours"`
+	EnableAutoRetry       bool              `yaml:"enable_auto_retry"`
+	MaxSessionRetries     int               `yaml:"max_session_retries"`
+	AutoRetryDelay        time.Duration     `yaml:"auto_retry_delay"`
 }
 
 type BudgetConfig struct {
@@ -154,6 +158,7 @@ func Load(path string) (*Config, error) {
 			MaxTurns:                25,
 			MaxTurnsPM:              15,
 			MaxTurnsImplementer:     50,
+			MaxTurnsReviewer:       20,
 			CommitPrefix:            "[agent-automation]",
 			ContextWindow:           128000,
 			CompactionThreshold:     0.80,
@@ -171,6 +176,9 @@ func Load(path string) (*Config, error) {
 			GitEmail:                "fordjent@forgejo.local",
 			ReflectionInterval:      5,
 			RecoveryWindowHours:    24,
+			EnableAutoRetry:       true,
+			MaxSessionRetries:      2,
+			AutoRetryDelay:         5 * time.Minute,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

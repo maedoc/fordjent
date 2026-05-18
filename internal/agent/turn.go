@@ -26,6 +26,7 @@ type TurnResult struct {
 	RetryCount    int
 	ToolCalls     int
 	Compacted     bool
+	RequestCount  int
 }
 
 // TurnExecutor runs the LLM loop for a session with compaction, retries, and cost tracking.
@@ -37,6 +38,7 @@ type TurnExecutor struct {
 	costTracker  *cost.Tracker
 	sessionKey   string
 	repository   string
+	requestCount int
 }
 
 func NewTurnExecutor(
@@ -95,6 +97,7 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 	}
 
 	te.tracker.Update(usage)
+	te.requestCount++
 
 	var costUSD float64
 	if usage != nil {
@@ -121,21 +124,24 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 		"latency_ms", latency.Milliseconds(),
 		"tokens_in", usage.PromptTokens,
 		"tokens_out", usage.CompletionTokens,
+		"total_tokens", usage.TotalTokens,
 		"cost_usd", costUSD,
 		"tool_calls", toolCount,
 		"compacted", compacted,
 		"utilization", te.tracker.Utilization(messages),
+		"request_count", te.requestCount,
 	)
 
 	result := &TurnResult{
-		Turn:       te.tracker.TotalTurns(),
-		Response:   response,
-		Usage:      usage,
-		CostUSD:    costUSD,
-		Latency:    latency,
-		RetryCount: 0,
-		ToolCalls:  toolCount,
-		Compacted:  compacted,
+		Turn:         te.tracker.TotalTurns(),
+		Response:     response,
+		Usage:        usage,
+		CostUSD:      costUSD,
+		Latency:      latency,
+		RetryCount:   0,
+		ToolCalls:    toolCount,
+		Compacted:    compacted,
+		RequestCount: te.requestCount,
 	}
 
 	return result, messages, nil

@@ -155,6 +155,88 @@ func (t *Tracker) CheckBudget(sessionKey string, budgetEnabled bool, maxSessionC
 	return true, ""
 }
 
+// ModelUsage aggregates token usage by provider and model.
+type ModelUsage struct {
+	Provider     string  `json:"provider"`
+	Model        string  `json:"model"`
+	Calls        int64   `json:"calls"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+// GetPerModelUsage aggregates token usage by provider and model since the given time.
+func (t *Tracker) GetPerModelUsage(since time.Time) ([]ModelUsage, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	query := `
+		SELECT provider, model, COUNT(*),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0)
+		FROM usage
+		WHERE %s
+		GROUP BY provider, model
+		ORDER BY total_tokens DESC
+	`
+	var rows *sql.Rows
+	var err error
+	if since.IsZero() {
+		rows, err = t.db.Query(fmt.Sprintf(query, "1=1"))
+	} else {
+		rows, err = t.db.Query(fmt.Sprintf(query, "created_at >= ?"), since.Format("2006-01-02 15:04:05"))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query per-model usage: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ModelUsage
+	for rows.Next() {
+		var m ModelUsage
+		if err := rows.Scan(&m.Provider, &m.Model, &m.Calls, &m.InputTokens, &m.OutputTokens, &m.TotalTokens, &m.CostUSD); err != nil {
+			return nil, fmt.Errorf("scan model usage: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// GetSessionModelUsage aggregates token usage by provider and model for a specific session.
+func (t *Tracker) GetSessionModelUsage(sessionKey string) ([]ModelUsage, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	rows, err := t.db.Query(`
+		SELECT provider, model, COUNT(*),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0)
+		FROM usage
+		WHERE session_key = ?
+		GROUP BY provider, model
+		ORDER BY total_tokens DESC
+	`, sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("query session model usage: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ModelUsage
+	for rows.Next() {
+		var m ModelUsage
+		if err := rows.Scan(&m.Provider, &m.Model, &m.Calls, &m.InputTokens, &m.OutputTokens, &m.TotalTokens, &m.CostUSD); err != nil {
+			return nil, fmt.Errorf("scan session model usage: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // TokenMinute aggregates input/output tokens for a single minute.
 type TokenMinute struct {
 	Minute       string `json:"minute"`

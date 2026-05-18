@@ -48,12 +48,17 @@ func NewClientWithBasicAuth(baseURL, user, password string) *Client {
 
 // Issue represents a Forgejo issue.
 type Issue struct {
-	Number int     `json:"number"`
-	Title  string  `json:"title"`
-	Body   string  `json:"body"`
-	State  string  `json:"state"`
-	User   User    `json:"user"`
-	Labels []Label `json:"labels"`
+	Number      int        `json:"number"`
+	Title       string     `json:"title"`
+	Body        string     `json:"body"`
+	State       string     `json:"state"`
+	User        User       `json:"user"`
+	Labels      []Label    `json:"labels"`
+	PullRequest *PRRef     `json:"pull_request"`
+}
+
+type PRRef struct {
+	URL string `json:"url"`
 }
 
 // Comment represents a Forgejo issue/PR comment.

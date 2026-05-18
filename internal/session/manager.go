@@ -274,6 +274,13 @@ func (m *Manager) Run(ctx context.Context) {
 	recoveryTicker := time.NewTicker(1 * time.Hour)
 	defer recoveryTicker.Stop()
 
+	autoRetryDelay := m.cfg.Agent.AutoRetryDelay
+	if autoRetryDelay <= 0 {
+		autoRetryDelay = 5 * time.Minute
+	}
+	autoRetryTicker := time.NewTicker(autoRetryDelay)
+	defer autoRetryTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -299,6 +306,9 @@ func (m *Manager) Run(ctx context.Context) {
 			if m.cfg.Agent.EnableSessionRecovery {
 				m.runPeriodicRecovery(ctx)
 			}
+
+		case <-autoRetryTicker.C:
+			m.runAutoRetry(ctx)
 		}
 	}
 }
@@ -671,7 +681,9 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 	m.mu.RUnlock()
 
 	if exists {
+		sess.mu.Lock()
 		sess.LastActive = time.Now()
+		sess.mu.Unlock()
 		return sess, nil
 	}
 
@@ -680,7 +692,9 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 	// Double-check after acquiring write lock
 	if sess, exists = m.sessions[evt.SessionKey]; exists {
+		sess.mu.Lock()
 		sess.LastActive = time.Now()
+		sess.mu.Unlock()
 		return sess, nil
 	}
 
@@ -702,7 +716,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
 		cloneURL := buildCloneURL(m.cfg.Forgejo.URL, m.cfg.Forgejo.Token, evt.Repository)
 		slog.Info("cloning repository", "url", cloneURL, "dir", repoDir)
-		cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "50", cloneURL, repoDir)
+		cmd := exec.CommandContext(ctx, "git", "clone", "--filter=blob:none", cloneURL, repoDir)
 		cmd.Env = append(os.Environ(),
 			fmt.Sprintf("GIT_TERMINAL_PROMPT=0"),
 		)
@@ -837,7 +851,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 		}
 	}
 
-	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter)
+	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter, m.scheduler)
 
 	for {
 		select {
@@ -899,7 +913,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					m.revertClaim(ctx, sess)
 				}
 			} else {
-				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber)
+				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role)
 			}
 
 			sess.mu.Lock()
@@ -1014,6 +1028,115 @@ func (m *Manager) runPeriodicRecovery(ctx context.Context) {
 		)
 		body := "Resuming work after agent restart..."
 		_ = m.forgejoClient.PostIssueComment(ctx, rec.Repository, rec.IssueNumber, body)
+	}
+}
+
+// runAutoRetry scans stored sessions for issues with the fordjent/failed:max-turns
+// label and retries them up to max_session_retries times. After exhausting retries,
+// the issue is permanently blocked.
+func (m *Manager) runAutoRetry(ctx context.Context) {
+	if !m.cfg.Agent.EnableAutoRetry {
+		return
+	}
+	maxRetries := m.cfg.Agent.MaxSessionRetries
+	if maxRetries <= 0 {
+		maxRetries = 2
+	}
+
+	records, err := m.store.ListAll()
+	if err != nil {
+		slog.Warn("auto-retry: failed to list stored sessions", "error", err)
+		return
+	}
+
+	seen := make(map[string]bool)
+	for _, rec := range records {
+		if rec.IssueNumber <= 0 {
+			continue
+		}
+
+		issueCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		issue, err := m.forgejoClient.GetIssue(issueCtx, rec.Repository, rec.IssueNumber)
+		cancel()
+		if err != nil || issue == nil {
+			continue
+		}
+
+		hasFailedMaxTurns := false
+		for _, l := range issue.Labels {
+			if l.Name == "fordjent/failed:max-turns" {
+				hasFailedMaxTurns = true
+				break
+			}
+		}
+		if !hasFailedMaxTurns {
+			continue
+		}
+
+		if issue.State == "closed" {
+			_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "fordjent/failed:max-turns")
+			slog.Info("auto-retry: skipping closed issue, cleaning up label",
+				"issue", rec.IssueNumber, "repo", rec.Repository)
+			continue
+		}
+
+		isPR := issue.PullRequest != nil && issue.PullRequest.URL != ""
+
+		var sessionKey string
+		if isPR {
+			sessionKey = fmt.Sprintf("%s/pulls/%d", rec.Repository, rec.IssueNumber)
+		} else {
+			sessionKey = fmt.Sprintf("%s/issues/%d", rec.Repository, rec.IssueNumber)
+		}
+		if seen[sessionKey] {
+			continue
+		}
+		seen[sessionKey] = true
+
+		retryCount, _ := m.lc.CountFailedRetries(ctx, sessionKey)
+
+		if retryCount >= maxRetries {
+			slog.Info("auto-retry: max retries exhausted, permanently blocking",
+				"issue", rec.IssueNumber, "repo", rec.Repository, "retries", retryCount)
+			_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "ready")
+			_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "in_progress")
+			_ = m.forgejoClient.AddIssueLabels(ctx, rec.Repository, rec.IssueNumber, []string{"blocked", "fordjent/failed:max-retries"})
+			_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "fordjent/failed:max-turns")
+			body := fmt.Sprintf("Auto-retry exhausted after %d attempts. This issue needs human intervention.\n\n<!-- ford -->", retryCount)
+			_ = m.forgejoClient.PostIssueComment(ctx, rec.Repository, rec.IssueNumber, body)
+			continue
+		}
+
+		slog.Info("auto-retry: retrying failed session",
+			"issue", rec.IssueNumber, "repo", rec.Repository, "retry", retryCount+1, "max", maxRetries)
+
+		_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "fordjent/failed:max-turns")
+		_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "ready")
+		_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "blocked")
+		_ = m.forgejoClient.RemoveIssueLabel(ctx, rec.Repository, rec.IssueNumber, "in_progress")
+
+		evt := &event.Event{
+			ID:          fmt.Sprintf("auto-retry-%d-%d", rec.IssueNumber, time.Now().UnixNano()),
+			Type:        event.IssueOpened,
+			Repository:  rec.Repository,
+			IssueNumber: rec.IssueNumber,
+			Sender:      "fordjent-auto-retry",
+		}
+		if isPR {
+			evt.PRNumber = rec.IssueNumber
+			evt.SessionKey = fmt.Sprintf("%s/pulls/%d", rec.Repository, rec.IssueNumber)
+		} else {
+			evt.SessionKey = fmt.Sprintf("%s/issues/%d", rec.Repository, rec.IssueNumber)
+		}
+
+		body := fmt.Sprintf("Auto-retry: attempt %d/%d after max-turns failure. Resuming work.\n\n<!-- ford -->", retryCount+1, maxRetries)
+		_ = m.forgejoClient.PostIssueComment(ctx, rec.Repository, rec.IssueNumber, body)
+
+		retryCtx, retryCancel := context.WithTimeout(ctx, 5*time.Minute)
+		go func() {
+			defer retryCancel()
+			m.handleEvent(retryCtx, evt)
+		}()
 	}
 }
 

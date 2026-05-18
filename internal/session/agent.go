@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,7 +54,7 @@ type Agent struct {
 	triggeringIssue  int
 }
 
-func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.ProviderForRole(role)
 	var llmClient provider.ChatCompleter = provider.NewClient(prov)
@@ -72,7 +74,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 	isScaffold := strings.HasPrefix(strings.ToLower(sess.IssueTitle), "[scaffold]") || strings.HasPrefix(strings.ToLower(sess.IssueTitle), "scaffold")
 	agentCfg := &agentConfigAdapter{cfg: cfg, isScaffold: isScaffold}
 
-	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter)
+	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter, sched)
 
 	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
 
@@ -234,18 +236,6 @@ Update the issue comment with your reflection, then continue working.`,
 			metrics.AddCost(result.CostUSD)
 		}
 
-		// Record turn progress in lifecycle DB for diagnostics
-		if a.lc != nil {
-			var turnErr error
-			tokensIn, tokensOut := 0, 0
-			if result.Usage != nil {
-				tokensIn = result.Usage.PromptTokens
-				tokensOut = result.Usage.CompletionTokens
-			}
-			a.lc.RecordTurn(ctx, a.sess.Key, turn, len(result.Response.ToolCalls),
-				int(result.Latency.Milliseconds()), tokensIn, tokensOut, turnErr)
-		}
-
 		// If no tool calls, we're done
 		if len(result.Response.ToolCalls) == 0 {
 			messages = append(messages, provider.Message{
@@ -269,6 +259,7 @@ Update the issue comment with your reflection, then continue working.`,
 		})
 
 		// Execute tool calls
+		var firstToolErr error
 		for _, tc := range result.Response.ToolCalls {
 			// Analysis mode: block implementation tools
 			if analysisMode && isImplementationTool(tc.Function.Name) {
@@ -308,6 +299,9 @@ Update the issue comment with your reflection, then continue working.`,
 
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
 			if terr != nil {
+				if firstToolErr == nil {
+					firstToolErr = terr
+				}
 				if errors.Is(terr, sentinel.ErrBlocked) {
 					body := fmt.Sprintf("This issue is blocked by the merge queue. %v\n\n<!-- ford -->", terr)
 					_ = a.forgejo.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, body)
@@ -342,6 +336,17 @@ Update the issue comment with your reflection, then continue working.`,
 			})
 			slog.Warn("stall detected", "session_key", a.sess.Key, "turn", turn)
 		}
+
+		// Record turn progress in lifecycle DB for diagnostics (after tool execution)
+		if a.lc != nil {
+			tokensIn, tokensOut := 0, 0
+			if result.Usage != nil {
+				tokensIn = result.Usage.PromptTokens
+				tokensOut = result.Usage.CompletionTokens
+			}
+			a.lc.RecordTurn(ctx, a.sess.Key, turn, len(result.Response.ToolCalls),
+				int(result.Latency.Milliseconds()), tokensIn, tokensOut, firstToolErr)
+		}
 	}
 
 	slog.Warn("max turns reached", "session_key", a.sess.Key)
@@ -372,6 +377,10 @@ func (a *Agent) effectiveMaxTurns() int {
 	case "implementer":
 		if a.cfg.Agent.MaxTurnsImplementer > 0 {
 			return a.cfg.Agent.MaxTurnsImplementer
+		}
+	case "reviewer":
+		if a.cfg.Agent.MaxTurnsReviewer > 0 {
+			return a.cfg.Agent.MaxTurnsReviewer
 		}
 	}
 	return a.cfg.Agent.MaxTurns
@@ -650,6 +659,41 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 		}
 	}
 
+	// Check for previous session memory to provide retry context
+	if evt.IssueNumber > 0 && evt.Type == event.IssueOpened {
+		sessionKey := fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
+		prevWorkDir := filepath.Join(a.cfg.Agent.WorkDir, sessionKey)
+		memFile := filepath.Join(prevWorkDir, "memory.jsonl")
+		if data, err := os.ReadFile(memFile); err == nil && len(data) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			start := 0
+			if len(lines) > 5 {
+				start = len(lines) - 5
+			}
+			var summary []string
+			for _, line := range lines[start:] {
+				var entry map[string]interface{}
+				if json.Unmarshal([]byte(line), &entry) == nil {
+					if role, ok := entry["role"].(string); ok && role == "assistant" {
+						if content, ok := entry["content"].(string); ok {
+							excerpt := content
+							if len(excerpt) > 200 {
+								excerpt = excerpt[:200] + "..."
+							}
+							summary = append(summary, excerpt)
+						}
+					}
+				}
+			}
+			if len(summary) > 0 {
+				messages = append(messages, provider.Message{
+					Role:    "user",
+					Content: fmt.Sprintf("[Previous Session Context]\nThis issue was previously attempted. Here is a summary of the last session's work:\n%s\n\nPick up where the previous session left off, but try a different approach if the same strategy failed.", strings.Join(summary, "\n")),
+				})
+			}
+		}
+	}
+
 	// PM follow-up: inject a system directive to guide the follow-up session
 	if a.pmFollowUp && evt.IssueNumber > 0 {
 		messages = append([]provider.Message{{
@@ -897,6 +941,7 @@ func buildRoleRegistry(
 	role string,
 	cfg *config.Config,
 	sandboxReporter sandbox.ErrorReporter,
+	sched tool.DependencyChecker,
 ) *tool.Registry {
 	registry := tool.NewRegistry()
 
@@ -956,7 +1001,9 @@ func buildRoleRegistry(
 	// Role-specific tools
 	switch role {
 	case "pm":
-		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 5))
+		cit := tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 5)
+		cit.SetScheduler(sched)
+		registry.Register(cit)
 		registry.Register(tool.NewGetSubIssuesTool(forgejoAdapter))
 		// PM cannot write code, create PRs, or merge
 	case "reviewer":
@@ -965,7 +1012,9 @@ func buildRoleRegistry(
 	case "devops", "tester", "implementer":
 		fallthrough
 	default:
-		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0))
+		cit := tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0)
+		cit.SetScheduler(sched)
+		registry.Register(cit)
 		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
 		gitT := tool.NewGitTool(sessionInfo, agentCfg)
 		gitT.SetSandboxConfig(sandboxCfg)
@@ -979,7 +1028,6 @@ func buildRoleRegistry(
 		registry.Register(tool.NewDeleteBranchTool(forgejoAdapter))
 		registry.Register(tool.NewCreateHookTool(forgejoAdapter))
 		registry.Register(tool.NewDeleteHookTool(forgejoAdapter))
-		registry.Register(tool.NewCreateTokenTool(forgejoAdapter))
 	}
 
 	if role == "implementer" || role == "tester" {

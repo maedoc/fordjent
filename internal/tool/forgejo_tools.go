@@ -89,6 +89,12 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 	return "Comment posted successfully", nil
 }
 
+// DependencyChecker is implemented by the scheduler to validate
+// whether a newly-blocked issue's dependencies are actually blocking.
+type DependencyChecker interface {
+	CheckAndUnblock(ctx context.Context, repo string) error
+}
+
 // forgejoCreateIssueTool creates a new issue.
 type forgejoCreateIssueTool struct {
 	adapter        *ForgejoAdapter
@@ -96,14 +102,19 @@ type forgejoCreateIssueTool struct {
 	maxSubIssues   int
 	subIssueCount  int
 	mu             sync.Mutex
+	scheduler      DependencyChecker
 }
 
 func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int, maxSubIssues int) *forgejoCreateIssueTool {
 	return &forgejoCreateIssueTool{
-		adapter:      adapter,
+		adapter:        adapter,
 		parentIssueNum: parentIssueNum,
 		maxSubIssues:   maxSubIssues,
 	}
+}
+
+func (t *forgejoCreateIssueTool) SetScheduler(s DependencyChecker) {
+	t.scheduler = s
 }
 
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
@@ -199,6 +210,8 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	}
 
 	// If this issue has a parent, auto-tag with 'blocked' label
+	// then immediately check if the dependency is actually blocking
+	// (e.g., parent PM issue with no PR is not blocking).
 	if t.parentIssueNum > 0 {
 		var created struct {
 			Number int `json:"number"`
@@ -207,6 +220,11 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		if created.Number > 0 {
 			if err := t.adapter.Client().AddIssueLabels(ctx, params.Repository, created.Number, []string{"blocked"}); err != nil {
 				slog.Warn("create_issue: failed to add blocked label", "error", err, "issue", created.Number)
+			}
+			if t.scheduler != nil {
+				if err := t.scheduler.CheckAndUnblock(ctx, params.Repository); err != nil {
+					slog.Warn("create_issue: CheckAndUnblock failed", "error", err, "repo", params.Repository)
+				}
 			}
 		}
 	}
@@ -537,6 +555,41 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 	// via bash (not the git tool), auto-push wouldn't have fired. This ensures
 	// the branch is always pushed before PR creation.
 	if t.repoDir != "" {
+		// Check current branch: if we're not on the requested head branch,
+		// create and checkout it before pushing. Agents often write files
+		// on main without branching first, and git commit is blocked on
+		// protected branches. We need to: branch, stage, commit, then push.
+		currentBranch, branchErr := exec.CommandContext(ctx, "git", "-C", t.repoDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		onCorrectBranch := branchErr == nil && strings.TrimSpace(string(currentBranch)) == params.Head
+
+		if !onCorrectBranch {
+			// Create the feature branch from current HEAD
+			checkoutCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "checkout", "-b", params.Head)
+			if out, err := checkoutCmd.CombinedOutput(); err != nil {
+				slog.Warn("create_pr: failed to create feature branch", "branch", params.Head, "error", err, "output", string(out))
+			} else {
+				slog.Info("create_pr: created feature branch", "branch", params.Head)
+			}
+
+			// Stage all changes (agents write files but may not git-add them)
+			addCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "add", "-A")
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				slog.Warn("create_pr: git add failed", "error", err, "output", string(out))
+			}
+
+			// Commit any staged changes (protected branch block is per-tool,
+			// but we're on the feature branch now so committing is fine)
+			statusOut, _ := exec.CommandContext(ctx, "git", "-C", t.repoDir, "status", "--porcelain").Output()
+			if len(strings.TrimSpace(string(statusOut))) > 0 {
+				commitCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "commit", "-m", params.Head)
+				if out, err := commitCmd.CombinedOutput(); err != nil {
+					slog.Warn("create_pr: auto-commit failed", "error", err, "output", string(out))
+				} else {
+					slog.Info("create_pr: auto-committed changes", "branch", params.Head)
+				}
+			}
+		}
+
 		pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 		pushCmd := exec.CommandContext(pushCtx, "git", "-C", t.repoDir, "push", "-u", "origin", "HEAD")
 		pushCmd.Dir = t.repoDir
@@ -850,7 +903,7 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		Merged       bool   `json:"merged"`
 		State        string `json:"state"`
 		Mergeable    bool   `json:"mergeable"`
-		HasConflicts bool   `json:"has_conflits"`
+		HasConflicts bool   `json:"has_conflicts"`
 	}
 	_ = json.Unmarshal([]byte(result), &pr)
 

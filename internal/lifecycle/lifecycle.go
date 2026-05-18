@@ -167,17 +167,28 @@ func (l *Lifecycle) ResolveBlockedBranch(ctx context.Context, repo, branch strin
 }
 
 // OnSessionComplete records a successful completion and optionally posts a cost summary.
-func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int) {
+func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int, role string) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateCompleted, "session finished successfully")
 
 	if l.forgejo == nil || issueNumber <= 0 {
 		return
 	}
+	roleLabel := "implementation"
+	if role == "reviewer" {
+		roleLabel = "code review"
+	} else if role == "pm" {
+		roleLabel = "project management"
+	} else if role == "tester" {
+		roleLabel = "testing"
+	} else if role == "devops" {
+		roleLabel = "devops"
+	}
+
 	msg := "Session completed successfully."
 	if l.costTracker != nil {
 		tokens, cost, _ := l.costTracker.GetSessionCost(sessionKey)
 		if tokens > 0 {
-			msg = fmt.Sprintf("Session completed successfully. Total: %.0f tokens ($%.4f USD)", float64(tokens), cost)
+			msg = fmt.Sprintf("Session completed successfully (%s). Total: %.0f tokens ($%.4f USD)", roleLabel, float64(tokens), cost)
 		}
 	}
 	// Append agent marker so isAgentEvent() filters these comments and
@@ -198,10 +209,11 @@ func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, is
 		return
 	}
 
+	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "ready")
+	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "in_progress")
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:max-turns"})
-	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
-	body := "This session reached the maximum turn limit and could not finish the task. A human may need to pick up the remaining work or split this issue into smaller pieces.\n\nSession audit trail has been archived and is available for review.\n\n<!-- ford -->"
+	body := "This session reached the maximum turn limit and could not finish the task. Auto-retry may be attempted if the retry budget allows.\n\nSession audit trail has been archived and is available for review.\n\n<!-- ford -->"
 	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
 		slog.Warn("lifecycle: failed to post max-turns comment", "error", err, "issue", issueNumber)
 	}
@@ -222,6 +234,8 @@ func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issue
 		return
 	}
 
+	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "ready")
+	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "in_progress")
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:error"})
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
@@ -229,6 +243,21 @@ func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issue
 	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
 		slog.Warn("lifecycle: failed to post error comment", "error", err, "issue", issueNumber)
 	}
+}
+
+// CountFailedRetries counts how many times a session has hit failed_max_turns.
+// This is used by the auto-retry logic to determine whether an issue has
+// exhausted its retry budget.
+func (l *Lifecycle) CountFailedRetries(ctx context.Context, sessionKey string) (int, error) {
+	var count int
+	err := l.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_transitions WHERE session_key = ? AND to_state = ?`,
+		sessionKey, StateFailedMaxTurns,
+	).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ListFailedSessions returns session keys currently in a failed state.

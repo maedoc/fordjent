@@ -18,10 +18,14 @@ agent:
   max_turns: 75
   max_turns_pm: 15
   max_turns_implementer: 50
+  max_turns_reviewer: 20
   role_providers:
-    pm: "ollama-cloud"
-    reviewer: "ollama-cloud"
-    implementer: "ollama-cloud"
+    pm: "wafer-glm"
+    reviewer: "wafer-glm"
+    implementer: "wafer-qwen"
+    tester: "wafer-qwen"
+    devops: "wafer-qwen"
+  fallback_provider: "wafer-qwen"
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -32,6 +36,9 @@ agent:
   enable_session_recovery: true
   enable_context_injection: true
   enable_auto_collaborator: true
+  enable_auto_retry: true
+  max_session_retries: 2
+  auto_retry_delay: "5m"
   require_role_tag: true
   session_timeout: "60m"
   git_name: "Fordjent Dev Agent"
@@ -44,7 +51,7 @@ budget:
 
 sandbox:
   enabled: true
-  backend: auto
+  backend: bwrap
   tmpfs_size_mb: 64
   keep_profiles_on_failure: true
   violation_comment_threshold: 3
@@ -55,60 +62,24 @@ providers:
     api_base: "https://pass.wafer.ai/v1"
     api_key: "${WAFER_API_KEY}"
     model: "Qwen3.5-397B-A17B"
-    max_tokens: 16384
-    request_timeout: "60s"
-    max_retries: 5
-    retry_base_delay: "2s"
-    retry_max_delay: "60s"
-    max_concurrent_llm_calls: 2
-    cost_per_1m_input_tokens: 0
-    cost_per_1m_output_tokens: 0
-  - name: "wafer-glm"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "${WAFER_API_KEY}"
-    model: "glm-5.1"
     max_tokens: 32768
     request_timeout: "90s"
     max_retries: 5
     retry_base_delay: "3s"
     retry_max_delay: "60s"
-    max_concurrent_llm_calls: 1
-    cost_per_1m_input_tokens: 0
-    cost_per_1m_output_tokens: 0
-  - name: "ollama-cloud"
-    api_base: "https://ollama.com/v1"
-    api_key: "${OLLAMA_API_KEY}"
-    model: "${OLLAMA_MODEL}"
-    max_tokens: 8192
-    request_timeout: "120s"
-    max_retries: 3
-    retry_base_delay: "2s"
-    retry_max_delay: "30s"
     max_concurrent_llm_calls: 3
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
-  - name: "kimi-k2.6"
-    api_base: "https://ollama.com/v1"
-    api_key: "${OLLAMA_API_KEY}"
-    model: "kimi-k2.6"
-    max_tokens: 16384
+  - name: "wafer-glm"
+    api_base: "https://pass.wafer.ai/v1"
+    api_key: "${WAFER_API_KEY}"
+    model: "GLM-5.1"
+    max_tokens: 32768
     request_timeout: "120s"
-    max_retries: 3
-    retry_base_delay: "2s"
-    retry_max_delay: "30s"
-    max_concurrent_llm_calls: 2
-    cost_per_1m_input_tokens: 0
-    cost_per_1m_output_tokens: 0
-  - name: "glm-5.1"
-    api_base: "https://open.bigmodel.cn/api/paas/v4"
-    api_key: "${GLM_API_KEY}"
-    model: "glm-5.1"
-    max_tokens: 16384
-    request_timeout: "180s"
-    max_retries: 3
-    retry_base_delay: "5s"
+    max_retries: 5
+    retry_base_delay: "3s"
     retry_max_delay: "60s"
-    max_concurrent_llm_calls: 2
+    max_concurrent_llm_calls: 3
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
 

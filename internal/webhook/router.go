@@ -104,7 +104,9 @@ func (r *Router) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "ready")
 }
 
-func (r *Router) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (r *Router) handleStatus(w http.ResponseWriter, req *http.Request) {
+	since := parseSince(req)
+
 	resp := map[string]interface{}{"now": time.Now().UTC().Format(time.RFC3339)}
 
 	if r.cfg.Agent.WorkDir != "" {
@@ -112,6 +114,16 @@ func (r *Router) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		costDB := filepath.Join(r.cfg.Agent.WorkDir, "costs.db")
 		if data, err := queryCostDB(costDB); err == nil {
 			resp["costs"] = data
+		}
+
+		// Per-model breakdown
+		if data, err := queryCostDBPerModel(costDB, since); err == nil {
+			resp["by_model"] = data
+		}
+
+		// Per-session-per-model breakdown
+		if data, err := queryCostDBBySessionModel(costDB, since); err == nil {
+			resp["by_session_model"] = data
 		}
 
 		// Lifecycle summary
@@ -128,12 +140,19 @@ func (r *Router) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (r *Router) handleTokensPerMinute(w http.ResponseWriter, _ *http.Request) {
+func (r *Router) handleTokensPerMinute(w http.ResponseWriter, req *http.Request) {
 	resp := map[string]interface{}{"now": time.Now().UTC().Format(time.RFC3339)}
+
+	hours := 1
+	if hStr := req.URL.Query().Get("hours"); hStr != "" {
+		if h, err := fmt.Sscanf(hStr, "%d", &hours); err != nil || h != 1 || hours < 1 {
+			hours = 1
+		}
+	}
 
 	if r.cfg.Agent.WorkDir != "" {
 		costDB := filepath.Join(r.cfg.Agent.WorkDir, "costs.db")
-		if data, err := queryTokensPerMinute(costDB); err == nil {
+		if data, err := queryTokensPerMinute(costDB, hours); err == nil {
 			resp["data"] = data
 		} else {
 			resp["error"] = err.Error()
@@ -241,6 +260,110 @@ func queryCostDB(dbPath string) (map[string]interface{}, error) {
 	return result, nil
 }
 
+func parseSince(req *http.Request) time.Time {
+	sinceStr := req.URL.Query().Get("since")
+	if sinceStr == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, sinceStr)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func queryCostDBPerModel(dbPath string, since time.Time) ([]map[string]interface{}, error) {
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	query := `
+		SELECT provider, model, COUNT(*) as calls,
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0)
+		FROM usage
+		%s
+		GROUP BY provider, model
+		ORDER BY total_tokens DESC
+	`
+	var rows *sql.Rows
+	if since.IsZero() {
+		rows, err = db.Query(fmt.Sprintf(query, ""))
+	} else {
+		rows, err = db.Query(fmt.Sprintf(query, "WHERE created_at >= ? "), since.Format("2006-01-02 15:04:05"))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var provider, model string
+		var calls, inputTokens, outputTokens, totalTokens int64
+		var costUSD float64
+		if err := rows.Scan(&provider, &model, &calls, &inputTokens, &outputTokens, &totalTokens, &costUSD); err != nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"provider": provider, "model": model, "calls": calls,
+			"input_tokens": inputTokens, "output_tokens": outputTokens,
+			"total_tokens": totalTokens, "cost_usd": costUSD,
+		})
+	}
+	return out, rows.Err()
+}
+
+func queryCostDBBySessionModel(dbPath string, since time.Time) ([]map[string]interface{}, error) {
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	query := `
+		SELECT session_key, provider, model, COUNT(*) as calls,
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0)
+		FROM usage
+		%s
+		GROUP BY session_key, provider, model
+		ORDER BY session_key, total_tokens DESC
+	`
+	var rows *sql.Rows
+	if since.IsZero() {
+		rows, err = db.Query(fmt.Sprintf(query, ""))
+	} else {
+		rows, err = db.Query(fmt.Sprintf(query, "WHERE created_at >= ? "), since.Format("2006-01-02 15:04:05"))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var sessionKey, provider, model string
+		var calls, inputTokens, outputTokens, totalTokens int64
+		var costUSD float64
+		if err := rows.Scan(&sessionKey, &provider, &model, &calls, &inputTokens, &outputTokens, &totalTokens, &costUSD); err != nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"session_key": sessionKey, "provider": provider, "model": model, "calls": calls,
+			"input_tokens": inputTokens, "output_tokens": outputTokens,
+			"total_tokens": totalTokens, "cost_usd": costUSD,
+		})
+	}
+	return out, rows.Err()
+}
+
 func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
@@ -305,7 +428,7 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 	return result, nil
 }
 
-func queryTokensPerMinute(dbPath string) ([]map[string]interface{}, error) {
+func queryTokensPerMinute(dbPath string, hours int) ([]map[string]interface{}, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
@@ -314,12 +437,14 @@ func queryTokensPerMinute(dbPath string) ([]map[string]interface{}, error) {
 
 	// Read raw rows — SQLite strftime can't parse Go RFC3339Nano timestamps.
 	// We parse and group in Go.
+	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	rows, err := db.Query(`
 		SELECT created_at, input_tokens, output_tokens, total_tokens
 		FROM usage
+		WHERE created_at >= ?
 		ORDER BY created_at DESC
 		LIMIT 5000
-	`)
+	`, since.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}

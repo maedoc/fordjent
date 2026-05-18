@@ -62,6 +62,9 @@ var allowedTransitions = map[IssueState][]IssueState{
 func StateFromLabels(labels []string) IssueState {
 	best := StateOpened
 	bestPri := 0
+	hasBlocked := false
+	hasReady := false
+	hasFailedLabel := false
 	for _, label := range labels {
 		name := strings.ToLower(strings.TrimSpace(label))
 		if state, ok := labelToState[name]; ok {
@@ -70,6 +73,21 @@ func StateFromLabels(labels []string) IssueState {
 				bestPri = pri
 			}
 		}
+		if name == "blocked" {
+			hasBlocked = true
+		}
+		if name == "ready" {
+			hasReady = true
+		}
+		if strings.HasPrefix(name, "fordjent/failed:") {
+			hasFailedLabel = true
+		}
+	}
+	if hasBlocked && hasReady {
+		if !hasFailedLabel {
+			return StateReady
+		}
+		return StateFSMBlocked
 	}
 	return best
 }

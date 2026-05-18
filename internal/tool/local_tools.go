@@ -159,6 +159,12 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 
 	slog.Warn("sandbox not available, running bash command unsandboxed", "cmd", params.Command)
 
+	slog.Info("shell access",
+		"tool", "bash",
+		"cmd", params.Command,
+		"workdir", t.repoDir,
+	)
+
 	cmd := exec.CommandContext(ctx, shell, "-c", params.Command)
 	cmd.Dir = t.repoDir
 
@@ -300,13 +306,37 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 	absPath = filepath.Clean(absPath)
 	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
 	if !strings.HasPrefix(absPath, repoClean) {
+		slog.Warn("file access blocked: path escapes repository root",
+			"tool", "read_file",
+			"requested_path", path,
+			"resolved_path", absPath,
+			"repo_root", t.repoDir,
+		)
 		return "", fmt.Errorf("path escapes repository root: %s", path)
 	}
 
 	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
 	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
+		slog.Warn("file access blocked: path escapes repository root",
+			"tool", "read_file",
+			"requested_path", path,
+			"resolved_path", absPath,
+			"repo_root", t.repoDir,
+		)
 		return "", fmt.Errorf("path escapes repository root: %s", path)
 	}
+
+	relForLog := path
+	if rel, err := filepath.Rel(t.repoDir, absPath); err == nil {
+		relForLog = rel
+	}
+
+	slog.Info("file access",
+		"tool", "read_file",
+		"path", relForLog,
+		"abs_path", absPath,
+		"repo_root", t.repoDir,
+	)
 
 	f, err := os.Open(absPath)
 	if err != nil {
@@ -399,17 +429,42 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	absPath := filepath.Join(t.repoDir, filepath.Clean(params.Path))
 	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
 	if !strings.HasPrefix(absPath, repoClean) {
+		slog.Warn("file access blocked: path escapes repository root",
+			"tool", "write_file",
+			"requested_path", params.Path,
+			"resolved_path", absPath,
+			"repo_root", t.repoDir,
+		)
 		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
 	}
 
 	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
 	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
+		slog.Warn("file access blocked: path escapes repository root",
+			"tool", "write_file",
+			"requested_path", params.Path,
+			"resolved_path", absPath,
+			"repo_root", t.repoDir,
+		)
 		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return "", fmt.Errorf("create directories: %w", err)
 	}
+
+	relForLog := params.Path
+	if rel, err := filepath.Rel(t.repoDir, absPath); err == nil {
+		relForLog = rel
+	}
+
+	slog.Info("file access",
+		"tool", "write_file",
+		"path", relForLog,
+		"abs_path", absPath,
+		"repo_root", t.repoDir,
+		"bytes", len(params.Content),
+	)
 
 	if err := os.WriteFile(absPath, []byte(params.Content), 0644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
@@ -522,6 +577,12 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		}
 	} else {
 		slog.Warn("sandbox not available, running git command unsandboxed", "cmd", cmdStr)
+
+		slog.Info("shell access",
+			"tool", "git",
+			"cmd", cmdStr,
+			"workdir", t.repoDir,
+		)
 		cmd := exec.CommandContext(ctx, "git", parts...)
 		cmd.Dir = t.repoDir
 		var err error

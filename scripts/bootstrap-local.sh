@@ -286,7 +286,10 @@ agent:
   role_providers:
     pm: "wafer-glm"
     reviewer: "wafer-glm"
-    implementer: "wafer-glm"
+    implementer: "wafer-qwen"
+    tester: "wafer-qwen"
+    devops: "wafer-qwen"
+  fallback_provider: "wafer-qwen"
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -307,17 +310,37 @@ budget:
   max_session_cost: 2.00
   max_monthly_cost: 50.00
 
+sandbox:
+  enabled: false
+  backend: auto
+  tmpfs_size_mb: 64
+  keep_profiles_on_failure: true
+  violation_comment_threshold: 3
+  allowed_write_dirs: []
+
 providers:
-  - name: "wafer-glm"
+  - name: "wafer-qwen"
     api_base: "https://pass.wafer.ai/v1"
     api_key: "$WAFER_API_KEY"
-    model: "glm-5.1"
+    model: "Qwen3.5-397B-A17B"
     max_tokens: 32768
     request_timeout: "90s"
     max_retries: 5
     retry_base_delay: "3s"
     retry_max_delay: "60s"
-    max_concurrent_llm_calls: 1
+    max_concurrent_llm_calls: 3
+    cost_per_1m_input_tokens: 0
+    cost_per_1m_output_tokens: 0
+  - name: "wafer-glm"
+    api_base: "https://pass.wafer.ai/v1"
+    api_key: "$WAFER_API_KEY"
+    model: "GLM-5.1"
+    max_tokens: 32768
+    request_timeout: "120s"
+    max_retries: 5
+    retry_base_delay: "3s"
+    retry_max_delay: "60s"
+    max_concurrent_llm_calls: 3
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
 
@@ -341,6 +364,11 @@ memory:
 
 database:
   path: ""
+
+scanner:
+  enabled: true
+  interval: "5m"
+  repo: "$ADMIN_USER/$TEST_REPO"
 
 log_level: "info"
 YAMLEOF
@@ -424,7 +452,7 @@ log "Repo seeded"
 
 log "Creating FSM labels..."
 
-LABELS="planning:0ea5db implementing:fbca04 ready:c2e07c review:fbca04 blocked:b60205 done:28a745 approved:28a745 rejected:b60205 scaffold:1d76db fordjent/failed:max-turns:b60205 fordjent/failed:error:b60205 automerge:28a745"
+LABELS="planning:0ea5db implementing:fbca04 ready:c2e07c review:fbca04 blocked:b60205 done:28a745 approved:28a745 rejected:b60205 scaffold:1d76db fordjent/failed:max-turns:b60205 fordjent/failed:error:b60205 automerge:28a745 needs-role:b60205 in_progress:fbca04 plan-approved:28a745 role:implementer:207de5 role:pm:a0d5e4 role:reviewer:e9d76f role:tester:bfd4f2 role:devops:f9d5cc"
 
 for label_spec in $LABELS; do
     name="${label_spec%%:*}"

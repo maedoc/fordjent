@@ -1212,3 +1212,88 @@ ok  github.com/fordjent/fordjent/internal/webhook
 ```
 
 All 15 internal packages pass.
+
+---
+
+## Wave C–E Validation + Bug Fixes 21–24 (May 18, 2026)
+
+### What Was Tested
+Three validation waves to verify the Bug 1–3 fixes (dual-label, session recovery, reviewer cost cap) from the prior session.
+
+### Wave C — Dual-Label + Basic Pipeline (3 issues, fired simultaneously)
+
+| Issue | Title | Role | PR | Result |
+|-------|-------|------|-----|--------|
+| #30 | `[implementer]` Add ToUpper | implementer (Qwen) | PR#35 merged | ✅ Clean labels, "implementation" cost summary |
+| #31 | `[implementer]` Add Abs | implementer (Qwen) | PR#34 merged | ✅ Clean labels, "implementation" cost summary |
+| #32 | `[devops]` Add lint target | devops (Qwen) | PR#33 merged | ✅ Clean labels, "devops" cost summary |
+
+**Validations**:
+- ✅ No dual `blocked`+`ready` labels on any issue (Bug 1 fix confirmed)
+- ✅ Cost summary comments show role labels ("implementation", "devops")
+- ✅ Reviewer sessions on PRs #34/#35 used GLM-5.1 (per `role_providers.reviewer`)
+- ✅ `max_turns_reviewer: 10` correctly capped reviewer at 10 turns
+
+### Wave D — Max-Turns + Auto-Retry (1 issue, artificially low `max_turns_implementer: 3`)
+
+| Issue | Title | Result |
+|-------|-------|--------|
+| #36 | `[implementer]` Add MapKeys | Hit 3-turn limit → auto-retry → permanent block |
+
+**Timeline**:
+- t=0: Issue created → agent starts → hits 3 turns → `OnSessionFailedMaxTurns` fires
+- Immediately: Issue has `fordjent/failed:max-turns` only (NO `blocked`) ✅
+- t=5min: Auto-retry ticker fires → adds `ready` label
+- **Bug A found**: Adding `ready` triggers `issues.label_updated` webhook → immediate new session → fails in 3 turns → adds `fordjent/failed:max-turns` again → cascade
+- t=10min: 2nd auto-retry → `CountFailedRetries` returns 6 ≥ `max_session_retries: 2` → permanently blocks with `fordjent/failed:max-retries` ✅
+
+**Validations**:
+- ✅ `fordjent/failed:max-turns` added without `blocked` (Bug 2 fix)
+- ✅ Auto-retry fires after 5 minutes
+- ✅ Permanent blocking after retries exhausted
+- 🐛 **Bug A**: Cascade — adding `ready` triggers webhook storm
+
+### Wave E — Reviewer Session (2 issues + manual review comment)
+
+| Issue | Title | PR | Reviewer Result |
+|-------|-------|-----|-----------------|
+| #37 | `[implementer]` TrimSpace | PR#40 | Reviewer (GLM, 10 turns) hit max-turns 🐛 |
+| #38 | `[implementer]` CountWords | PR#39 (auto-merged) | No review needed |
+
+**Validations**:
+- ✅ Reviewer used GLM-5.1 model (per `role_providers.reviewer`)
+- ✅ Reviewer capped at 10 turns (per `max_turns_reviewer`)
+- 🐛 **Bug B**: 10 turns too low for meaningful code review
+- 🐛 **Bug D**: Auto-retry for PR reviewer used `issues/40` key instead of `pulls/40`, losing PR context and reviewer role
+
+### Bugs Found + Fixed
+
+#### Bug 21 — Auto-Retry Cascade (Critical)
+**Problem**: `runAutoRetry()` added `ready` label to signal retry. This triggered `issues.label_updated` webhook → Fordjent created a new session → agent hit max-turns → added `fordjent/failed:max-turns` → cascade of repeated failures.
+
+**Fix**: Instead of adding `ready` label and relying on webhook, `runAutoRetry()` now directly dispatches a synthetic `event.IssueOpened` event to `handleEvent()`. This bypasses the webhook entirely. The `ready` label is no longer added (only stale labels are removed and `fordjent/failed:max-turns` is removed).
+
+#### Bug 22 — `max_turns_reviewer` Too Low
+**Problem**: `max_turns_reviewer: 10` was insufficient for code review sessions that need to read code, check tests, and make fixes. 2 out of 3 reviewer sessions hit the limit.
+
+**Fix**: Bumped default from 10 → 20 in `internal/config/config.go` and `fordjent.local.yaml`.
+
+#### Bug 23 — Auto-Retry Doesn't Skip Closed/Merged PRs
+**Problem**: Auto-retry scanned ALL stored sessions including closed/merged PRs, attempting to retry sessions that were already resolved. This wasted API calls and could add labels to merged PRs.
+
+**Fix**: `runAutoRetry()` now checks `issue.State == "closed"` and skips closed issues, cleaning up the stale `fordjent/failed:max-turns` label.
+
+#### Bug 24 — Auto-Retry Used Wrong Session Key for PRs
+**Problem**: Auto-retry always constructed session key as `issues/N`, even when the issue was a PR (which should use `pulls/N`). This caused the retry session to lose the PR context (reviewer role, PR branch checkout).
+
+**Fix**: Auto-retry now checks `issue.PullRequest` field (new `PRRef` struct on `forgejo.Issue`). If the issue has a `pull_request` reference, the session key is constructed as `pulls/N` and the synthetic event includes `PRNumber`.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | `runAutoRetry()`: direct event dispatch instead of label trigger (Bug 21); skip closed issues (Bug 23); PR detection via `issue.PullRequest` (Bug 24); remove `ready`/`in_progress` before `blocked` in permanent block |
+| `internal/forgejo/client.go` | Added `PRRef` struct and `PullRequest` field to `Issue` struct (Bug 24) |
+| `internal/config/config.go` | `MaxTurnsReviewer` default: 10 → 20 (Bug 22) |
+| `fordjent.local.yaml` | `max_turns_reviewer: 20` (Bug 22) |
+| `AGENTS.md` | This update |
