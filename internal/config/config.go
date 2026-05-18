@@ -73,6 +73,9 @@ type AgentConfig struct {
 	RoleProviders      map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 	FallbackProvider   string            `yaml:"fallback_provider"`
 	ReflectionInterval int               `yaml:"reflection_interval"`
+	// RecoveryWindowHours is the max age for which a session is considered
+	// recoverable. Sessions idle longer than this are skipped during recovery.
+	RecoveryWindowHours   int               `yaml:"recovery_window_hours"`
 }
 
 type BudgetConfig struct {
@@ -150,6 +153,7 @@ func Load(path string) (*Config, error) {
 			GitName:                 "Fordjent Agent",
 			GitEmail:                "fordjent@forgejo.local",
 			ReflectionInterval:      5,
+			RecoveryWindowHours:    24,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

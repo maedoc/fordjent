@@ -34,7 +34,7 @@ func NewTracker(dbPath string) (*Tracker, error) {
 	if dbPath == "" {
 		dbPath = "costs.db"
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("open cost db: %w", err)
 	}

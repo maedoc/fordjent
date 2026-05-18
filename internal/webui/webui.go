@@ -100,7 +100,7 @@ func buildDashboardData(cfg *config.Config) DashboardData {
 }
 
 func queryLatestSessions(dbPath, workDir string) ([]SessionRow, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func queryLatestSessions(dbPath, workDir string) ([]SessionRow, error) {
 }
 
 func queryRecentTransitions(dbPath string) ([]TransitionRow, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func queryRecentTransitions(dbPath string) ([]TransitionRow, error) {
 }
 
 func queryRecentCosts(dbPath string) ([]CostRow, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}

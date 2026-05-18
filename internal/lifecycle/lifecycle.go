@@ -42,7 +42,7 @@ func New(dbPath string, client *forgejo.Client, costTracker *cost.Tracker) (*Lif
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("open lifecycle db: %w", err)
 	}

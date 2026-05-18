@@ -159,7 +159,7 @@ func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	db, err := sql.Open("sqlite", lifecycleDB)
+	db, err := sql.Open("sqlite", lifecycleDB+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -204,7 +204,7 @@ func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
 }
 
 func queryCostDB(dbPath string) (map[string]interface{}, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func queryCostDB(dbPath string) (map[string]interface{}, error) {
 }
 
 func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +306,7 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 }
 
 func queryTokensPerMinute(dbPath string) ([]map[string]interface{}, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}

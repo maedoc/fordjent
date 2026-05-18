@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/fordjent/fordjent/internal/agent"
 	"github.com/fordjent/fordjent/internal/config"
@@ -33,16 +32,20 @@ type turnSignature struct {
 
 // Agent is the per-session agent that processes events via LLM + tools.
 type Agent struct {
-	cfg         *config.Config
-	sess        *Session
-	forgejo     *forgejo.Client
-	llm         provider.ChatCompleter
-	tools       *tool.Registry
-	mem         *memory.Memory
-	costTracker *cost.Tracker
-	executor    *agent.TurnExecutor
-	lc          *lifecycle.Lifecycle
-	role        string
+	cfg              *config.Config
+	sess             *Session
+	forgejo          *forgejo.Client
+	llm              provider.ChatCompleter
+	tools            *tool.Registry
+	mem              *memory.Memory
+	costTracker      *cost.Tracker
+	executor         *agent.TurnExecutor
+	lc               *lifecycle.Lifecycle
+	role             string
+	analysisMode     bool
+	analysisModeSet  bool
+	automerge        bool
+	automergeSet     bool
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string) *Agent {
@@ -87,9 +90,6 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Enforce overall session timeout
 	sessionTimeout := a.cfg.Agent.SessionTimeout
-	if sessionTimeout == 0 {
-		sessionTimeout = 30 * time.Minute
-	}
 	sessCtx, sessCancel := context.WithTimeout(ctx, sessionTimeout)
 	defer sessCancel()
 	ctx = sessCtx
@@ -340,7 +340,7 @@ Update the issue comment with your reflection, then continue working.`,
 
 	slog.Warn("max turns reached", "session_key", a.sess.Key)
 	a.addReaction(ctx, evt, "warning")
-	return fmt.Errorf("max turns (%d) reached: %w", maxTurns, agent.ErrMaxTurnsReached)
+	return fmt.Errorf("max turns (%d) reached: %w", maxTurns, sentinel.ErrMaxTurnsReached)
 }
 
 func (a *Agent) addReaction(ctx context.Context, evt *event.Event, emoji string) {
@@ -435,18 +435,7 @@ You are in Code Review mode. You do NOT write code. Your job is:
 - If issues found, post a comment describing what needs to change.
 - DO NOT leave PRs open indefinitely — either merge or request changes.`
 
-		hasAutomerge := false
-		if evt.IssueNumber > 0 {
-			issue, err := a.forgejo.GetIssue(ctx, evt.Repository, evt.IssueNumber)
-			if err == nil && issue != nil {
-				for _, l := range issue.Labels {
-					if l.Name == "automerge" {
-						hasAutomerge = true
-						break
-					}
-				}
-			}
-		}
+		hasAutomerge := a.detectAutomerge(ctx, evt)
 		if hasAutomerge {
 			modeInstructions += `
 
@@ -549,6 +538,35 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 				Role:    "user",
 				Content: fmt.Sprintf("[Context] Issue #%d: %s\n\n%s", evt.IssueNumber, issue.Title, issue.Body),
 			})
+
+			// Parent context: if this issue references a parent, fetch it
+			if parentRef := extractParentRef(issue.Body); parentRef > 0 && parentRef != evt.IssueNumber {
+				parent, parentErr := a.forgejo.GetIssue(ctx, evt.Repository, parentRef)
+				if parentErr == nil && parent != nil {
+					excerpt := parent.Body
+					if len(excerpt) > 2000 {
+						excerpt = excerpt[:2000] + "\n\n... (truncated)"
+					}
+					messages = append(messages, provider.Message{
+						Role:    "user",
+						Content: fmt.Sprintf("[Parent Context — issue #%d]\nTitle: %s\n\n%s", parent.Number, parent.Title, excerpt),
+					})
+
+					// Also fetch parent's first 5 comments
+					parentComments, pcErr := a.forgejo.ListComments(ctx, evt.Repository, parentRef)
+					if pcErr == nil {
+						for i, pc := range parentComments {
+							if i >= 5 {
+								break
+							}
+							messages = append(messages, provider.Message{
+								Role:    "user",
+								Content: fmt.Sprintf("[Parent #%d — comment by @%s] %s", parentRef, pc.User, pc.Body),
+							})
+						}
+					}
+				}
+			}
 		}
 
 		comments, err := a.forgejo.ListComments(ctx, evt.Repository, evt.IssueNumber)
@@ -573,6 +591,26 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 	}
 
 	return messages, nil
+}
+
+// extractParentRef parses the first "Depends on: #N" or "Closes: #N" reference
+// from an issue body and returns the issue number, or 0 if none found.
+func extractParentRef(body string) int {
+	for _, prefix := range []string{"Depends on: #", "depends on: #", "Closes: #", "closes: #"} {
+		idx := strings.Index(body, prefix)
+		if idx >= 0 {
+			rest := body[idx+len(prefix):]
+			// Read the issue number
+			var num int
+			for i := 0; i < len(rest) && rest[i] >= '0' && rest[i] <= '9'; i++ {
+				num = num*10 + int(rest[i]-'0')
+			}
+			if num > 0 {
+				return num
+			}
+		}
+	}
+	return 0
 }
 
 func (a *Agent) eventToUserMessage(evt *event.Event) string {
@@ -605,13 +643,27 @@ func (a *Agent) eventToUserMessage(evt *event.Event) string {
 	payloadJSON, err := json.MarshalIndent(evt.Payload, "", "  ")
 	if err == nil && len(payloadJSON) < 5000 {
 		sb.WriteString(fmt.Sprintf("\n<details>\n<summary>Full payload</summary>\n\n```json\n%s\n```\n</details>", string(payloadJSON)))
+	} else if err == nil && len(payloadJSON) >= 5000 {
+		slog.Warn("payload truncated for context window",
+			"payload_size", len(payloadJSON),
+			"event_type", evt.Type,
+			"issue", evt.IssueNumber,
+			"pr", evt.PRNumber,
+		)
+		sb.WriteString(fmt.Sprintf("\n<details>\n<summary>Full payload (truncated — %d chars)</summary>\n\n```json\n%s\n[...]\n```\n</details>", len(payloadJSON), string(payloadJSON[:500])))
 	}
 
 	return sb.String()
 }
 
 // detectAnalysisMode checks whether this issue is flagged for planning-only work.
+// Result is cached after first call to avoid per-turn API latency.
 func (a *Agent) detectAnalysisMode(ctx context.Context, evt *event.Event) bool {
+	if a.analysisModeSet {
+		return a.analysisMode
+	}
+	a.analysisModeSet = true
+
 	if evt.IssueNumber == 0 {
 		return false
 	}
@@ -620,10 +672,19 @@ func (a *Agent) detectAnalysisMode(ctx context.Context, evt *event.Event) bool {
 		return false
 	}
 
+	// Cache automerge status from the same API call
+	for _, l := range issue.Labels {
+		if l.Name == "automerge" {
+			a.automerge = true
+		}
+	}
+	a.automergeSet = true
+
 	// Check title for [analyze-only] or [plan-only]
 	titleLower := strings.ToLower(issue.Title)
 	if strings.Contains(titleLower, "[analyze-only]") || strings.Contains(titleLower, "[plan-only]") {
 		slog.Info("analysis mode detected from title", "title", issue.Title, "session_key", a.sess.Key)
+		a.analysisMode = true
 		return true
 	}
 
@@ -632,11 +693,21 @@ func (a *Agent) detectAnalysisMode(ctx context.Context, evt *event.Event) bool {
 		name := strings.ToLower(l.Name)
 		if name == "analyze-only" || name == "plan-only" {
 			slog.Info("analysis mode detected from label", "label", l.Name, "session_key", a.sess.Key)
+			a.analysisMode = true
 			return true
 		}
 	}
 
 	return false
+}
+
+// detectAutomerge returns whether the issue has an 'automerge' label, cached from the
+// first detectAnalysisMode call to avoid an extra Forgejo API hit.
+func (a *Agent) detectAutomerge(ctx context.Context, evt *event.Event) bool {
+	if !a.automergeSet {
+		_ = a.detectAnalysisMode(ctx, evt) // populate cache
+	}
+	return a.automerge
 }
 
 // detectIssueState derives the FSM state from the issue's current labels.
@@ -693,6 +764,7 @@ func buildRoleRegistry(
 	registry.Register(tool.NewListCollabsTool(forgejoAdapter))
 	registry.Register(tool.NewGetVersionTool(forgejoAdapter))
 	registry.Register(tool.NewGetUserTool(forgejoAdapter))
+	registry.Register(tool.NewGetSiblingIssuesTool(forgejoAdapter))
 
 	// Role-specific tools
 	switch role {
@@ -744,6 +816,16 @@ func allSameSignature(sigs []turnSignature) bool {
 
 func issueStateInstructions(state lifecycle.IssueState) string {
 	switch state {
+	case lifecycle.StatePlanApproved:
+		return `
+
+## STATE: Plan Approved
+The plan for this issue has been approved. You MUST:
+1. Read the issue and any plan comments
+2. Implement the approved plan
+3. Create a PR when done
+
+You have full access to implementation tools. Proceed with coding.`
 	case lifecycle.StatePlanning:
 		return `
 

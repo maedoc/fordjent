@@ -8,6 +8,7 @@ const (
 	StateOpened       IssueState = "opened"
 	StateNeedsRole    IssueState = "needs-role"
 	StateReady        IssueState = "ready"
+	StateInProgress   IssueState = "in_progress"
 	StatePlanning     IssueState = "planning"
 	StatePlanApproved IssueState = "plan-approved"
 	StateImplementing IssueState = "implementing"
@@ -23,6 +24,7 @@ var statePriority = map[IssueState]int{
 	StateFSMBlocked:   80,
 	StateReview:       70,
 	StateImplementing: 60,
+	StateInProgress:   55,
 	StatePlanApproved: 50,
 	StatePlanning:     40,
 	StateReady:        30,
@@ -34,6 +36,7 @@ var labelToState = map[string]IssueState{
 	"done":          StateDone,
 	"automerge":     StateMerging,
 	"blocked":       StateFSMBlocked,
+	"in_progress":   StateInProgress,
 	"review":        StateReview,
 	"implementing":  StateImplementing,
 	"plan-approved": StatePlanApproved,
@@ -44,12 +47,13 @@ var labelToState = map[string]IssueState{
 
 var allowedTransitions = map[IssueState][]IssueState{
 	StateOpened:       {StateNeedsRole, StateReady, StatePlanning, StateImplementing, StateFSMBlocked, StateDone},
-	StateNeedsRole:    {StateReady, StatePlanning, StateFSMBlocked, StateDone},
-	StateReady:        {StatePlanning, StateImplementing, StateFSMBlocked, StateDone},
+	StateNeedsRole:    {StateOpened, StateReady, StatePlanning, StateFSMBlocked, StateDone},
+	StateReady:        {StateInProgress, StatePlanning, StatePlanApproved, StateImplementing, StateFSMBlocked, StateDone},
+	StateInProgress:   {StateImplementing, StateReady, StateFSMBlocked, StateDone},
 	StatePlanning:     {StatePlanApproved, StateFSMBlocked, StateDone},
 	StatePlanApproved: {StateImplementing, StateFSMBlocked, StateDone},
 	StateImplementing: {StateReview, StateFSMBlocked, StateDone},
-	StateFSMBlocked:   {StateReady, StatePlanning, StateImplementing, StateReview, StateDone},
+	StateFSMBlocked:   {StateReady, StatePlanning, StatePlanApproved, StateImplementing, StateReview, StateDone},
 	StateReview:       {StateImplementing, StateMerging, StateDone, StateFSMBlocked},
 	StateMerging:      {StateDone, StateReview, StateFSMBlocked},
 	StateDone:         {StateReady, StateImplementing},

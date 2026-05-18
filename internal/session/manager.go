@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/fordjent/fordjent/internal/agent"
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
@@ -37,6 +36,8 @@ type Session struct {
 	LastActive  time.Time
 	Cancel      context.CancelFunc
 	Sender      string // original webhook sender (e.g. fordjent-bot)
+
+	claimedReady bool // set when this session claimed a ready→in_progress transition
 
 	mu     sync.Mutex
 	busy   bool
@@ -200,8 +201,12 @@ func (m *Manager) restoreSessions() error {
 		go m.runSession(sessCtx, sess)
 		slog.Info("restored session from database", "session_key", rec.SessionKey, "last_active", rec.LastActive)
 
+		recoveryWindow := time.Duration(m.cfg.Agent.RecoveryWindowHours) * time.Hour
+		if recoveryWindow <= 0 {
+			recoveryWindow = 24 * time.Hour
+		}
 		// Auto-resume recently-active implementer sessions by posting a synthetic comment
-		if m.cfg.Agent.EnableSessionRecovery && time.Since(rec.LastActive) < 2*time.Hour && rec.IssueNumber > 0 {
+		if m.cfg.Agent.EnableSessionRecovery && time.Since(rec.LastActive) < recoveryWindow && rec.IssueNumber > 0 {
 			go func(repo string, issueNum int) {
 				resumeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer cancel()
@@ -232,6 +237,12 @@ func (m *Manager) Run(ctx context.Context) {
 	cleanupTicker := time.NewTicker(1 * time.Hour)
 	defer cleanupTicker.Stop()
 
+	stuckTicker := time.NewTicker(30 * time.Minute)
+	defer stuckTicker.Stop()
+
+	recoveryTicker := time.NewTicker(1 * time.Hour)
+	defer recoveryTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -249,6 +260,14 @@ func (m *Manager) Run(ctx context.Context) {
 
 		case <-cleanupTicker.C:
 			m.cleanupOldWorkDirs(ctx)
+
+		case <-stuckTicker.C:
+			m.detectStuckSessions(ctx)
+
+		case <-recoveryTicker.C:
+			if m.cfg.Agent.EnableSessionRecovery {
+				m.runPeriodicRecovery(ctx)
+			}
 		}
 	}
 }
@@ -256,8 +275,7 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Bootstrap scheduler/lifecycle/scaffold labels once per repo (sync to avoid races)
 	// Use admin client if available (bot may not have repo access yet).
-	if _, ok := m.labelBoot.Load(evt.Repository); !ok {
-		m.labelBoot.Store(evt.Repository, true)
+	if _, loaded := m.labelBoot.LoadOrStore(evt.Repository, true); !loaded {
 		lbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		labelClient := m.adminClient
 		if labelClient == nil {
@@ -343,7 +361,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 
 	// Scaffold detection: on new issues for empty repos, create/block
 	// Skip PM/decompose issues — they don't need code on main to decompose work.
-	if m.cfg.Agent.EnableScaffoldDetection && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+	if m.cfg.Agent.EnableScaffoldDetection && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
 		title := extractIssueTitle(evt)
 		lower := strings.ToLower(title)
 		isPM := strings.Contains(lower, "[pm]") || strings.Contains(lower, "[project manager]") || strings.Contains(lower, "[decompose]")
@@ -361,14 +379,17 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 
 	// Role gate: if require_role_tag is enabled and the issue has no role tag/label,
 	// post a guidance comment and wait for the user to assign one.
-	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+	// Skip for green-light events (human already approved the issue).
+	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil {
 			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
 		} else if detectRoleFromIssue(issue) == "" {
 			slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
 			m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
-			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
+			if err := m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"}); err != nil {
+				slog.Warn("role gate: failed to add needs-role label", "error", err, "issue", evt.IssueNumber)
+			}
 			return
 		}
 	}
@@ -391,27 +412,26 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				prevState = lifecycle.StateOpened
 			}
 			if !lifecycle.IsTransitionValid(prevState, newState) {
-				slog.Warn("FSM: invalid state transition, ignoring label change",
+				slog.Warn("FSM: invalid state transition, updating state anyway",
 					"issue", evt.IssueNumber,
 					"repo", evt.Repository,
 					"from", prevState,
 					"to", newState,
 				)
-			} else {
-				m.issueStates.Store(stateKey, newState)
-				slog.Info("issue state from labels",
-					"issue", evt.IssueNumber,
-					"repo", evt.Repository,
-					"new_state", newState,
-					"prev_state", prevState,
-					"labels", labelNames,
-				)
-				switch newState {
-				case lifecycle.StateDone:
-					if issue.State != "closed" {
-						if err := m.forgejoClient.CloseIssue(ctx, evt.Repository, evt.IssueNumber); err != nil {
-							slog.Warn("failed to close done issue", "error", err, "issue", evt.IssueNumber)
-						}
+			}
+			m.issueStates.Store(stateKey, newState)
+			slog.Info("issue state from labels",
+				"issue", evt.IssueNumber,
+				"repo", evt.Repository,
+				"new_state", newState,
+				"prev_state", prevState,
+				"labels", labelNames,
+			)
+			switch newState {
+			case lifecycle.StateDone:
+				if issue.State != "closed" {
+					if err := m.forgejoClient.CloseIssue(ctx, evt.Repository, evt.IssueNumber); err != nil {
+						slog.Warn("failed to close done issue", "error", err, "issue", evt.IssueNumber)
 					}
 				}
 			}
@@ -421,15 +441,44 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Role assignment detection: when a needs-role issue gets a label or title edit,
 	// check if a role is now present and create a session.
 	if m.cfg.Agent.RequireRoleTag && (evt.Type == event.IssueLabelUpdated || evt.Type == event.IssueEdited) && evt.IssueNumber > 0 {
-		m.handleRoleAssignment(ctx, evt)
-		return
+		if m.handleRoleAssignment(ctx, evt) {
+			return // role was assigned, event handled
+		}
+		// Role not assigned yet — fall through to green-light check
+	}
+
+	// Green-light label detection: when a human adds plan-approved, ready, or implementing
+	// label, that's a signal to start working. Create a session.
+	if evt.Type == event.IssueLabelUpdated && evt.IssueNumber > 0 && evt.Sender != "fordjent-bot" {
+		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+		if err == nil && issue != nil {
+			labelNames := make([]string, len(issue.Labels))
+			for i, l := range issue.Labels {
+				labelNames[i] = l.Name
+			}
+			state := lifecycle.StateFromLabels(labelNames)
+			switch state {
+			case lifecycle.StatePlanApproved, lifecycle.StateImplementing, lifecycle.StateReady:
+				role := detectRoleFromIssue(issue)
+				if role == "" {
+					role = "implementer" // default role for green-light labels
+				}
+				slog.Info("green-light label detected, creating session", "issue", evt.IssueNumber, "state", state, "role", role, "sender", evt.Sender)
+				// Build a synthetic IssueOpened event
+				openedEvt := event.NewEvent(event.IssueOpened, evt.Repository, evt.IssueNumber, 0, evt.Sender, "green_light")
+				openedEvt.Payload = evt.Payload
+				openedEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
+				m.handleEvent(ctx, openedEvt)
+				return
+			}
+		}
 	}
 
 	// Non-role label_updated events should NOT create sessions.
 	// FSM state tracking above (lines 379-419) already updates the state machine.
 	// Creating sessions for label additions (e.g. "blocked") causes feedback loops:
 	// agent adds "blocked" → label_updated → session → agent adds "blocked" again.
-	// Only role-assignment label updates (handled above) should create sessions.
+	// Only role-assignment and green-light label updates (handled above) should create sessions.
 	if evt.Type == event.IssueLabelUpdated {
 		slog.Debug("dropping non-role label_updated event", "event_id", evt.ID, "issue", evt.IssueNumber, "repo", evt.Repository)
 		return
@@ -490,7 +539,8 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	}
 
 	// Role gate: require a role tag or label before creating a session
-	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 {
+	// Skip for green-light events (human already approved the issue via plan-approved/ready/implementing label).
+	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil || issue == nil {
 			_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, buildRoleGuidance())
@@ -662,23 +712,46 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	// Detect role from issue or PR title/labels before agent construction
 	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
-	// If a bot created this PR, auto-assign reviewer role to inspect and merge it
-	if sess.PRNumber > 0 {
-		isBotPR := sess.Sender == "fordjent-bot" || sess.Sender == "fordjent[bot]"
-		if !isBotPR {
-			// Check PR author for restored sessions where Sender is not set
-			pr, err := m.forgejoClient.GetPR(ctx, sess.Repository, sess.PRNumber)
-			if err == nil && pr != nil && pr.User != nil {
-				login := strings.ToLower(pr.User.Login)
-				if login == "fordjent-bot" || login == "fordjent[bot]" {
-					isBotPR = true
+	// All PRs get a reviewer session to inspect and merge code.
+	// Bot PRs retain auto-bypass for merge approval (handled in forgejo_merge_pr tool).
+	if sess.PRNumber > 0 && (role == "" || role == "implementer") {
+		role = "reviewer"
+	}
+
+	// Claim protocol: if implementer starting on a ready issue, atomically swap labels
+	// ready→in_progress so other implementers see it's claimed and skip.
+	if role == "implementer" && sess.IssueNumber > 0 {
+		issue, err := m.forgejoClient.GetIssue(ctx, sess.Repository, sess.IssueNumber)
+		if err == nil && issue != nil {
+			labelNames := make([]string, len(issue.Labels))
+			for i, l := range issue.Labels {
+				labelNames[i] = l.Name
+			}
+			hasReady := false
+			for _, ln := range labelNames {
+				if ln == "ready" {
+					hasReady = true
+					break
+				}
+			}
+			if hasReady {
+				newLabels := make([]string, 0, len(labelNames))
+				for _, ln := range labelNames {
+					if ln != "ready" {
+						newLabels = append(newLabels, ln)
+					}
+				}
+				newLabels = append(newLabels, "in_progress")
+				if err := m.forgejoClient.ReplaceIssueLabels(ctx, sess.Repository, sess.IssueNumber, newLabels); err != nil {
+					slog.Warn("claim: failed to transition ready→in_progress", "error", err, "issue", sess.IssueNumber)
+				} else {
+					slog.Info("claim: transitioned ready→in_progress", "issue", sess.IssueNumber, "repo", sess.Repository)
+					sess.claimedReady = true
 				}
 			}
 		}
-		if isBotPR && (role == "implementer" || role == "") {
-			role = "reviewer"
-		}
 	}
+
 	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role)
 
 	for {
@@ -689,6 +762,10 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				lcCtx, lcCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout))
 				lcCancel()
+			}
+			// Revert claim on timeout
+			if sess.claimedReady && sess.IssueNumber > 0 {
+				m.revertClaim(ctx, sess)
 			}
 			return
 		case evt, ok := <-sess.events:
@@ -722,7 +799,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						}
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
-				} else if errors.Is(err, agent.ErrMaxTurnsReached) {
+				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key)
 				} else {
 					slog.Error("agent processing failed",
@@ -731,6 +808,10 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						"session_key", sess.Key,
 					)
 					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err)
+				}
+				// Revert claim: if this session claimed a ready issue, release it back to ready
+				if sess.claimedReady && sess.IssueNumber > 0 {
+					m.revertClaim(ctx, sess)
 				}
 			} else {
 				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber)
@@ -749,7 +830,10 @@ func (m *Manager) reapIdle(ctx context.Context) {
 	defer m.mu.Unlock()
 
 	for key, sess := range m.sessions {
-		if time.Since(sess.LastActive) > m.cfg.Agent.IdleTimeout {
+		sess.mu.Lock()
+		lastActive := sess.LastActive
+		sess.mu.Unlock()
+		if time.Since(lastActive) > m.cfg.Agent.IdleTimeout {
 			sess.mu.Lock()
 			busy := sess.busy
 			sess.mu.Unlock()
@@ -761,6 +845,141 @@ func (m *Manager) reapIdle(ctx context.Context) {
 			delete(m.sessions, key)
 			m.store.Delete(key)
 			metrics.SetActiveSessions(int64(len(m.sessions)))
+		}
+	}
+}
+
+// revertClaim reverts an in_progress → ready transition when a session fails
+// or times out without completing work. Releases the issue for other agents.
+func (m *Manager) revertClaim(ctx context.Context, sess *Session) {
+	revertCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	issue, err := m.forgejoClient.GetIssue(revertCtx, sess.Repository, sess.IssueNumber)
+	if err != nil || issue == nil {
+		slog.Warn("revertClaim: failed to get issue", "error", err, "issue", sess.IssueNumber)
+		return
+	}
+	labelNames := make([]string, len(issue.Labels))
+	for i, l := range issue.Labels {
+		labelNames[i] = l.Name
+	}
+	newLabels := make([]string, 0, len(labelNames))
+	hadInProgress := false
+	for _, ln := range labelNames {
+		if ln == "in_progress" {
+			hadInProgress = true
+			continue
+		}
+		newLabels = append(newLabels, ln)
+	}
+	if !hadInProgress {
+		return // nothing to revert
+	}
+	newLabels = append(newLabels, "ready")
+	if err := m.forgejoClient.ReplaceIssueLabels(revertCtx, sess.Repository, sess.IssueNumber, newLabels); err != nil {
+		slog.Warn("revertClaim: failed to revert in_progress→ready", "error", err, "issue", sess.IssueNumber)
+	} else {
+		slog.Info("revertClaim: reverted in_progress→ready", "issue", sess.IssueNumber, "repo", sess.Repository)
+		sess.claimedReady = false
+	}
+}
+
+// runPeriodicRecovery re-scans stored sessions for any that have been restored
+// since startup and posts nudge comments to re-activate idle implementer sessions.
+func (m *Manager) runPeriodicRecovery(ctx context.Context) {
+	records, err := m.store.ListAll()
+	if err != nil {
+		slog.Warn("periodic recovery: failed to list stored sessions", "error", err)
+		return
+	}
+	recoveryWindow := time.Duration(m.cfg.Agent.RecoveryWindowHours) * time.Hour
+	if recoveryWindow <= 0 {
+		recoveryWindow = 24 * time.Hour
+	}
+
+	for _, rec := range records {
+		// Skip sessions that are already active
+		m.mu.RLock()
+		_, active := m.sessions[rec.SessionKey]
+		m.mu.RUnlock()
+		if active {
+			continue
+		}
+
+		// Skip completed/failed sessions
+		state, _ := m.lc.GetState(ctx, rec.SessionKey)
+		if state == lifecycle.StateCompleted || strings.HasPrefix(state, "failed") {
+			continue
+		}
+
+		// Only nudge if within recovery window
+		if time.Since(rec.LastActive) >= recoveryWindow || rec.IssueNumber <= 0 {
+			continue
+		}
+
+		issue, err := m.forgejoClient.GetIssue(ctx, rec.Repository, rec.IssueNumber)
+		if err == nil && issue != nil && detectRoleFromIssue(issue) == "pm" {
+			continue // Do not nudge PM sessions
+		}
+
+		slog.Info("periodic recovery: nudging inactive session",
+			"session_key", rec.SessionKey,
+			"last_active", rec.LastActive,
+			"issue", rec.IssueNumber,
+		)
+		body := "Resuming work after agent restart..."
+		_ = m.forgejoClient.PostIssueComment(ctx, rec.Repository, rec.IssueNumber, body)
+	}
+}
+
+// detectStuckSessions checks for sessions stuck in in_progress or blocked
+// FSM states and either nudges or transitions them to failed:timeout.
+func (m *Manager) detectStuckSessions(ctx context.Context) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for key, sess := range m.sessions {
+		stateRaw, ok := m.issueStates.Load(key)
+		if !ok {
+			continue
+		}
+		state, ok := stateRaw.(lifecycle.IssueState)
+		if !ok {
+			continue
+		}
+
+		sess.mu.Lock()
+		lastActive := sess.LastActive
+		sess.mu.Unlock()
+
+		switch state {
+		case lifecycle.StateInProgress:
+			if time.Since(lastActive) > 2*time.Hour {
+				slog.Warn("stuck session detected: in_progress > 2hrs, posting nudge",
+					"session_key", key,
+					"last_active", lastActive,
+					"issue", sess.IssueNumber,
+				)
+				go func(repo string, issueNum int) {
+					nudgeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					body := "This issue has been in progress for over 2 hours with no activity. Are you still working on it?"
+					_ = m.forgejoClient.PostIssueComment(nudgeCtx, repo, issueNum, body)
+				}(sess.Repository, sess.IssueNumber)
+			}
+		case lifecycle.StateFSMBlocked:
+			if time.Since(lastActive) > 6*time.Hour {
+				slog.Warn("stuck session detected: blocked > 6hrs, transitioning to failed:timeout",
+					"session_key", key,
+					"last_active", lastActive,
+					"issue", sess.IssueNumber,
+				)
+				go func(sessionKey string) {
+					lcCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = m.lc.RecordTransition(lcCtx, sessionKey, lifecycle.StateBlocked, lifecycle.StateFailedError, "stuck in blocked state > 6hrs")
+				}(key)
+			}
 		}
 	}
 }
@@ -818,9 +1037,12 @@ func (m *Manager) evictOldest() {
 		if busy {
 			continue
 		}
-		if oldestKey == "" || sess.LastActive.Before(oldestTime) {
+		sess.mu.Lock()
+		sessLastActive := sess.LastActive
+		sess.mu.Unlock()
+		if oldestKey == "" || sessLastActive.Before(oldestTime) {
 			oldestKey = key
-			oldestTime = sess.LastActive
+			oldestTime = sessLastActive
 		}
 	}
 
@@ -995,12 +1217,12 @@ Once a role is assigned, I'll start working on this automatically.
 	}
 }
 
-func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) {
+func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) bool {
 	// Check if this issue has the needs-role label
 	issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 	if err != nil {
 		slog.Warn("role assignment: failed to get issue", "error", err, "issue", evt.IssueNumber)
-		return
+		return false
 	}
 
 	hasNeedsRole := false
@@ -1011,12 +1233,12 @@ func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) {
 		}
 	}
 	if !hasNeedsRole {
-		return
+		return false
 	}
 
 	role := detectRoleFromIssue(issue)
 	if role == "" {
-		return
+		return false
 	}
 
 	slog.Info("role assignment: role detected, creating session", "issue", evt.IssueNumber, "role", role)
@@ -1035,4 +1257,6 @@ func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) {
 
 	// Process the synthetic event (will create session via getOrCreate)
 	m.handleEvent(ctx, openedEvt)
+
+	return true
 }

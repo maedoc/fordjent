@@ -178,6 +178,15 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	body := params.Body
 	if t.parentIssueNum > 0 {
 		body += fmt.Sprintf("\n\nDepends on: #%d", t.parentIssueNum)
+		// Fetch parent issue body for context transfer
+		parent, parentErr := t.adapter.Client().GetIssue(ctx, params.Repository, t.parentIssueNum)
+		if parentErr == nil && parent != nil {
+			excerpt := parent.Body
+			if len(excerpt) > 2000 {
+				excerpt = excerpt[:2000] + "\n\n... (truncated)"
+			}
+			body += fmt.Sprintf("\n\n## Parent Context (from #%d)\n%s", t.parentIssueNum, excerpt)
+		}
 		body += "\n\n## Context\n"
 		body += fmt.Sprintf("This issue depends on parent issue #%d. ", t.parentIssueNum)
 		body += "The code this issue works with will be available in the repository once the parent PR is merged. "
@@ -198,8 +207,9 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		}
 		_ = json.Unmarshal([]byte(result), &created)
 		if created.Number > 0 {
-			labelPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues", fmt.Sprintf("%d", created.Number), "labels")
-			_, _ = t.adapter.doRequest(ctx, http.MethodPost, labelPath, map[string]interface{}{"labels": []string{"blocked"}})
+			if err := t.adapter.Client().AddIssueLabels(ctx, params.Repository, created.Number, []string{"blocked"}); err != nil {
+				slog.Warn("create_issue: failed to add blocked label", "error", err, "issue", created.Number)
+			}
 		}
 	}
 
@@ -311,6 +321,140 @@ func (t *forgejoGetIssueTool) Execute(ctx context.Context, args json.RawMessage)
 	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber))
 	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
+}
+
+// forgejoGetSiblingIssuesTool finds issues that share the same parent dependency.
+type forgejoGetSiblingIssuesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewGetSiblingIssuesTool(adapter *ForgejoAdapter) *forgejoGetSiblingIssuesTool {
+	return &forgejoGetSiblingIssuesTool{adapter: adapter}
+}
+
+func (t *forgejoGetSiblingIssuesTool) Name() string { return "forgejo_get_sibling_issues" }
+
+func (t *forgejoGetSiblingIssuesTool) Description() string {
+	return "Find sibling issues that share the same parent dependency (via 'Depends on: #N' or 'Closes: #N'). Use this before starting work to understand what other sub-issues are in flight for the same parent task. Returns issue numbers, titles, states, and PR status for each sibling."
+}
+
+func (t *forgejoGetSiblingIssuesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"parent_issue_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "The parent issue number that siblings depend on",
+			},
+		},
+		"required": []string{"repository", "parent_issue_number"},
+	}
+}
+
+func (t *forgejoGetSiblingIssuesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository        string `json:"repository"`
+		ParentIssueNumber int    `json:"parent_issue_number"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	client := t.adapter.Client()
+
+	openIssues, err := client.ListOpenIssues(ctx, params.Repository)
+	if err != nil {
+		return "", fmt.Errorf("list open issues: %w", err)
+	}
+
+	parentRef := fmt.Sprintf("#%d", params.ParentIssueNumber)
+	var siblings []struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		HasOpenPR bool   `json:"has_open_pr"`
+	}
+
+	for _, issue := range openIssues {
+		if issue.Number == params.ParentIssueNumber {
+			continue // skip the parent itself
+		}
+		body := issue.Body
+		ref := extractSiblingParentRef(body)
+		if ref != params.ParentIssueNumber {
+			continue
+		}
+
+		hasPR := t.siblingHasOpenPR(ctx, params.Repository, issue.Number)
+		siblings = append(siblings, struct {
+			Number    int    `json:"number"`
+			Title     string `json:"title"`
+			State     string `json:"state"`
+			HasOpenPR bool   `json:"has_open_pr"`
+		}{
+			Number:    issue.Number,
+			Title:     issue.Title,
+			State:     issue.State,
+			HasOpenPR: hasPR,
+		})
+		_ = parentRef // used in body check above
+	}
+
+	if len(siblings) == 0 {
+		return fmt.Sprintf("No sibling issues found that depend on #%d.", params.ParentIssueNumber), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Sibling issues that depend on #%d:\n\n", params.ParentIssueNumber))
+	for _, s := range siblings {
+		prStatus := "No open PR"
+		if s.HasOpenPR {
+			prStatus = "Has open PR"
+		}
+		sb.WriteString(fmt.Sprintf("- #%d [%s] %s — %s\n", s.Number, s.State, s.Title, prStatus))
+	}
+	return sb.String(), nil
+}
+
+// siblingHasOpenPR checks if an issue has an associated open/active PR.
+func (t *forgejoGetSiblingIssuesTool) siblingHasOpenPR(ctx context.Context, repo string, issueNum int) bool {
+	escaped := escapeRepoPath(repo)
+	apiPath := path.Join("/api/v1/repos", escaped, "issues", fmt.Sprintf("%d", issueNum))
+	result, err := t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return false
+	}
+	var issue struct {
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal([]byte(result), &issue); err != nil {
+		return false
+	}
+	return issue.PullRequest != nil && issue.PullRequest.URL != ""
+}
+
+// extractSiblingParentRef extracts the parent issue number from a sibling's body.
+func extractSiblingParentRef(body string) int {
+	for _, prefix := range []string{"Depends on: #", "depends on: #", "Closes: #", "closes: #"} {
+		idx := strings.Index(body, prefix)
+		if idx >= 0 {
+			rest := body[idx+len(prefix):]
+			var num int
+			for i := 0; i < len(rest) && rest[i] >= '0' && rest[i] <= '9'; i++ {
+				num = num*10 + int(rest[i]-'0')
+			}
+			if num > 0 {
+				return num
+			}
+		}
+	}
+	return 0
 }
 
 // MergeGate is implemented by the merge-queue system. It checks whether a PR
@@ -800,8 +944,11 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		}
 		lastErr = err
 		var apiErr *sentinel.ErrAPIClient
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == 405 || apiErr.StatusCode == 409) {
-			continue // 405 = try again later, 409 = conflict (may resolve)
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 405 {
+			continue // 405 = transient, try again after backoff
+		}
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 409 {
+			break // 409 = merge conflict, will not resolve on retry
 		}
 		break // other errors are not retryable
 	}

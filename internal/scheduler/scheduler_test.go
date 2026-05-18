@@ -44,13 +44,18 @@ func TestOnPRMerged_UnblocksDependentIssue(t *testing.T) {
 					"labels": []map[string]interface{}{},
 				},
 			})
+		case r.URL.Path == "/api/v1/repos/fjadmin/gogit/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
 		case strings.HasSuffix(r.URL.Path, "/issues/10"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"state": "closed",
 			})
-		case r.URL.Path == "/api/v1/repos/fjadmin/gogit/issues/15/labels/blocked":
+		case strings.HasSuffix(r.URL.Path, "/15/labels/1") && r.Method == "DELETE":
 			w.WriteHeader(http.StatusOK)
-		case strings.HasSuffix(r.URL.Path, "/labels"):
+		case strings.HasSuffix(r.URL.Path, "/15/labels") && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/comments"):
 			w.WriteHeader(http.StatusCreated)
@@ -70,10 +75,10 @@ func TestOnPRMerged_UnblocksDependentIssue(t *testing.T) {
 
 	var foundRemoveBlocked, foundAddReady, foundComment bool
 	for _, c := range captured {
-		if c.Method == "DELETE" && strings.Contains(c.Path, "15/labels/blocked") {
+		if c.Method == "DELETE" && strings.Contains(c.Path, "15/labels/") {
 			foundRemoveBlocked = true
 		}
-		if c.Method == "POST" && strings.Contains(c.Path, "15/labels") && !strings.Contains(c.Path, "blocked") {
+		if c.Method == "POST" && strings.Contains(c.Path, "15/labels") {
 			foundAddReady = true
 		}
 		if c.Method == "POST" && strings.Contains(c.Path, "15/comments") {

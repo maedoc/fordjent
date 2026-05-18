@@ -65,9 +65,8 @@ func (c *Client) CheckGate(ctx context.Context, repo, headBranch, baseBranch str
 	// 1. Get the list of files this branch would change vs base
 	ourFiles, err := c.compareBranchFiles(ctx, repo, baseBranch, headBranch)
 	if err != nil {
-		// If we can't diff (e.g. branch doesn't exist yet), don't block
-		slog.Warn("mergequeue: failed to diff branch, allowing through", "error", err, "branch", headBranch)
-		return false, "", nil
+		slog.Warn("mergequeue: failed to diff branch, blocking to be safe", "error", err, "branch", headBranch)
+		return true, fmt.Sprintf("Merge gate unavailable: failed to diff branch — %v", err), nil
 	}
 	if len(ourFiles) == 0 {
 		return false, "", nil
@@ -76,8 +75,8 @@ func (c *Client) CheckGate(ctx context.Context, repo, headBranch, baseBranch str
 	// 2. List open PRs
 	openPRs, err := c.listOpenPRs(ctx, repo)
 	if err != nil {
-		slog.Warn("mergequeue: failed to list open PRs, allowing through", "error", err)
-		return false, "", nil
+		slog.Warn("mergequeue: failed to list open PRs, blocking to be safe", "error", err)
+		return true, fmt.Sprintf("Merge gate unavailable: failed to list open PRs — %v", err), nil
 	}
 
 	// 3. For each open PR, get its changed files and compare

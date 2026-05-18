@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -78,7 +79,7 @@ type PullRequest struct {
 	State        string `json:"state"`
 	Mergeable    bool   `json:"mergeable"`
 	Merged       bool   `json:"merged"` // Forgejo sends merged=true even when state=closed
-	HasConflicts bool   `json:"has_conflits"` // NOTE: Forgejo API field may vary — treat as advisory
+	HasConflicts bool   `json:"has_conflicts"` // NOTE: Forgejo API field may vary — treat as advisory
 	User         *User  `json:"user"`
 	Head         struct {
 		Ref string `json:"ref"`
@@ -251,9 +252,11 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 	if err != nil {
 		return fmt.Errorf("list labels: %w", err)
 	}
-	nameToID := make(map[string]int64)
+	// Build name→IDs map. Use ALL IDs per name (not just last) so that
+	// duplicate repo-level labels don't cause new labels to be created.
+	nameToIDs := make(map[string][]int64)
 	for _, l := range existingLabels {
-		nameToID[l.Name] = l.ID
+		nameToIDs[l.Name] = append(nameToIDs[l.Name], l.ID)
 	}
 
 	issue, err := c.GetIssue(ctx, repo, issueNumber)
@@ -270,23 +273,103 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 		if alreadyOnIssue[name] {
 			continue
 		}
-		if id, ok := nameToID[name]; ok {
-			ids = append(ids, id)
+		if labelIDs, ok := nameToIDs[name]; ok && len(labelIDs) > 0 {
+			ids = append(ids, labelIDs[0]) // use first matching ID
 		} else {
-			if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
-				existing2, listErr := c.ListLabels(ctx, repo)
-				if listErr == nil {
-					for _, l := range existing2 {
-						if l.Name == name {
-							ids = append(ids, l.ID)
-							break
-						}
+			// Label name not found in initial ListLabels result.
+			// This could happen due to a race, but Forgejo allows duplicate
+			// label names so we must NOT blindly create — check first.
+			existing2, listErr := c.ListLabels(ctx, repo)
+			if listErr == nil {
+				for _, l := range existing2 {
+					if l.Name == name {
+						ids = append(ids, l.ID)
+						break
 					}
 				}
+			}
+			if len(ids) == 0 || ids[len(ids)-1] == 0 {
+				// Truly doesn't exist — safe to create
+				if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
+					continue
+				}
+				existing3, _ := c.ListLabels(ctx, repo)
+				for _, l := range existing3 {
+					if l.Name == name {
+						ids = append(ids, l.ID)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if len(ids) == 0 {
+		slog.Info("AddIssueLabels: no new labels to add", "repo", repo, "issue", issueNumber, "requested", labels, "already_on_issue", alreadyOnIssue)
+		return nil
+	}
+
+	slog.Info("AddIssueLabels: adding labels", "repo", repo, "issue", issueNumber, "ids", ids, "names", labels)
+
+	_, err = c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{"labels": ids})
+	if err != nil {
+		slog.Warn("AddIssueLabels: POST failed", "error", err, "repo", repo, "issue", issueNumber, "ids", ids)
+	}
+	return err
+}
+
+// RemoveIssueLabel removes a single label from an issue by name.
+// Forgejo's DELETE endpoint requires a numeric label ID, not a name string.
+// We resolve the name to an ID first, then remove ALL label IDs with that name
+// (in case duplicate labels exist at the repo level from prior bugs).
+func (c *Client) RemoveIssueLabel(ctx context.Context, repo string, issueNumber int, label string) error {
+	existing, err := c.ListLabels(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list labels for removal: %w", err)
+	}
+	var labelIDs []int64
+	for _, l := range existing {
+		if l.Name == label {
+			labelIDs = append(labelIDs, l.ID)
+		}
+	}
+	if len(labelIDs) == 0 {
+		return nil // label doesn't exist, nothing to remove
+	}
+	base := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	var lastErr error
+	for _, id := range labelIDs {
+		apiPath := fmt.Sprintf("%s/%d", base, id)
+		if _, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// ReplaceIssueLabels atomically replaces all labels on an issue. Uses
+// PUT /api/v1/repos/{owner}/{repo}/issues/{index}/labels to set the exact label set.
+// Accepts label names (not IDs) and resolves them to IDs internally.
+func (c *Client) ReplaceIssueLabels(ctx context.Context, repo string, issueNumber int, labels []string) error {
+	existingLabels, err := c.ListLabels(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list labels: %w", err)
+	}
+	nameToIDs := make(map[string][]int64)
+	for _, l := range existingLabels {
+		nameToIDs[l.Name] = append(nameToIDs[l.Name], l.ID)
+	}
+
+	var ids []int64
+	for _, name := range labels {
+		if labelIDs, ok := nameToIDs[name]; ok && len(labelIDs) > 0 {
+			ids = append(ids, labelIDs[0])
+		} else {
+			if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
 				continue
 			}
-			existing3, _ := c.ListLabels(ctx, repo)
-			for _, l := range existing3 {
+			existing2, _ := c.ListLabels(ctx, repo)
+			for _, l := range existing2 {
 				if l.Name == name {
 					ids = append(ids, l.ID)
 					break
@@ -295,18 +378,8 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 		}
 	}
 
-	if len(ids) == 0 {
-		return nil
-	}
-
-	_, err = c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{"labels": ids})
-	return err
-}
-
-// RemoveIssueLabel removes a single label from an issue.
-func (c *Client) RemoveIssueLabel(ctx context.Context, repo string, issueNumber int, label string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels", url.PathEscape(label))
-	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
+	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	_, err = c.doRequest(ctx, http.MethodPut, apiPath, map[string]interface{}{"labels": ids})
 	return err
 }
 
@@ -385,8 +458,10 @@ func (c *Client) CreateLabel(ctx context.Context, repo, name, color string) erro
 }
 
 // EnsureLabels creates labels that Fordjent scheduler/lifecycle/scaffold depend on.
+// It checks for existing labels first to avoid creating duplicates
+// (Forgejo allows duplicate label names with different IDs).
 func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
-	labels := []struct {
+	requiredLabels := []struct {
 		Name  string
 		Color string
 	}{
@@ -402,12 +477,31 @@ func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
 		{"review", "fbca04"},
 		{"automerge", "0e8a16"},
 		{"done", "ededed"},
+		// Role labels — required by detectRoleFromIssue() and the role gate
+		{"role:implementer", "5319e7"},
+		{"role:pm", "1d76db"},
+		{"role:reviewer", "fbca04"},
+		{"role:devops", "0e8a16"},
+		{"role:tester", "d93f0b"},
 	}
-	for _, l := range labels {
+
+	// Fetch existing labels first to avoid creating duplicates
+	existing, err := c.ListLabels(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("list labels for ensure: %w", err)
+	}
+	existingNames := make(map[string]bool)
+	for _, l := range existing {
+		existingNames[l.Name] = true
+	}
+
+	for _, l := range requiredLabels {
+		if existingNames[l.Name] {
+			continue // already exists
+		}
 		if err := c.CreateLabel(ctx, repo, l.Name, l.Color); err != nil {
-			// Ignore conflict (label already exists)
 			var apiErr *sentinel.ErrAPIClient
-			if (errors.As(err, &apiErr) && apiErr.StatusCode == 422) || errors.Is(err, sentinel.ErrAlreadyExists) {
+			if errors.As(err, &apiErr) && apiErr.StatusCode == 422 {
 				continue
 			}
 			return fmt.Errorf("create label %q: %w", l.Name, err)
@@ -697,16 +791,9 @@ func (c *Client) ListLabels(ctx context.Context, repo string) ([]Label, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rawLabels []struct {
-		Name  string `json:"name"`
-		Color string `json:"color"`
-	}
-	if err := json.Unmarshal([]byte(result), &rawLabels); err != nil {
+	var labels []Label
+	if err := json.Unmarshal([]byte(result), &labels); err != nil {
 		return nil, fmt.Errorf("decode labels: %w", err)
-	}
-	labels := make([]Label, len(rawLabels))
-	for i, rl := range rawLabels {
-		labels[i] = Label{Name: rl.Name}
 	}
 	return labels, nil
 }

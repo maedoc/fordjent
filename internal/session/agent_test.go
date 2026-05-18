@@ -417,11 +417,21 @@ func TestTargetDescription(t *testing.T) {
 }
 
 func TestIssueStateInstructions_Implementing(t *testing.T) {
-	for _, state := range []lifecycle.IssueState{lifecycle.StateImplementing, lifecycle.StateReady, lifecycle.StatePlanApproved, lifecycle.StateReview} {
+	for _, state := range []lifecycle.IssueState{lifecycle.StateImplementing, lifecycle.StateReady, lifecycle.StateReview} {
 		instructions := issueStateInstructions(state)
 		if instructions != "" {
 			t.Errorf("expected empty instructions for %s state, got: %s", state, instructions)
 		}
+	}
+}
+
+func TestIssueStateInstructions_PlanApproved(t *testing.T) {
+	instructions := issueStateInstructions(lifecycle.StatePlanApproved)
+	if instructions == "" {
+		t.Error("expected non-empty instructions for plan-approved state")
+	}
+	if !strings.Contains(instructions, "Plan Approved") {
+		t.Error("expected plan-approved instructions to mention Plan Approved")
 	}
 }
 
