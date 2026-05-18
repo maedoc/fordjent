@@ -7,3 +7,5 @@ __pycache__/
 *.db-shm
 *.db-wal
 .env
+.env.local
+.ollama-cloud-token

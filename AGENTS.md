@@ -43,9 +43,9 @@ Token lives in `.env` file (loaded via `--env-file`). Never commit it.
 | What | Value | Where |
 |------|-------|-------|
 | Forgejo admin user | `fjadmin` | `gitea admin user create` |
-| Forgejo admin pass | `REDACTED` | Bootstrap script |
-| Fordjent Forgejo token | `REDACTED` | API-created, stored as `FORGEJO_TOKEN` |
-| Webhook secret | `REDACTED` | Forgejo webhook (shared with Fordjent config) |
+| Forgejo admin pass | *(see bootstrap script)* | Bootstrap script |
+| Fordjent Forgejo token | *(see `.env`)* | API-created, stored as `FORGEJO_TOKEN` |
+| Webhook secret | *(see `.env`)* | Forgejo webhook (shared with Fordjent config) |
 
 ## Bugs Found & Fixed
 
@@ -228,7 +228,7 @@ docker run -d --name forgejo-local --network fordjent-net \
 # Wait for start, then init DB + admin user
 docker exec forgejo-local gitea migrate
 docker exec forgejo-local gitea admin user create \
-  --username fjadmin --password REDACTED --email admin@local --admin
+  --username fjadmin --password "$ADMIN_PASS" --email admin@local --admin
 
 # 3. (Optional) Start local Ollama — currently unused
 docker run -d --name ollama-probe --runtime=nvidia \
@@ -244,7 +244,7 @@ docker run -d --name fordjent --network fordjent-net \
 
 # 5. Create repo + token via API
 curl -X POST http://localhost:3000/api/v1/user/repos \
-  -u fjadmin:REDACTED \
+  -u fjadmin:"$ADMIN_PASS" \
   -H "Content-Type: application/json" \
   -d '{"name":"testbed","description":"Fordjent integration test","private":false}'
 
@@ -270,7 +270,7 @@ docker run -d --name fordjent --network fordjent-net \
 ### Create an issue to trigger the agent
 ```bash
 curl -X POST http://localhost:3000/api/v1/repos/fjadmin/testbed/issues \
-  -u fjadmin:REDACTED \
+  -u fjadmin:"$ADMIN_PASS" \
   -H "Content-Type: application/json" \
   -d '{"title":"...","body":"..."}'
 ```
