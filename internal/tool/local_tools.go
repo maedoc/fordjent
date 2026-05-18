@@ -5,18 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/sandbox"
 )
 
 // bashTool executes shell commands in the repository root directory.
 type bashTool struct {
-	repoDir  string
-	agentCfg AgentConfig
+	repoDir       string
+	agentCfg      AgentConfig
+	sandboxCfg    sandbox.Config
+	violCounter   *sandbox.ViolationCounter
+	sessionKey    string
 }
 
 const maxBashOutput = 64 * 1024
@@ -42,7 +48,18 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func NewBashTool(info SessionInfo, cfg AgentConfig) *bashTool {
-	return &bashTool{repoDir: info.RepoDir(), agentCfg: cfg}
+	return &bashTool{repoDir: info.RepoDir(), agentCfg: cfg, sandboxCfg: sandbox.DefaultConfig(info.RepoDir())}
+}
+
+// SetSandboxConfig overrides the default sandbox configuration.
+func (t *bashTool) SetSandboxConfig(cfg sandbox.Config) {
+	t.sandboxCfg = cfg
+}
+
+// SetViolationCounter sets the violation counter for sandbox error tracking.
+func (t *bashTool) SetViolationCounter(counter *sandbox.ViolationCounter, sessionKey string) {
+	t.violCounter = counter
+	t.sessionKey = sessionKey
 }
 
 // bashBlockedPatterns are command substrings that are always blocked for safety.
@@ -120,6 +137,28 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	if _, lookErr := exec.LookPath("bash"); lookErr != nil {
 		shell = "sh"
 	}
+
+	if t.sandboxCfg.Enabled && (sandbox.IsAvailable() || sandbox.IsSandboxExecAvailable()) {
+		out, err := sandbox.RunShell(ctx, t.sandboxCfg, params.Command)
+		output := string(out)
+		if err != nil {
+			if sandboxErr, ok := err.(*sandbox.SandboxError); ok {
+				if t.violCounter != nil && sandboxErr.Violated {
+					t.violCounter.OnViolation(ctx, t.sessionKey, *sandboxErr)
+				} else if t.violCounter != nil {
+					t.violCounter.OnSuccess(t.sessionKey)
+				}
+			}
+			return fmt.Sprintf("Exit error: %s\n%s", err, output), nil
+		}
+		if t.violCounter != nil {
+			t.violCounter.OnSuccess(t.sessionKey)
+		}
+		return output, nil
+	}
+
+	slog.Warn("sandbox not available, running bash command unsandboxed", "cmd", params.Command)
+
 	cmd := exec.CommandContext(ctx, shell, "-c", params.Command)
 	cmd.Dir = t.repoDir
 
@@ -214,7 +253,15 @@ func (t *readFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	return t.readFile(ctx, params.Path, params.Offset, params.Limit)
 }
 
+func containsNullByte(s string) bool {
+	return strings.ContainsRune(s, '\x00')
+}
+
 func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit int) (string, error) {
+	if containsNullByte(path) {
+		return "", fmt.Errorf("path contains null bytes: %q", path)
+	}
+
 	// Cache check for full-file reads (offset=0, limit=default)
 	if offset <= 1 && limit == 0 {
 		if cached, ok := t.cache.Load(path); ok {
@@ -225,7 +272,11 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 		limit = 2000
 	}
 
-	absPath := filepath.Join(t.repoDir, path)
+	// Pre-clean the path to normalize ../ and redundant separators before joining,
+	// matching write_file's approach. This provides defense-in-depth.
+	cleanPath := filepath.Clean(path)
+
+	absPath := filepath.Join(t.repoDir, cleanPath)
 
 	// Sanitize: if model passed an absolute path containing repoDir, extract the relative part.
 	if strings.HasPrefix(path, t.repoDir) {
@@ -249,6 +300,11 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 	absPath = filepath.Clean(absPath)
 	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
 	if !strings.HasPrefix(absPath, repoClean) {
+		return "", fmt.Errorf("path escapes repository root: %s", path)
+	}
+
+	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
+	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
 		return "", fmt.Errorf("path escapes repository root: %s", path)
 	}
 
@@ -332,6 +388,10 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
+	if containsNullByte(params.Path) {
+		return "", fmt.Errorf("path contains null bytes: %q", params.Path)
+	}
+
 	if t.dryRun {
 		return fmt.Sprintf("[dry-run] Would write %d bytes to %s", len(params.Content), params.Path), nil
 	}
@@ -339,6 +399,11 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	absPath := filepath.Join(t.repoDir, filepath.Clean(params.Path))
 	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
 	if !strings.HasPrefix(absPath, repoClean) {
+		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
+	}
+
+	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
+	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
 		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
 	}
 
@@ -355,15 +420,30 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 
 // gitTool handles git operations in the session.
 type gitTool struct {
-	repoDir  string
-	agentCfg AgentConfig
+	repoDir     string
+	agentCfg    AgentConfig
+	sandboxCfg  sandbox.Config
+	violCounter *sandbox.ViolationCounter
+	sessionKey  string
 }
 
 func NewGitTool(info SessionInfo, cfg AgentConfig) *gitTool {
 	return &gitTool{
-		repoDir:  info.RepoDir(),
-		agentCfg: cfg,
+		repoDir:    info.RepoDir(),
+		agentCfg:   cfg,
+		sandboxCfg: sandbox.DefaultConfig(info.RepoDir()),
 	}
+}
+
+// SetSandboxConfig overrides the default sandbox configuration.
+func (t *gitTool) SetSandboxConfig(cfg sandbox.Config) {
+	t.sandboxCfg = cfg
+}
+
+// SetViolationCounter sets the violation counter for sandbox error tracking.
+func (t *gitTool) SetViolationCounter(counter *sandbox.ViolationCounter, sessionKey string) {
+	t.violCounter = counter
+	t.sessionKey = sessionKey
 }
 
 func (t *gitTool) Name() string { return "git" }
@@ -423,12 +503,32 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		parts = parts[1:]
 	}
 
-	cmd := exec.CommandContext(ctx, "git", parts...)
-	cmd.Dir = t.repoDir
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Sprintf("git error: %s\n%s", err, string(out)), nil
+	var out []byte
+	if t.sandboxCfg.Enabled && (sandbox.IsAvailable() || sandbox.IsSandboxExecAvailable()) {
+		sandboxOut, sandboxErr := sandbox.Run(ctx, t.sandboxCfg, "git", parts...)
+		out = sandboxOut
+		if sandboxErr != nil {
+			if se, ok := sandboxErr.(*sandbox.SandboxError); ok {
+				if t.violCounter != nil && se.Violated {
+					t.violCounter.OnViolation(ctx, t.sessionKey, *se)
+				} else if t.violCounter != nil {
+					t.violCounter.OnSuccess(t.sessionKey)
+				}
+			}
+			return fmt.Sprintf("git error: %s\n%s", sandboxErr, string(out)), nil
+		}
+		if t.violCounter != nil {
+			t.violCounter.OnSuccess(t.sessionKey)
+		}
+	} else {
+		slog.Warn("sandbox not available, running git command unsandboxed", "cmd", cmdStr)
+		cmd := exec.CommandContext(ctx, "git", parts...)
+		cmd.Dir = t.repoDir
+		var err error
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("git error: %s\n%s", err, string(out)), nil
+		}
 	}
 
 	// After successful commit, verify code compiles and tests pass BEFORE

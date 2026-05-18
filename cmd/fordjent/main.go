@@ -13,6 +13,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/scanner"
 	"github.com/fordjent/fordjent/internal/session"
 	"github.com/fordjent/fordjent/internal/webhook"
 )
@@ -72,6 +73,20 @@ func main() {
 	// Session manager
 	go mgr.Run(ctx)
 
+	// Background ready-issue scanner
+	var scan *scanner.Scanner
+	if cfg.Scanner.Enabled && cfg.Scanner.Repo != "" {
+		scan = scanner.NewScanner(scanner.ScannerConfig{
+			ForgejoClient: mgr.ForgejoClient(),
+			Checker:       mgr,
+			Bus:           bus,
+			Repo:          cfg.Scanner.Repo,
+			Interval:      cfg.Scanner.Interval,
+			Logger:        logger,
+		})
+		scan.Start()
+	}
+
 	slog.Info("fordjent agent harness started",
 		"forgejo_url", cfg.Forgejo.URL,
 		"provider", cfg.DefaultProvider().Name,
@@ -80,6 +95,9 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("shutting down, draining sessions")
+	if scan != nil {
+		scan.Stop()
+	}
 	router.SetShutdown()
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer drainCancel()

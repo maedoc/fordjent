@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os/exec"
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,13 +21,7 @@ import (
 	"github.com/fordjent/fordjent/internal/stalegate"
 )
 
-func escapeRepoPath(repo string) string {
-	parts := strings.Split(repo, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return path.Join(parts...)
-}
+
 
 // forgejoCommentTool posts comments on issues/PRs.
 type forgejoCommentTool struct {
@@ -67,6 +63,8 @@ func (t *forgejoCommentTool) Parameters() map[string]interface{} {
 // can detect self-originated events and break infinite comment loops.
 const agentCommentMarker = "\n\n<!-- ford -->"
 
+const pingParentMarker = "\n\n<!-- ford-ping -->"
+
 func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Repository  string `json:"repository"`
@@ -82,7 +80,7 @@ func (t *forgejoCommentTool) Execute(ctx context.Context, args json.RawMessage) 
 	signature := "\n\n---\n*🤖 Created by [Fordjent](https://github.com/fordjent/fordjent) autonomous coding agent*"
 	body := params.Body + signature + agentCommentMarker
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber), "comments")
 	_, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": body})
 	if err != nil {
@@ -155,7 +153,7 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 	t.mu.Unlock()
 
 	// Deduplication check: query open issues for similar titles
-	listPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues") + "?state=open&limit=50"
+	listPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues") + "?state=open&limit=50"
 	listResult, listErr := t.adapter.doRequest(ctx, http.MethodGet, listPath, nil)
 	if listErr == nil {
 		var existingIssues []struct {
@@ -193,7 +191,7 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		body += "Wait for the 'ready' label before starting implementation.\n"
 	}
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues")
 	payload := map[string]string{"title": params.Title, "body": body}
 	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
 	if err != nil {
@@ -268,7 +266,7 @@ func (t *forgejoListIssuesTool) Execute(ctx context.Context, args json.RawMessag
 		params.Limit = 20
 	}
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "issues")
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues")
 	query := url.Values{}
 	query.Set("state", params.State)
 	query.Set("limit", fmt.Sprintf("%d", params.Limit))
@@ -318,7 +316,7 @@ func (t *forgejoGetIssueTool) Execute(ctx context.Context, args json.RawMessage)
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository),
 		"issues", fmt.Sprintf("%d", params.IssueNumber))
 	return t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 }
@@ -422,7 +420,7 @@ func (t *forgejoGetSiblingIssuesTool) Execute(ctx context.Context, args json.Raw
 
 // siblingHasOpenPR checks if an issue has an associated open/active PR.
 func (t *forgejoGetSiblingIssuesTool) siblingHasOpenPR(ctx context.Context, repo string, issueNum int) bool {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := path.Join("/api/v1/repos", escaped, "issues", fmt.Sprintf("%d", issueNum))
 	result, err := t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
@@ -648,7 +646,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	body += signature + agentCommentMarker
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls")
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "pulls")
 	payload := map[string]string{
 		"title": params.Title,
 		"body":  body,
@@ -721,7 +719,7 @@ func (t *forgejoSearchCodeTool) Execute(ctx context.Context, args json.RawMessag
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "code", "search")
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "code", "search")
 	query := url.Values{}
 	query.Set("q", params.Query)
 	apiPath += "?" + query.Encode()
@@ -782,10 +780,10 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 
 	var apiPath string
 	if params.CommentID > 0 {
-		apiPath = path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
+		apiPath = path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository),
 			"issues", "comments", fmt.Sprintf("%d", params.CommentID), "reactions")
 	} else {
-		apiPath = path.Join("/api/v1/repos", escapeRepoPath(params.Repository),
+		apiPath = path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository),
 			"issues", fmt.Sprintf("%d", params.IssueNumber), "reactions")
 	}
 
@@ -843,7 +841,7 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 
 	// Fetch PR details to check mergeable status (advisory, Forgejo may return mergeable).
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber))
+	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber))
 	result, err := t.adapter.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return "", fmt.Errorf("get PR details: %w", err)
@@ -925,7 +923,7 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		}
 	}
 
-	mergePath := path.Join("/api/v1/repos", escapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber), "merge")
+	mergePath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "pulls", fmt.Sprintf("%d", params.PRNumber), "merge")
 
 	// Retry merge on transient 405 (Forgejo may need time to process refs after push)
 	var lastErr error
@@ -953,6 +951,66 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		break // other errors are not retryable
 	}
 	return "", fmt.Errorf("merge PR #%d after 3 attempts: %w", params.PRNumber, lastErr)
+}
+
+// --- forgejo_ping_parent ---
+
+type forgejoPingParentTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewPingParentTool(adapter *ForgejoAdapter) *forgejoPingParentTool {
+	return &forgejoPingParentTool{adapter: adapter}
+}
+
+func (t *forgejoPingParentTool) Name() string { return "forgejo_ping_parent" }
+
+func (t *forgejoPingParentTool) Description() string {
+	return "Post a comment on the parent PM issue to ask clarifying questions or provide feedback. Use this when you need guidance from the PM on requirements, scope, or prioritization. Find the parent issue number from the 'Depends on: #N' reference in your issue body."
+}
+
+func (t *forgejoPingParentTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"parent_issue_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "The parent PM issue number to post the comment on",
+			},
+			"message": map[string]interface{}{
+				"type":        "string",
+				"description": "The question or feedback for the PM",
+			},
+		},
+		"required": []string{"repository", "parent_issue_number", "message"},
+	}
+}
+
+func (t *forgejoPingParentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository        string `json:"repository"`
+		ParentIssueNumber int    `json:"parent_issue_number"`
+		Message           string `json:"message"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if params.ParentIssueNumber <= 0 {
+		return "", fmt.Errorf("invalid parent_issue_number: %d", params.ParentIssueNumber)
+	}
+
+	body := fmt.Sprintf("**[Implementer → PM]** %s%s", params.Message, pingParentMarker)
+
+	if err := t.adapter.Client().PostIssueComment(ctx, params.Repository, params.ParentIssueNumber, body); err != nil {
+		return "", fmt.Errorf("post comment on parent issue #%d: %w", params.ParentIssueNumber, err)
+	}
+
+	return fmt.Sprintf("Ping sent to PM on issue #%d", params.ParentIssueNumber), nil
 }
 
 // ForgejoAdapter holds shared Forgejo client for API tools.
@@ -1553,4 +1611,163 @@ func (t *forgejoListPRsTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	result, _ := json.MarshalIndent(prs, "", "  ")
 	return string(result), nil
+}
+
+// forgejoGetSubIssuesTool fetches the status of all sub-issues for a parent issue.
+type forgejoGetSubIssuesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewGetSubIssuesTool(adapter *ForgejoAdapter) *forgejoGetSubIssuesTool {
+	return &forgejoGetSubIssuesTool{adapter: adapter}
+}
+
+func (t *forgejoGetSubIssuesTool) Name() string { return "forgejo_get_sub_issues" }
+
+func (t *forgejoGetSubIssuesTool) Description() string {
+	return "Get the status of all sub-issues for a parent PM issue. Parses 'Depends on: #N' references from the parent issue body and fetches the current state (open/closed/merged) of each sub-issue. Returns a structured summary of all sub-issues with their status."
+}
+
+func (t *forgejoGetSubIssuesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"parent_issue_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "The parent issue number whose sub-issues to check",
+			},
+		},
+		"required": []string{"repository", "parent_issue_number"},
+	}
+}
+
+func (t *forgejoGetSubIssuesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository        string `json:"repository"`
+		ParentIssueNumber int    `json:"parent_issue_number"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	client := t.adapter.Client()
+
+	parent, err := client.GetIssue(ctx, params.Repository, params.ParentIssueNumber)
+	if err != nil {
+		return "", fmt.Errorf("get parent issue: %w", err)
+	}
+
+	subNums := parseSubIssueDeps(parent.Body)
+	if len(subNums) == 0 {
+		return fmt.Sprintf("Parent issue #%d has no 'Depends on:' references.", params.ParentIssueNumber), nil
+	}
+
+	type subIssueStatus struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"`
+		HasPR  bool   `json:"has_pr"`
+	}
+
+	var statuses []subIssueStatus
+	var openCount, closedCount, mergedCount int
+
+	for _, num := range subNums {
+		detailPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues", fmt.Sprintf("%d", num))
+		detailResult, detailErr := t.adapter.doRequest(ctx, http.MethodGet, detailPath, nil)
+		if detailErr != nil {
+			statuses = append(statuses, subIssueStatus{Number: num, Title: "(fetch failed)", State: "unknown"})
+			continue
+		}
+
+		var detail struct {
+			Number      int    `json:"number"`
+			Title       string `json:"title"`
+			State       string `json:"state"`
+			Merged      bool   `json:"merged"`
+			PullRequest *struct {
+				URL    string `json:"url"`
+				Merged bool   `json:"merged"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal([]byte(detailResult), &detail); err != nil {
+			statuses = append(statuses, subIssueStatus{Number: num, Title: "(parse failed)", State: "unknown"})
+			continue
+		}
+
+		hasPR := detail.PullRequest != nil && detail.PullRequest.URL != ""
+		isMerged := detail.Merged || (detail.PullRequest != nil && detail.PullRequest.Merged)
+
+		switch {
+		case isMerged:
+			mergedCount++
+		case detail.State == "closed":
+			closedCount++
+		case detail.State == "open":
+			openCount++
+		}
+
+		statuses = append(statuses, subIssueStatus{
+			Number: num,
+			Title:  detail.Title,
+			State:  detail.State,
+			Merged: isMerged,
+			HasPR:  hasPR,
+		})
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Sub-issues for parent #%d (%d total: %d open, %d closed, %d merged):\n\n",
+		params.ParentIssueNumber, len(subNums), openCount, closedCount, mergedCount))
+
+	for _, s := range statuses {
+		status := s.State
+		if s.Merged {
+			status = "merged"
+		} else if s.HasPR && s.State == "open" {
+			status = "open (has PR)"
+		}
+		sb.WriteString(fmt.Sprintf("- #%d [%s] %s\n", s.Number, status, s.Title))
+	}
+
+	allDone := openCount == 0
+	if allDone {
+		sb.WriteString("\nAll sub-issues are complete. Consider posting a completion summary and closing the parent issue.")
+	} else {
+		sb.WriteString(fmt.Sprintf("\n%d sub-issues still open — follow up on those.", openCount))
+	}
+
+	return sb.String(), nil
+}
+
+// parseSubIssueDeps extracts issue numbers from "Depends on:" lines in an issue body.
+func parseSubIssueDeps(body string) []int {
+	lines := strings.Split(body, "\n")
+	seen := make(map[int]struct{})
+	var nums []int
+	keywordRe := regexp.MustCompile(`(?i)depends\s+on`)
+	numRe := regexp.MustCompile(`#(\d+)`)
+	for _, line := range lines {
+		if !keywordRe.MatchString(line) {
+			continue
+		}
+		matches := numRe.FindAllStringSubmatch(line, -1)
+		for _, m := range matches {
+			if len(m) >= 2 {
+				n, err := strconv.Atoi(m[1])
+				if err == nil {
+					if _, ok := seen[n]; !ok {
+						seen[n] = struct{}{}
+						nums = append(nums, n)
+					}
+				}
+			}
+		}
+	}
+	return nums
 }

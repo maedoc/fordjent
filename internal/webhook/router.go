@@ -733,6 +733,19 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 		}
 	}
 
+	// Allow implementer→PM ping comments through even if they come from
+	// the bot sender. These use a special marker (<!-- ford-ping -->) that
+	// signals the PM session should be re-activated to respond to the
+	// implementer's question. Must be checked before the generic marker
+	// and bot-sender filters below.
+	if comment, ok := payload["comment"].(map[string]interface{}); ok {
+		if body, ok := comment["body"].(string); ok {
+			if strings.Contains(body, "<!-- ford-ping -->") {
+				return false
+			}
+		}
+	}
+
 	marker := "<!-- ford -->"
 
 	// Comment events (issue_comment, pull_request_review_comment):

@@ -104,7 +104,7 @@ type RepoFile struct {
 
 // GetPR retrieves a pull request by number, including head branch info.
 func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PullRequest, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number))
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -118,7 +118,7 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PullReque
 
 // MergePR merges a pull request using the given merge style ("merge", "rebase-merge", etc.).
 func (c *Client) MergePR(ctx context.Context, repo string, number int, style string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "merge")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "merge")
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
 		"Do":                     style,
 		"allow_unrelated_histories": true,
@@ -171,20 +171,11 @@ func (c *Client) doRequest(ctx context.Context, method, apiPath string, body int
 	return string(respBody), nil
 }
 
-// escapeRepoPath escapes each segment of an "owner/repo" path while preserving
-// the slash separator. Using url.PathEscape on the whole string encodes the slash,
-// breaking Gitea/Forgejo's two-segment path routing.
-func escapeRepoPath(repo string) string {
-	parts := strings.Split(repo, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return path.Join(parts...)
-}
+
 
 // GetIssue retrieves an issue by number.
 func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -199,7 +190,7 @@ func (c *Client) GetIssue(ctx context.Context, repo string, number int) (*Issue,
 
 // ListComments lists comments on an issue.
 func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number), "comments")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", number), "comments")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -231,10 +222,10 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]C
 func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, commentID int, emoji string) error {
 	var apiPath string
 	if commentID > 0 {
-		apiPath = path.Join("/api/v1/repos", escapeRepoPath(repo),
+		apiPath = path.Join("/api/v1/repos", EscapeRepoPath(repo),
 			"issues", "comments", fmt.Sprintf("%d", commentID), "reactions")
 	} else {
-		apiPath = path.Join("/api/v1/repos", escapeRepoPath(repo),
+		apiPath = path.Join("/api/v1/repos", EscapeRepoPath(repo),
 			"issues", fmt.Sprintf("%d", issueNumber), "reactions")
 	}
 
@@ -246,7 +237,7 @@ func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, comm
 // Forgejo expects {"labels": [label_id, ...]} with numeric IDs.
 // We first resolve label names to IDs via the labels API.
 func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber int, labels []string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
 
 	existingLabels, err := c.ListLabels(ctx, repo)
 	if err != nil {
@@ -274,26 +265,32 @@ func (c *Client) AddIssueLabels(ctx context.Context, repo string, issueNumber in
 			continue
 		}
 		if labelIDs, ok := nameToIDs[name]; ok && len(labelIDs) > 0 {
-			ids = append(ids, labelIDs[0]) // use first matching ID
+			ids = append(ids, labelIDs[0])
 		} else {
-			// Label name not found in initial ListLabels result.
-			// This could happen due to a race, but Forgejo allows duplicate
-			// label names so we must NOT blindly create — check first.
 			existing2, listErr := c.ListLabels(ctx, repo)
-			if listErr == nil {
-				for _, l := range existing2 {
-					if l.Name == name {
-						ids = append(ids, l.ID)
-						break
-					}
+			if listErr != nil {
+				return fmt.Errorf("retry list labels for %q: %w", name, listErr)
+			}
+			found2 := false
+			for _, l := range existing2 {
+				if l.Name == name {
+					ids = append(ids, l.ID)
+					found2 = true
+					break
 				}
 			}
-			if len(ids) == 0 || ids[len(ids)-1] == 0 {
-				// Truly doesn't exist — safe to create
+			if !found2 {
 				if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
-					continue
+					var apiErr *sentinel.ErrAPIClient
+					if errors.As(createErr, &apiErr) && apiErr.StatusCode == 422 {
+						continue
+					}
+					return fmt.Errorf("create label %q: %w", name, createErr)
 				}
-				existing3, _ := c.ListLabels(ctx, repo)
+				existing3, listErr := c.ListLabels(ctx, repo)
+				if listErr != nil {
+					return fmt.Errorf("list labels after creating %q: %w", name, listErr)
+				}
 				for _, l := range existing3 {
 					if l.Name == name {
 						ids = append(ids, l.ID)
@@ -336,7 +333,7 @@ func (c *Client) RemoveIssueLabel(ctx context.Context, repo string, issueNumber 
 	if len(labelIDs) == 0 {
 		return nil // label doesn't exist, nothing to remove
 	}
-	base := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	base := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
 	var lastErr error
 	for _, id := range labelIDs {
 		apiPath := fmt.Sprintf("%s/%d", base, id)
@@ -366,9 +363,16 @@ func (c *Client) ReplaceIssueLabels(ctx context.Context, repo string, issueNumbe
 			ids = append(ids, labelIDs[0])
 		} else {
 			if createErr := c.CreateLabel(ctx, repo, name, "ededed"); createErr != nil {
-				continue
+				var apiErr *sentinel.ErrAPIClient
+				if errors.As(createErr, &apiErr) && apiErr.StatusCode == 422 {
+					continue
+				}
+				return fmt.Errorf("create label %q: %w", name, createErr)
 			}
-			existing2, _ := c.ListLabels(ctx, repo)
+			existing2, listErr := c.ListLabels(ctx, repo)
+			if listErr != nil {
+				return fmt.Errorf("list labels after creating %q: %w", name, listErr)
+			}
 			for _, l := range existing2 {
 				if l.Name == name {
 					ids = append(ids, l.ID)
@@ -378,14 +382,14 @@ func (c *Client) ReplaceIssueLabels(ctx context.Context, repo string, issueNumbe
 		}
 	}
 
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "labels")
 	_, err = c.doRequest(ctx, http.MethodPut, apiPath, map[string]interface{}{"labels": ids})
 	return err
 }
 
 // CreateIssue creates a new issue in a repository.
 func (c *Client) CreateIssue(ctx context.Context, repo, title, body string) (*Issue, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues")
 	result, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"title": title, "body": body})
 	if err != nil {
 		return nil, err
@@ -399,7 +403,7 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string) (*Is
 
 // ListOpenIssues returns all open issues in a repository.
 func (c *Client) ListOpenIssues(ctx context.Context, repo string) ([]Issue, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues?state=open")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues?state=open")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -416,7 +420,7 @@ func (c *Client) ListRepoFiles(ctx context.Context, repo, ref string) ([]string,
 	if ref == "" {
 		ref = "main"
 	}
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "git/trees", ref)
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "git/trees", ref)
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?recursive=1", nil)
 	if err != nil {
 		return nil, err
@@ -438,21 +442,21 @@ func (c *Client) ListRepoFiles(ctx context.Context, repo, ref string) ([]string,
 
 // PostIssueComment adds a comment to an issue or pull request.
 func (c *Client) PostIssueComment(ctx context.Context, repo string, issueNumber int, body string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "comments")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "comments")
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"body": body})
 	return err
 }
 
 // AddCollaborator adds a user as a collaborator to a repository with the given permission (read, write, admin).
 func (c *Client) AddCollaborator(ctx context.Context, repo, username, permission string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "collaborators", url.PathEscape(username))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "collaborators", url.PathEscape(username))
 	_, err := c.doRequest(ctx, http.MethodPut, apiPath, map[string]string{"permission": permission})
 	return err
 }
 
 // CreateLabel creates a new label in a repository.
 func (c *Client) CreateLabel(ctx context.Context, repo, name, color string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "labels")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "labels")
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"name": name, "color": color})
 	return err
 }
@@ -525,7 +529,7 @@ type Repository struct {
 
 // GetRepository retrieves a repository by owner/repo.
 func (c *Client) GetRepository(ctx context.Context, repo string) (*Repository, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo))
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -578,7 +582,7 @@ func (c *Client) ListIssues(ctx context.Context, repo, state string, limit int) 
 	if limit == 0 {
 		limit = 20
 	}
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues")
 	query := url.Values{}
 	query.Set("state", state)
 	query.Set("limit", fmt.Sprintf("%d", limit))
@@ -595,14 +599,14 @@ func (c *Client) ListIssues(ctx context.Context, repo, state string, limit int) 
 
 // CloseIssue closes an issue.
 func (c *Client) CloseIssue(ctx context.Context, repo string, number int) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
 	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]string{"state": "closed"})
 	return err
 }
 
 // ReopenIssue reopens a closed issue.
 func (c *Client) ReopenIssue(ctx context.Context, repo string, number int) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", number))
 	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]string{"state": "open"})
 	return err
 }
@@ -622,7 +626,7 @@ func (c *Client) ListPRs(ctx context.Context, repo, state string) ([]PullRequest
 	if state == "" {
 		state = "open"
 	}
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls")
 	query := url.Values{}
 	query.Set("state", state)
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+query.Encode(), nil)
@@ -638,7 +642,7 @@ func (c *Client) ListPRs(ctx context.Context, repo, state string) ([]PullRequest
 
 // GetPRFiles lists files changed in a pull request.
 func (c *Client) GetPRFiles(ctx context.Context, repo string, number int) ([]PRFile, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "files")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "files")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -652,7 +656,7 @@ func (c *Client) GetPRFiles(ctx context.Context, repo string, number int) ([]PRF
 
 // CreatePR creates a pull request.
 func (c *Client) CreatePR(ctx context.Context, repo, title, body, head, base string) (*PullRequest, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls")
 	payload := map[string]string{
 		"title": title,
 		"head":  head,
@@ -674,7 +678,7 @@ func (c *Client) CreatePR(ctx context.Context, repo, title, body, head, base str
 
 // ClosePR closes a pull request without merging.
 func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number))
 	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]string{"state": "closed"})
 	return err
 }
@@ -690,7 +694,7 @@ type Branch struct {
 
 // ListBranches lists branches in a repository.
 func (c *Client) ListBranches(ctx context.Context, repo string) ([]Branch, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "branches")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "branches")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -719,7 +723,7 @@ func (c *Client) ListBranches(ctx context.Context, repo string) ([]Branch, error
 
 // DeleteBranch deletes a branch from a repository.
 func (c *Client) DeleteBranch(ctx context.Context, repo, branch string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "branches", url.PathEscape(branch))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "branches", url.PathEscape(branch))
 	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
 	return err
 }
@@ -737,7 +741,7 @@ type Webhook struct {
 
 // ListWebhooks lists webhooks for a repository.
 func (c *Client) ListWebhooks(ctx context.Context, repo string) ([]Webhook, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "hooks")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "hooks")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -751,7 +755,7 @@ func (c *Client) ListWebhooks(ctx context.Context, repo string) ([]Webhook, erro
 
 // CreateWebhook creates a webhook for a repository.
 func (c *Client) CreateWebhook(ctx context.Context, repo, hookType, hookURL, secret string, events []string) (*Webhook, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "hooks")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "hooks")
 	payload := map[string]interface{}{
 		"type": hookType,
 		"config": map[string]string{
@@ -777,7 +781,7 @@ func (c *Client) CreateWebhook(ctx context.Context, repo, hookType, hookURL, sec
 
 // DeleteWebhook deletes a webhook.
 func (c *Client) DeleteWebhook(ctx context.Context, repo string, id int) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "hooks", fmt.Sprintf("%d", id))
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "hooks", fmt.Sprintf("%d", id))
 	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
 	return err
 }
@@ -786,7 +790,7 @@ func (c *Client) DeleteWebhook(ctx context.Context, repo string, id int) error {
 
 // ListLabels lists labels in a repository.
 func (c *Client) ListLabels(ctx context.Context, repo string) ([]Label, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "labels")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "labels")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -815,7 +819,7 @@ func (c *Client) ListDir(ctx context.Context, repo, ref, dirPath string) ([]File
 	if ref == "" {
 		ref = "main"
 	}
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "contents", dirPath)
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "contents", dirPath)
 	query := url.Values{}
 	query.Set("ref", ref)
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+query.Encode(), nil)
@@ -839,7 +843,7 @@ func (c *Client) GetFile(ctx context.Context, repo, ref, filePath string) (*File
 	if ref == "" {
 		ref = "main"
 	}
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "contents", filePath)
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "contents", filePath)
 	query := url.Values{}
 	query.Set("ref", ref)
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+query.Encode(), nil)
@@ -855,7 +859,7 @@ func (c *Client) GetFile(ctx context.Context, repo, ref, filePath string) (*File
 
 // CreateOrUpdateFile creates or updates a file in the repository.
 func (c *Client) CreateOrUpdateFile(ctx context.Context, repo, filePath, message, content string, sha string) error {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "contents", filePath)
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "contents", filePath)
 	payload := map[string]interface{}{
 		"message": message,
 		"content": base64.StdEncoding.EncodeToString([]byte(content)),
@@ -877,7 +881,7 @@ type Collaborator struct {
 
 // ListCollaborators lists collaborators for a repository.
 func (c *Client) ListCollaborators(ctx context.Context, repo string) ([]Collaborator, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "collaborators")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "collaborators")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err
@@ -900,7 +904,7 @@ type SearchResult struct {
 
 // SearchCode searches for code in a repository.
 func (c *Client) SearchCode(ctx context.Context, repo, query string) ([]SearchResult, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "code", "search")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "code", "search")
 	q := url.Values{}
 	q.Set("q", query)
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+q.Encode(), nil)
@@ -985,7 +989,7 @@ type Review struct {
 
 // ListPRReviews returns reviews for a pull request.
 func (c *Client) ListPRReviews(ctx context.Context, repo string, number int) ([]Review, error) {
-	apiPath := path.Join("/api/v1/repos", escapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "reviews")
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "reviews")
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
 	if err != nil {
 		return nil, err

@@ -17,6 +17,8 @@ type Config struct {
 	Forgejo            ForgejoConfig    `yaml:"forgejo"`
 	Agent              AgentConfig      `yaml:"agent"`
 	Budget             BudgetConfig     `yaml:"budget"`
+	Sandbox            SandboxConfig    `yaml:"sandbox"`
+	Scanner            ScannerConfig    `yaml:"scanner"`
 	Providers          []ProviderConfig `yaml:"providers"`
 	Events             []string         `yaml:"events"`
 	SessionKeyTemplate string           `yaml:"session_key_template"`
@@ -24,6 +26,12 @@ type Config struct {
 	Memory             MemoryConfig     `yaml:"memory"`
 	Database           DatabaseConfig   `yaml:"database"`
 	LogLevel           string           `yaml:"log_level"`
+}
+
+type ScannerConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
+	Repo     string        `yaml:"repo"`
 }
 
 type ServerConfig struct {
@@ -82,6 +90,15 @@ type BudgetConfig struct {
 	Enabled        bool    `yaml:"enabled"`
 	MaxSessionCost float64 `yaml:"max_session_cost"`
 	MaxMonthlyCost float64 `yaml:"max_monthly_cost"`
+}
+
+type SandboxConfig struct {
+	Enabled                   bool     `yaml:"enabled"`
+	Backend                   string   `yaml:"backend"`
+	TmpfsSizeMB               int      `yaml:"tmpfs_size_mb"`
+	KeepProfilesOnFailure     bool     `yaml:"keep_profiles_on_failure"`
+	ViolationCommentThreshold int      `yaml:"violation_comment_threshold"`
+	AllowedWriteDirs          []string `yaml:"allowed_write_dirs"`
 }
 
 type ProviderConfig struct {
@@ -159,6 +176,14 @@ func Load(path string) (*Config, error) {
 			Enabled:        false,
 			MaxSessionCost: 0,
 			MaxMonthlyCost: 0,
+		},
+		Sandbox: SandboxConfig{
+			Enabled:                   true,
+			Backend:                   "auto",
+			TmpfsSizeMB:               64,
+			KeepProfilesOnFailure:     true,
+			ViolationCommentThreshold: 3,
+			AllowedWriteDirs:          []string{},
 		},
 		Forgejo: ForgejoConfig{
 			RateLimit: 60,

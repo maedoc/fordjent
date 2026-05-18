@@ -25,19 +25,21 @@ const (
 	PullRequestSync          Type = "pull_request.synchronize"
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
 	Push                     Type = "push"
+	PMReactivate             Type = "pm.reactivate"
 )
 
 // Event is the normalized internal representation of a Forgejo webhook event.
 type Event struct {
-	ID          string                 `json:"event_id"`
-	Type        Type                   `json:"type"`
-	Repository  string                 `json:"repository"`
-	IssueNumber int                    `json:"issue_number,omitempty"`
-	PRNumber    int                    `json:"pr_number,omitempty"`
-	Sender      string                 `json:"sender"`
-	Action      string                 `json:"action"`
-	SessionKey  string                 `json:"session_key"`
-	Payload     map[string]interface{} `json:"payload"`
+	ID              string                 `json:"event_id"`
+	Type            Type                   `json:"type"`
+	Repository      string                 `json:"repository"`
+	IssueNumber     int                    `json:"issue_number,omitempty"`
+	PRNumber        int                    `json:"pr_number,omitempty"`
+	TriggeringIssue int                    `json:"triggering_issue,omitempty"`
+	Sender          string                 `json:"sender"`
+	Action          string                 `json:"action"`
+	SessionKey      string                 `json:"session_key"`
+	Payload         map[string]interface{} `json:"payload"`
 }
 
 // NewEvent creates a new event with a UUIDv7-style ID.

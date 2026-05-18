@@ -3,9 +3,12 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/fordjent/fordjent/internal/sentinel"
 )
 
 func TestGetIssue(t *testing.T) {
@@ -161,9 +164,170 @@ func TestURLPathEscaping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// escapeRepoPath("org/repo-with/slashes") = "org/repo-with/slashes"
+	// EscapeRepoPath("org/repo-with/slashes") = "org/repo-with/slashes"
 	expected := "/api/v1/repos/org/repo-with/slashes/issues/1"
 	if receivedPath != expected {
 		t.Errorf("expected path %s, got %s", expected, receivedPath)
+	}
+}
+
+func TestAddIssueLabels_CreateLabel422Swallowed(t *testing.T) {
+	var labelCreateCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode([]Label{})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(Issue{Number: 5, Labels: nil})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodPost:
+			labelCreateCalled = true
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			w.Write([]byte(`{"message": "label already exists"}`))
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5/labels" && r.Method == http.MethodPost:
+			json.NewEncoder(w).Encode(map[string]interface{}{})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.AddIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err != nil {
+		t.Fatalf("422 should be swallowed, got error: %v", err)
+	}
+	if !labelCreateCalled {
+		t.Error("expected CreateLabel to be called")
+	}
+}
+
+func TestAddIssueLabels_CreateLabel403Propagated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode([]Label{})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(Issue{Number: 5, Labels: nil})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"message": "forbidden"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.AddIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err == nil {
+		t.Fatal("expected 403 error to propagate, got nil")
+	}
+	var apiErr *sentinel.ErrAPIClient
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 {
+		t.Errorf("expected ErrAPIClient with 403, got: %v", err)
+	}
+}
+
+func TestAddIssueLabels_RetryListLabelsError(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			if callCount == 1 {
+				json.NewEncoder(w).Encode([]Label{})
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"message": "server error"}`))
+			}
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(Issue{Number: 5, Labels: nil})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.AddIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err == nil {
+		t.Fatal("expected retry ListLabels error to propagate, got nil")
+	}
+}
+
+func TestAddIssueLabels_PostCreateListLabelsError(t *testing.T) {
+	labelCreated := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			if !labelCreated {
+				json.NewEncoder(w).Encode([]Label{})
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"message": "server error"}`))
+			}
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(Issue{Number: 5, Labels: nil})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodPost:
+			labelCreated = true
+			json.NewEncoder(w).Encode(Label{ID: 99, Name: "newlabel"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.AddIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err == nil {
+		t.Fatal("expected post-create ListLabels error to propagate, got nil")
+	}
+}
+
+func TestReplaceIssueLabels_CreateLabel422Swallowed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode([]Label{})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			w.Write([]byte(`{"message": "label already exists"}`))
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/issues/5/labels" && r.Method == http.MethodPut:
+			json.NewEncoder(w).Encode(map[string]interface{}{})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.ReplaceIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err != nil {
+		t.Fatalf("422 should be swallowed, got error: %v", err)
+	}
+}
+
+func TestReplaceIssueLabels_CreateLabel403Propagated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode([]Label{})
+		case r.URL.EscapedPath() == "/api/v1/repos/org/repo/labels" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"message": "forbidden"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token")
+	err := client.ReplaceIssueLabels(context.Background(), "org/repo", 5, []string{"newlabel"})
+	if err == nil {
+		t.Fatal("expected 403 error to propagate, got nil")
+	}
+	var apiErr *sentinel.ErrAPIClient
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 {
+		t.Errorf("expected ErrAPIClient with 403, got: %v", err)
 	}
 }

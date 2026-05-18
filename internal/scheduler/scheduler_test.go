@@ -68,7 +68,7 @@ func TestOnPRMerged_UnblocksDependentIssue(t *testing.T) {
 	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
 	s := New(adapter)
 
-	err := s.OnPRMerged(context.Background(), "fjadmin/gogit", 10)
+	_, err := s.OnPRMerged(context.Background(), "fjadmin/gogit", 10)
 	if err != nil {
 		t.Fatalf("OnPRMerged error: %v", err)
 	}
@@ -210,4 +210,139 @@ func TestIsIssueClosed_MergedPRIsSatisfied(t *testing.T) {
 	if !closed {
 		t.Error("merged PR dependency should be treated as satisfied")
 	}
+}
+
+func TestPMReactivate_AllSubIssuesComplete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/repos/fjadmin/gogit/issues":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"number": 5,
+					"title":  "[pm] Implement auth system",
+					"body":   "Decompose auth work.\n\nDepends on: #10, #11",
+					"state":  "open",
+					"labels": []map[string]interface{}{
+						{"name": "role:pm"},
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/issues/10"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":       "closed",
+				"merged":      true,
+				"pull_request": nil,
+			})
+		case strings.HasSuffix(r.URL.Path, "/issues/11"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":       "closed",
+				"merged":      true,
+				"pull_request": nil,
+			})
+		case r.URL.Path == "/api/v1/repos/fjadmin/gogit/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	issues := []Issue{
+		{Number: 5, Title: "[pm] Implement auth system", Body: "Depends on: #10, #11", State: "open", Labels: []Label{{Name: "role:pm"}}},
+	}
+
+	results := s.CheckPMReactivation(context.Background(), "fjadmin/gogit", 10, issues)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 PM reactivation result, got %d", len(results))
+	}
+	if results[0].ParentIssueNumber != 5 {
+		t.Errorf("expected parent issue #5, got #%d", results[0].ParentIssueNumber)
+	}
+	if results[0].TriggeringIssue != 10 {
+		t.Errorf("expected triggering issue #10, got #%d", results[0].TriggeringIssue)
+	}
+	fmt.Println("✅ PM reactivation emitted when all sub-issues complete")
+}
+
+func TestPMReactivate_SomeSubIssuesStillOpen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/10"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":       "closed",
+				"merged":      true,
+				"pull_request": nil,
+			})
+		case strings.HasSuffix(r.URL.Path, "/issues/11"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":  "open",
+				"merged": false,
+				"pull_request": map[string]interface{}{
+					"url": "http://localhost:3000/api/v1/repos/fjadmin/gogit/pulls/11",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	issues := []Issue{
+		{Number: 5, Title: "[pm] Implement auth system", Body: "Depends on: #10, #11", State: "open", Labels: []Label{{Name: "role:pm"}}},
+	}
+
+	results := s.CheckPMReactivation(context.Background(), "fjadmin/gogit", 10, issues)
+	if len(results) != 0 {
+		t.Errorf("expected 0 PM reactivation results (sub-issue #11 still open), got %d", len(results))
+	}
+	fmt.Println("✅ PM reactivation NOT emitted when some sub-issues still open")
+}
+
+func TestPMReactivate_NonPMParent(t *testing.T) {
+	adapter := tool.NewForgejoAdapter("http://localhost:9999", "test-token")
+	s := New(adapter)
+
+	issues := []Issue{
+		{Number: 5, Title: "Implement auth system", Body: "Depends on: #10, #11", State: "open", Labels: []Label{}},
+	}
+
+	results := s.CheckPMReactivation(context.Background(), "fjadmin/gogit", 10, issues)
+	if len(results) != 0 {
+		t.Errorf("expected 0 PM reactivation results for non-PM parent, got %d", len(results))
+	}
+	fmt.Println("✅ PM reactivation NOT emitted for non-PM parent issues")
+}
+
+func TestIsPMIssue(t *testing.T) {
+	cases := []struct {
+		title  string
+		labels []Label
+		want   bool
+	}{
+		{"[pm] Do the thing", nil, true},
+		{"[decompose] Break it down", nil, true},
+		{"[PM] Uppercase tag", nil, true},
+		{"Regular issue", nil, false},
+		{"Implement feature", []Label{{Name: "role:pm"}}, true},
+		{"Implement feature", []Label{{Name: "role:project-manager"}}, true},
+		{"Implement feature", []Label{{Name: "role:implementer"}}, false},
+	}
+
+	for _, tc := range cases {
+		issue := Issue{Title: tc.title, Labels: tc.labels}
+		got := isPMIssue(issue)
+		if got != tc.want {
+			t.Errorf("isPMIssue(%q, %v) = %v, want %v", tc.title, tc.labels, got, tc.want)
+		}
+	}
+	fmt.Println("✅ isPMIssue tests passed")
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/scaffold"
+	"github.com/fordjent/fordjent/internal/sandbox"
 	"github.com/fordjent/fordjent/internal/scheduler"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
@@ -26,16 +27,18 @@ import (
 
 // Session represents an active agent session bound to a session key.
 type Session struct {
-	Key         string
-	Repository  string
-	IssueNumber int
-	PRNumber    int
-	IssueTitle  string
-	WorkDir     string
-	RepoDir     string
-	LastActive  time.Time
-	Cancel      context.CancelFunc
-	Sender      string // original webhook sender (e.g. fordjent-bot)
+	Key              string
+	Repository       string
+	IssueNumber      int
+	PRNumber         int
+	IssueTitle       string
+	WorkDir          string
+	RepoDir          string
+	LastActive       time.Time
+	Cancel           context.CancelFunc
+	Sender           string // original webhook sender (e.g. fordjent-bot)
+	IsPMFollowUp     bool   // true if this is a PM re-activation follow-up session
+	TriggeringIssue  int    // the sub-issue that triggered the PM re-activation
 
 	claimedReady bool // set when this session claimed a ready→in_progress transition
 
@@ -72,25 +75,52 @@ func (a *agentConfigAdapter) IsScaffold() bool { return a.isScaffold }
 
 // Manager manages agent session lifecycle.
 type Manager struct {
-	cfg           *config.Config
-	bus           *event.Bus
-	sessions      map[string]*Session
-	mu            sync.RWMutex
-	store         *Store
-	forgejoClient *forgejo.Client
-	adminClient   *forgejo.Client // repo-owner-level client for collab/label setup
-	lc            *lifecycle.Lifecycle
-	mqClient      *mergequeue.Client
-	scheduler     *scheduler.Scheduler
-	costTracker   *cost.Tracker
-	labelBoot     sync.Map // repo → bool, tracks which repos have had labels ensured
-	issueStates   sync.Map // "repo/issues/N" → lifecycle.IssueState, tracks previous FSM state
+	cfg              *config.Config
+	bus             *event.Bus
+	sessions        map[string]*Session
+	mu              sync.RWMutex
+	store           *Store
+	forgejoClient   *forgejo.Client
+	adminClient     *forgejo.Client // repo-owner-level client for collab/label setup
+	lc              *lifecycle.Lifecycle
+	mqClient        *mergequeue.Client
+	scheduler       *scheduler.Scheduler
+	costTracker     *cost.Tracker
+	sandboxReporter *SandboxReporter
+	labelBoot       sync.Map // repo → bool, tracks which repos have had labels ensured
+	issueStates     sync.Map // "repo/issues/N" → lifecycle.IssueState, tracks previous FSM state
+}
+
+// SandboxReporter implements sandbox.ErrorReporter by posting violation comments to Forgejo.
+type SandboxReporter struct {
+	client *forgejo.Client
+}
+
+func NewSandboxReporter(client *forgejo.Client) *SandboxReporter {
+	return &SandboxReporter{client: client}
+}
+
+func (r *SandboxReporter) ReportSandboxViolation(ctx context.Context, repo string, issueNumber int, err sandbox.SandboxError) {
+	comment := sandbox.BuildViolationComment(err, 0)
+	if r.client != nil {
+		if postErr := r.client.PostIssueComment(ctx, repo, issueNumber, comment); postErr != nil {
+			slog.Warn("failed to post sandbox violation comment", "error", postErr, "issue", issueNumber, "repo", repo)
+		}
+	}
 }
 
 // Lifecycle returns the lifecycle tracker for external wiring (e.g., webhook delivery logging).
 func (m *Manager) Lifecycle() *lifecycle.Lifecycle { return m.lc }
 func (m *Manager) ForgejoClient() *forgejo.Client  { return m.forgejoClient }
 func (m *Manager) AdminClient() *forgejo.Client    { return m.adminClient }
+
+func (m *Manager) HasActiveSession(repo string, issueNumber int) bool {
+	key := fmt.Sprintf("%s/issues/%d", repo, issueNumber)
+	m.mu.RLock()
+	_, exists := m.sessions[key]
+	m.mu.RUnlock()
+	return exists
+}
 
 func resolveDBPath(cfgPath, workDir string) string {
 	if cfgPath != "" {
@@ -140,14 +170,15 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	}
 
 	m := &Manager{
-		cfg:           cfg,
-		bus:           bus,
-		sessions:      make(map[string]*Session),
-		store:         store,
-		costTracker:   costTracker,
-		forgejoClient: forgejoClient,
-		adminClient:   adminClient,
-		lc:            lc,
+		cfg:              cfg,
+		bus:              bus,
+		sessions:         make(map[string]*Session),
+		store:            store,
+		costTracker:      costTracker,
+		forgejoClient:    forgejoClient,
+		adminClient:      adminClient,
+		lc:               lc,
+		sandboxReporter:  NewSandboxReporter(forgejoClient),
 	}
 
 	// Wire merge queue and scheduler (both need Forgejo API access)
@@ -292,11 +323,34 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		go func() {
 			schedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := m.scheduler.OnPRMerged(schedCtx, evt.Repository, evt.PRNumber); err != nil {
+			pmResults, err := m.scheduler.OnPRMerged(schedCtx, evt.Repository, evt.PRNumber)
+			if err != nil {
 				slog.Warn("scheduler: failed to process merged PR", "error", err, "pr", evt.PRNumber, "repo", evt.Repository)
 			} else {
 				slog.Info("scheduler: processed merged PR", "pr", evt.PRNumber, "repo", evt.Repository)
 			}
+
+			// PM reactivation: if all sub-issues of a PM parent are complete,
+			// publish PMReactivate events to create follow-up sessions.
+			for _, pmr := range pmResults {
+				slog.Info("scheduler: PM parent issue fully resolved, emitting PMReactivate",
+					"parent_issue", pmr.ParentIssueNumber,
+					"triggering_issue", pmr.TriggeringIssue,
+					"repo", evt.Repository,
+				)
+				reactivateEvt := event.NewEvent(
+					event.PMReactivate,
+					evt.Repository,
+					pmr.ParentIssueNumber,
+					0,
+					"fordjent-scheduler",
+					"reactivate",
+				)
+				reactivateEvt.TriggeringIssue = pmr.TriggeringIssue
+				reactivateEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, pmr.ParentIssueNumber)
+				m.bus.Publish(schedCtx, reactivateEvt)
+			}
+
 			// Auto-requeue any blocked branches whose merge-gate may now be clear.
 			if m.mqClient != nil && m.lc != nil {
 				time.Sleep(2 * time.Second) // let Forgejo update file indices
@@ -533,6 +587,29 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// PM Reactivation: when the scheduler detects that all sub-issues of a PM
+	// parent are complete, it emits a PMReactivate event. Create a fresh
+	// follow-up session for the parent PM issue.
+	if evt.Type == event.PMReactivate && evt.IssueNumber > 0 {
+		timestamp := time.Now().Unix()
+		sessionKey := fmt.Sprintf("%s/issues/%d/pm-followup-%d", evt.Repository, evt.IssueNumber, timestamp)
+		reactivateEvt := event.NewEvent(event.PMReactivate, evt.Repository, evt.IssueNumber, 0, evt.Sender, "reactivate")
+		reactivateEvt.TriggeringIssue = evt.TriggeringIssue
+		reactivateEvt.SessionKey = sessionKey
+		reactivateEvt.Payload = map[string]interface{}{
+			"pm_followup":       true,
+			"parent_issue":      evt.IssueNumber,
+			"triggering_issue":  evt.TriggeringIssue,
+		}
+		slog.Info("PM reactivation: creating follow-up session",
+			"parent_issue", evt.IssueNumber,
+			"triggering_issue", evt.TriggeringIssue,
+			"session_key", sessionKey,
+		)
+		m.handleEvent(ctx, reactivateEvt)
+		return
+	}
+
 	if evt.SessionKey == "" {
 		slog.Warn("event with empty session key, dropping", "event_id", evt.ID)
 		return
@@ -665,17 +742,19 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		sessCtx, cancel = context.WithCancel(context.Background())
 	}
 	sess = &Session{
-		Key:         evt.SessionKey,
-		Repository:  evt.Repository,
-		IssueNumber: evt.IssueNumber,
-		PRNumber:    evt.PRNumber,
-		IssueTitle:  extractIssueTitle(evt),
-		WorkDir:     workDir,
-		RepoDir:     repoDir,
-		LastActive:  time.Now(),
-		Cancel:      cancel,
-		Sender:      evt.Sender,
-		events:      make(chan *event.Event, 64),
+		Key:             evt.SessionKey,
+		Repository:      evt.Repository,
+		IssueNumber:     evt.IssueNumber,
+		PRNumber:        evt.PRNumber,
+		IssueTitle:      extractIssueTitle(evt),
+		WorkDir:         workDir,
+		RepoDir:         repoDir,
+		LastActive:      time.Now(),
+		Cancel:          cancel,
+		Sender:          evt.Sender,
+		IsPMFollowUp:    evt.Type == event.PMReactivate,
+		TriggeringIssue: evt.TriggeringIssue,
+		events:          make(chan *event.Event, 64),
 	}
 
 	m.sessions[evt.SessionKey] = sess
@@ -712,6 +791,12 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	// Detect role from issue or PR title/labels before agent construction
 	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
+
+	// PM follow-up sessions always use the PM role
+	if sess.IsPMFollowUp {
+		role = "pm"
+	}
+
 	// All PRs get a reviewer session to inspect and merge code.
 	// Bot PRs retain auto-bypass for merge approval (handled in forgejo_merge_pr tool).
 	if sess.PRNumber > 0 && (role == "" || role == "implementer") {
@@ -752,7 +837,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 		}
 	}
 
-	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role)
+	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter)
 
 	for {
 		select {
@@ -1148,6 +1233,101 @@ func detectRoleFromIssue(issue *forgejo.Issue) string {
 			return "tester"
 		case "role:implementer", "role:developer":
 			return "implementer"
+		}
+	}
+	role = detectRoleFromBody(issue.Body)
+	if role != "" {
+		return role
+	}
+	return ""
+}
+
+var bodyRolePatterns = []struct {
+	role     string
+	patterns []string
+}{
+	{"devops", []string{
+		"this is a devops task",
+		"role: devops",
+		"role:devops",
+		"role: infrastructure",
+		"as devops",
+		"devops should",
+		"ci/cd pipeline",
+		"ci/cd task",
+	}},
+	{"pm", []string{
+		"this is a pm task",
+		"this is a project manager task",
+		"role: pm",
+		"role:pm",
+		"role: project manager",
+		"as pm",
+		"as project manager",
+		"pm should",
+		"decompose this",
+		"break down this",
+		"break down the work",
+		"plan and coordinate",
+		"coordinate the work",
+	}},
+	{"reviewer", []string{
+		"this is a reviewer task",
+		"this is a review task",
+		"this is a code review task",
+		"role: reviewer",
+		"role:reviewer",
+		"role: code reviewer",
+		"as reviewer",
+		"as code reviewer",
+		"reviewer should",
+	}},
+	{"tester", []string{
+		"this is a tester task",
+		"this is a test task",
+		"this is a qa task",
+		"role: tester",
+		"role:tester",
+		"role: test",
+		"role: qa",
+		"as tester",
+		"as qa",
+		"tester should",
+		"integration test",
+	}},
+	{"implementer", []string{
+		"this is a implementer task",
+		"this is a implement task",
+		"this is a developer task",
+		"this is a dev task",
+		"role: implementer",
+		"role:implementer",
+		"role: implement",
+		"role: developer",
+		"role:developer",
+		"role: dev,",
+		"role: dev\n",
+		"as implementer",
+		"as implement",
+		"as developer",
+		"as dev,",
+		"as dev\n",
+		"implementer should",
+		"developer should",
+		"write code",
+	}},
+}
+
+func detectRoleFromBody(body string) string {
+	if body == "" {
+		return ""
+	}
+	lower := strings.ToLower(body)
+	for _, group := range bodyRolePatterns {
+		for _, pattern := range group.patterns {
+			if strings.Contains(lower, pattern) {
+				return group.role
+			}
 		}
 	}
 	return ""

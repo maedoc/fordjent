@@ -9,6 +9,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/forgejo"
 )
 
 func TestManagerCreatesSession(t *testing.T) {
@@ -352,5 +353,84 @@ func TestDetectRoleFromTitle(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("detectRoleFromTitle(%q) = %q, want %q", tt.title, got, tt.want)
 		}
+	}
+}
+
+func TestDetectRoleFromBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty body", "", ""},
+		{"no role keywords", "Fix the login bug by updating the auth handler", ""},
+		{"ambiguous build", "Build a simple API endpoint", ""},
+		{"ambiguous test word", "Add a test for the build process", ""},
+		{"implementer: role prefix", "role: implementer\n\nAdd auth module", "implementer"},
+		{"implementer: as implementer", "As implementer, I should add the login feature", "implementer"},
+		{"implementer: write code", "Write code to implement the payment flow", "implementer"},
+		{"implementer: as developer", "As developer, please implement this", "implementer"},
+		{"implementer: this is a implementer task", "This is a implementer task for the auth module", "implementer"},
+		{"pm: role pm", "role: pm\n\nCoordinate the release", "pm"},
+		{"pm: as pm", "As pm, break down the feature into sub-issues", "pm"},
+		{"pm: decompose this", "Please decompose this into smaller tasks", "pm"},
+		{"pm: break down the work", "Break down the work into sub-issues", "pm"},
+		{"pm: this is a pm task", "This is a PM task to plan the sprint", "pm"},
+		{"reviewer: role reviewer", "role: reviewer\n\nReview PR #5", "reviewer"},
+		{"reviewer: as reviewer", "As reviewer, check the code changes", "reviewer"},
+		{"reviewer: this is a review task", "This is a review task for the API", "reviewer"},
+		{"tester: role tester", "role: tester\n\nWrite integration tests", "tester"},
+		{"tester: as qa", "As QA, verify the release works", "tester"},
+		{"tester: integration test", "This is an integration test task for the API", "tester"},
+		{"devops: role devops", "role: devops\n\nSet up CI pipeline", "devops"},
+		{"devops: as devops", "As devops, configure the deployment", "devops"},
+		{"devops: ci/cd pipeline", "This is a CI/CD pipeline task", "devops"},
+		{"priority: implementer over pm", "role: implementer\n\nAlso some pm-like text", "implementer"},
+		{"case insensitive", "Role: PM\n\nPlan the sprint", "pm"},
+		{"no false positive on build", "We need to build the docker image", ""},
+		{"no false positive on plan", "Plan the implementation of feature X", ""},
+		{"no false positive on test in sentence", "This is a test of the build system", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectRoleFromBody(tt.body)
+			if got != tt.want {
+				t.Errorf("detectRoleFromBody(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectRoleFromIssueBodyFallback(t *testing.T) {
+	tests := []struct {
+		name   string
+		title  string
+		labels []string
+		body   string
+		want   string
+	}{
+		{"title takes priority", "[pm] Plan sprint", nil, "role: implementer", "pm"},
+		{"label takes priority over body", "Fix bug", []string{"role:reviewer"}, "role: implementer", "reviewer"},
+		{"body fallback when no title/label", "Fix bug", nil, "role: implementer", "implementer"},
+		{"body fallback for pm", "Plan the work", nil, "This is a PM task to decompose", "pm"},
+		{"no role anywhere", "Fix bug", nil, "Update the login handler", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &forgejo.Issue{
+				Title: tt.title,
+				Body:  tt.body,
+			}
+			if tt.labels != nil {
+				issue.Labels = make([]forgejo.Label, len(tt.labels))
+				for i, l := range tt.labels {
+					issue.Labels[i] = forgejo.Label{Name: l}
+				}
+			}
+			got := detectRoleFromIssue(issue)
+			if got != tt.want {
+				t.Errorf("detectRoleFromIssue() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

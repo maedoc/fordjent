@@ -778,3 +778,51 @@ func TestOpenPRCommentNotSkipped(t *testing.T) {
 		t.Error("comment on open PR should NOT be skipped")
 	}
 }
+
+func TestIsAgentEvent_PingParentMarkerNotFiltered(t *testing.T) {
+	cfg := &config.Config{
+		Webhook:  config.WebhookConfig{Secret: ""},
+		Security: config.SecurityConfig{FilterAgentEvents: true},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	payload := map[string]interface{}{
+		"action": "created",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "fordjent-bot"},
+		"issue":      map[string]interface{}{"number": float64(5)},
+		"comment": map[string]interface{}{
+			"id":   float64(200),
+			"body": "**[Implementer → PM]** Should I return an error or a boolean?\n\n<!-- ford-ping -->",
+		},
+	}
+
+	if router.isAgentEvent(payload) {
+		t.Error("implementer→PM ping comment with <!-- ford-ping --> marker should NOT be filtered")
+	}
+}
+
+func TestIsAgentEvent_PingParentMarkerStillFiltersFordMarker(t *testing.T) {
+	cfg := &config.Config{
+		Webhook:  config.WebhookConfig{Secret: ""},
+		Security: config.SecurityConfig{FilterAgentEvents: true},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	payload := map[string]interface{}{
+		"action": "created",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "fordjent-bot"},
+		"issue":      map[string]interface{}{"number": float64(5)},
+		"comment": map[string]interface{}{
+			"id":   float64(200),
+			"body": "Session completed.\n\n<!-- ford -->",
+		},
+	}
+
+	if !router.isAgentEvent(payload) {
+		t.Error("comment with <!-- ford --> marker (no ford-ping) should still be filtered")
+	}
+}

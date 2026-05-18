@@ -6,17 +6,19 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -26,10 +28,12 @@ var priorityRegex = regexp.MustCompile(`(?i)priority\s*:\s*(\d+)`)
 
 // Scheduler wraps a Forgejo client and provides dependency management.
 type Scheduler struct {
-	BaseURL       string
-	Token         string
-	HTTP          *http.Client
-	forgejoClient *forgejo.Client
+	BaseURL            string
+	Token              string
+	HTTP               *http.Client
+	forgejoClient      *forgejo.Client
+	recheckDelayForTest time.Duration
+	recheckHook         func()
 }
 
 // New creates a Scheduler from a ForgejoAdapter.
@@ -64,8 +68,18 @@ type Label struct {
 // OnPRMerged is called whenever a PR is merged. It scans open issues for
 // any whose declared dependencies are all closed (satisfied), removes their
 // 'blocked' label, and adds a 'ready' label. It also posts a comment.
-func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber int) error {
-	return s.checkAndUnblock(ctx, repo, mergedPRNumber)
+func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber int) ([]PMReactivateResult, error) {
+	err := s.checkAndUnblock(ctx, repo, mergedPRNumber)
+	var pmResults []PMReactivateResult
+	if mergedPRNumber > 0 {
+		issues, listErr := s.listOpenIssues(ctx, repo)
+		if listErr != nil {
+			slog.Warn("scheduler: failed to list issues for PM reactivation check", "error", listErr)
+		} else {
+			pmResults = s.CheckPMReactivation(ctx, repo, mergedPRNumber, issues)
+		}
+	}
+	return pmResults, err
 }
 
 // CheckAndUnblock scans all open issues for satisfied dependencies and unblocks them.
@@ -113,8 +127,9 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 	}
 	var candidates []candidate
 
+	var hadRetryExhausted bool
+
 	for _, issue := range issues {
-		// Skip issues in dependency cycles
 		if cycleSet[issue.Number] {
 			continue
 		}
@@ -124,12 +139,18 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 			continue
 		}
 
-		// Check if ALL declared dependencies are closed (satisfied).
 		allSatisfied := true
 		for _, depNum := range deps {
 			isClosed, err := s.isIssueClosed(ctx, repo, depNum)
 			if err != nil {
-				slog.Warn("scheduler: failed to check issue state, assuming not closed", "error", err, "issue", depNum)
+				var ree *RetryExhaustedError
+				if errors.As(err, &ree) {
+					slog.Warn("scheduler: isIssueClosed exhausted retries, scheduling deferred re-check",
+						"error", err, "issue", depNum, "repo", repo)
+					hadRetryExhausted = true
+				} else {
+					slog.Warn("scheduler: failed to check issue state", "error", err, "issue", depNum)
+				}
 				allSatisfied = false
 				break
 			}
@@ -195,6 +216,11 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 		s.checkParentCompletion(ctx, repo, mergedPRNumber, issues)
 	}
 
+	// 6. Schedule deferred re-check if any API calls exhausted retries
+	if hadRetryExhausted {
+		s.scheduleRecheck(repo, mergedPRNumber)
+	}
+
 	return nil
 }
 
@@ -203,10 +229,65 @@ type ParentIssue struct {
 	Number      int
 	NumChildren int
 	ClosedCount int
+	IsPM        bool
+}
+
+// PMReactivateResult holds a parent PM issue that should be re-activated.
+type PMReactivateResult struct {
+	ParentIssueNumber int
+	TriggeringIssue   int
+}
+
+// CheckPMReactivation scans for PM parent issues whose dependencies are
+// all satisfied. Returns a list of PM issues that should be re-activated.
+func (s *Scheduler) CheckPMReactivation(ctx context.Context, repo string, mergedPRNumber int, issues []Issue) []PMReactivateResult {
+	var results []PMReactivateResult
+	parents := findParentIssues(mergedPRNumber, issues)
+	for _, parent := range parents {
+		if !isPMIssue(parent) {
+			continue
+		}
+		deps := parseDependsOn(parent.Body)
+		if len(deps) == 0 {
+			continue
+		}
+		allSatisfied := true
+		for _, depNum := range deps {
+			isClosed, err := s.isIssueClosed(ctx, repo, depNum)
+			if err != nil || !isClosed {
+				allSatisfied = false
+				break
+			}
+		}
+		if allSatisfied {
+			results = append(results, PMReactivateResult{
+				ParentIssueNumber: parent.Number,
+				TriggeringIssue:   mergedPRNumber,
+			})
+		}
+	}
+	return results
+}
+
+// isPMIssue checks if an issue has a PM role label or [pm]/[decompose] title tag.
+func isPMIssue(issue Issue) bool {
+	lower := strings.ToLower(issue.Title)
+	if strings.Contains(lower, "[pm]") || strings.Contains(lower, "[project manager]") || strings.Contains(lower, "[decompose]") {
+		return true
+	}
+	for _, label := range issue.Labels {
+		name := strings.ToLower(label.Name)
+		if name == "role:pm" || name == "role:project-manager" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkParentCompletion checks if all children of a parent issue are closed.
-// If so, posts a completion comment on the parent and closes it.
+// For PM parent issues, it does NOT auto-close — instead, the PM reactivation
+// flow gives the PM a chance to summarize and decide next steps.
+// For non-PM parents, it posts a completion comment and closes them.
 func (s *Scheduler) checkParentCompletion(ctx context.Context, repo string, mergedPRNumber int, issues []Issue) {
 	// In Forgejo, PR numbers and issue numbers share the same namespace.
 	// The merged PR number IS the issue number.
@@ -235,6 +316,14 @@ func (s *Scheduler) checkParentCompletion(ctx context.Context, repo string, merg
 		closedCount++ // count the just-merged one
 
 		if allClosed && closedCount == len(childrenNums) {
+			// PM parent issues: do NOT auto-close — the PM reactivation session
+			// will handle summary and closure decision.
+			if isPMIssue(parent) {
+				slog.Info("scheduler: all children complete for PM parent, deferring to PM reactivation",
+					"repo", repo, "parent", parent.Number, "children", childrenNums)
+				continue
+			}
+
 			slog.Info("scheduler: all children complete, closing parent",
 				"repo", repo, "parent", parent.Number, "children", childrenNums)
 
@@ -269,7 +358,7 @@ func findParentIssues(childNum int, issues []Issue) []Issue {
 
 // closeIssue closes an issue via PATCH.
 func (s *Scheduler) closeIssue(ctx context.Context, repo string, issueNum int) error {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, issueNum)
 	return s.doPatch(ctx, apiPath, map[string]string{"state": "closed"})
 }
@@ -383,7 +472,7 @@ func parseDependsOn(body string) []int {
 
 // listOpenIssues returns all open issues in a repo.
 func (s *Scheduler) listOpenIssues(ctx context.Context, repo string) ([]Issue, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues?state=open", escaped)
 	body, err := s.doGet(ctx, apiPath)
 	if err != nil {
@@ -401,40 +490,37 @@ func (s *Scheduler) listOpenIssues(ctx context.Context, repo string) ([]Issue, e
 // An open issue with no associated PR (e.g. a PM issue) is NOT considered
 // blocking — only issues with open PRs represent actual code dependencies.
 func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) (bool, error) {
-	escaped := escapeRepoPath(repo)
-	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, number)
-	body, err := s.doGet(ctx, apiPath)
-	if err != nil {
-		return false, err
-	}
-	var issue struct {
-		State       string `json:"state"`
-		Merged      bool   `json:"merged"`
-		PullRequest *struct {
-			URL string `json:"url"`
-		} `json:"pull_request"`
-	}
-	if err := json.Unmarshal([]byte(body), &issue); err != nil {
-		return false, fmt.Errorf("unmarshal issue: %w", err)
-	}
-	// Closed or merged = resolved
-	if issue.State == "closed" || issue.Merged {
-		return true, nil
-	}
-	// If the issue is open and has NO associated PR, it's not a code
-	// dependency — don't block on it. PM issues, scaffold issues, etc.
-	// should never block implementation.
-	if issue.PullRequest == nil || issue.PullRequest.URL == "" {
-		return true, nil
-	}
-	// Open issue with a PR = code in flight, still blocking
-	return false, nil
+	return retryDo(ctx, func() (bool, error) {
+		escaped := forgejo.EscapeRepoPath(repo)
+		apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escaped, number)
+		body, err := s.doGet(ctx, apiPath)
+		if err != nil {
+			return false, err
+		}
+		var issue struct {
+			State       string `json:"state"`
+			Merged      bool   `json:"merged"`
+			PullRequest *struct {
+				URL string `json:"url"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal([]byte(body), &issue); err != nil {
+			return false, fmt.Errorf("unmarshal issue: %w", err)
+		}
+		if issue.State == "closed" || issue.Merged {
+			return true, nil
+		}
+		if issue.PullRequest == nil || issue.PullRequest.URL == "" {
+			return true, nil
+		}
+		return false, nil
+	})
 }
 
 // resolveLabelID resolves a label name to its numeric ID via the Forgejo API.
 // Returns 0 if the label doesn't exist.
 func (s *Scheduler) resolveLabelID(ctx context.Context, repo, labelName string) (int64, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/labels", escaped)
 	body, err := s.doGet(ctx, apiPath)
 	if err != nil {
@@ -465,7 +551,7 @@ func (s *Scheduler) removeLabel(ctx context.Context, repo string, issueNum int, 
 	if labelID == 0 {
 		return nil // label doesn't exist, nothing to remove
 	}
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d/labels/%d", escaped, issueNum, labelID)
 	return s.doDelete(ctx, apiPath)
 }
@@ -480,14 +566,14 @@ func (s *Scheduler) addLabel(ctx context.Context, repo string, issueNum int, lab
 	if labelID == 0 {
 		return fmt.Errorf("label %q not found in repo", label)
 	}
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d/labels", escaped, issueNum)
 	return s.doPost(ctx, apiPath, map[string]interface{}{"labels": []int64{labelID}})
 }
 
 // postComment posts a comment on an issue or pull request.
 func (s *Scheduler) postComment(ctx context.Context, repo string, issueNum int, body string) error {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/issues/%d/comments", escaped, issueNum)
 	return s.doPost(ctx, apiPath, map[string]string{"body": body})
 }
@@ -511,6 +597,12 @@ func (s *Scheduler) doGet(ctx context.Context, apiPath string) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return "", err
+	}
+	if resp.StatusCode >= 500 {
+		return "", &sentinel.ErrAPIServer{StatusCode: resp.StatusCode, Body: string(data)}
+	}
+	if resp.StatusCode >= 400 {
+		return "", &sentinel.ErrAPIClient{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
@@ -543,6 +635,12 @@ func (s *Scheduler) doPost(ctx context.Context, apiPath string, body interface{}
 	if err != nil {
 		return err
 	}
+	if resp.StatusCode >= 500 {
+		return &sentinel.ErrAPIServer{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+	if resp.StatusCode >= 400 {
+		return &sentinel.ErrAPIClient{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -563,6 +661,14 @@ func (s *Scheduler) doDelete(ctx context.Context, apiPath string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 500 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &sentinel.ErrAPIServer{StatusCode: resp.StatusCode, Body: string(data)}
+	}
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &sentinel.ErrAPIClient{StatusCode: resp.StatusCode, Body: string(data)}
+	}
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
@@ -591,6 +697,14 @@ func (s *Scheduler) doPatch(ctx context.Context, apiPath string, body interface{
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 500 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &sentinel.ErrAPIServer{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &sentinel.ErrAPIClient{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
@@ -598,19 +712,11 @@ func (s *Scheduler) doPatch(ctx context.Context, apiPath string, body interface{
 	return nil
 }
 
-func escapeRepoPath(repo string) string {
-	parts := strings.Split(repo, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return strings.Join(parts, "/")
-}
-
 // hasOpenPR checks whether an issue has any associated open pull requests.
 // This is used by isIssueClosed to determine if an open issue is actually
 // a code dependency (has a PR) or just a coordination issue (no PR).
 func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int) (bool, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/pulls?state=open", escaped)
 	body, err := s.doGet(ctx, apiPath)
 	if err != nil {
@@ -627,7 +733,7 @@ func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int)
 	// by looking at PR titles/descriptions, but that's unreliable.
 	// A simpler approach: check if the issue IS a PR (Forgejo treats
 	// PRs as issues with extra fields).
-	escapedIssue := escapeRepoPath(repo)
+	escapedIssue := forgejo.EscapeRepoPath(repo)
 	issuePath := fmt.Sprintf("/api/v1/repos/%s/issues/%d", escapedIssue, issueNumber)
 	issueBody, err := s.doGet(ctx, issuePath)
 	if err != nil {

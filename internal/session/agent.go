@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
+	"github.com/fordjent/fordjent/internal/sandbox"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
@@ -46,9 +48,11 @@ type Agent struct {
 	analysisModeSet  bool
 	automerge        bool
 	automergeSet     bool
+	pmFollowUp       bool
+	triggeringIssue  int
 }
 
-func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.ProviderForRole(role)
 	var llmClient provider.ChatCompleter = provider.NewClient(prov)
@@ -68,21 +72,23 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 	isScaffold := strings.HasPrefix(strings.ToLower(sess.IssueTitle), "[scaffold]") || strings.HasPrefix(strings.ToLower(sess.IssueTitle), "scaffold")
 	agentCfg := &agentConfigAdapter{cfg: cfg, isScaffold: isScaffold}
 
-	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role)
+	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter)
 
 	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
 
 	return &Agent{
-		cfg:         cfg,
-		sess:        sess,
-		forgejo:     forgejoClient,
-		llm:         llmClient,
-		tools:       registry,
-		mem:         mem,
-		costTracker: ct,
-		executor:    executor,
-		lc:          lc,
-		role:        role,
+		cfg:             cfg,
+		sess:            sess,
+		forgejo:         forgejoClient,
+		llm:             llmClient,
+		tools:           registry,
+		mem:             mem,
+		costTracker:    ct,
+		executor:        executor,
+		lc:              lc,
+		role:            role,
+		pmFollowUp:      sess.IsPMFollowUp,
+		triggeringIssue: sess.TriggeringIssue,
 	}
 }
 
@@ -424,6 +430,21 @@ Before creating sub-issues that depend on code from parent issues:
 4. **CRITICAL**: In each sub-issue body, add a line 'Depends on: #N' (where #N is the parent issue or another sub-issue that must be completed first). This enables the scheduler to automatically unblock issues when their dependencies are merged. Example:
    - If issue #2 must be done before #3, add 'Depends on: #2' in #3's body.
    - If #4 depends on both #2 and #3, add 'Depends on: #2, #3'.`
+
+		if a.pmFollowUp {
+			modeInstructions += fmt.Sprintf(`
+
+## PM FOLLOW-UP MODE
+You are in PM Follow-up mode. All sub-issues of this parent PM issue have been completed (the last one was #%d).
+Your job is:
+1. Use forgejo_get_sub_issues to fetch the status of all sub-issues.
+2. Summarize the progress: which sub-issues are done, which are still open (if any).
+3. Identify next steps: create new issues if needed, or close the parent if all work is complete.
+4. If all sub-issues are complete and no new work is needed, post a completion summary comment on the parent issue using forgejo_comment and suggest closing it.
+5. If you identify additional work, use forgejo_create_issue to file new sub-issues.
+6. Do NOT write code. Do NOT create PRs.
+7. Post your follow-up summary as a comment on the parent issue.`, a.triggeringIssue)
+		}
 	case "reviewer":
 		modeInstructions += `
 
@@ -461,7 +482,20 @@ You are in Test Engineering mode. Your focus is test quality and coverage:
 - Write comprehensive tests for new or existing functionality.
 - Run tests and report results.
 - Identify edge cases and failure modes.
-- Create PRs with test-only changes.`
+- Create PRs with test-only changes.
+
+If you encounter ambiguity or need clarification on requirements, use forgejo_ping_parent to ask the PM a question on the parent issue. Find the parent issue number from the 'Depends on: #N' reference in your issue body. Include your specific question and any relevant context about what's blocking you.`
+	case "implementer":
+		modeInstructions += `
+
+## ROLE: Implementer
+You are in Implementer mode. Your focus is writing production code:
+- Read and understand the requirements from the issue and parent context.
+- Implement the required functionality with clean, minimal changes.
+- Write tests for your implementation.
+- Create a PR when done.
+
+If you encounter ambiguity or need clarification on requirements, use forgejo_ping_parent to ask the PM a question on the parent issue. Find the parent issue number from the 'Depends on: #N' reference in your issue body. Include your specific question and any relevant context about what's blocking you. The PM will respond on the parent issue.`
 	}
 
 	stateInstructions := issueStateInstructions(fsmState)
@@ -580,6 +614,32 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 		}
 	}
 
+	// For PR review sessions, fetch parent issue context from closing references in the PR body
+	if evt.PRNumber > 0 {
+		var prBody string
+		// Try to get PR body from webhook payload first
+		if pr, ok := evt.Payload["pull_request"].(map[string]interface{}); ok {
+			if body, ok := pr["body"].(string); ok {
+				prBody = body
+			}
+		}
+		// If no body in payload, fetch from API
+		if prBody == "" {
+			pr, err := a.forgejo.GetPR(ctx, evt.Repository, evt.PRNumber)
+			if err == nil && pr != nil {
+				prBody = pr.Body
+			}
+		}
+		if prBody != "" {
+			if parentCtx := a.fetchParentContext(ctx, evt.Repository, prBody); parentCtx != "" {
+				messages = append(messages, provider.Message{
+					Role:    "user",
+					Content: parentCtx,
+				})
+			}
+		}
+	}
+
 	if a.cfg.Memory.Enabled {
 		summary, err := a.mem.Query(ctx, evt)
 		if err == nil && summary != "" {
@@ -588,6 +648,14 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 				Content: fmt.Sprintf("[Previous Agent Context]\n%s", summary),
 			})
 		}
+	}
+
+	// PM follow-up: inject a system directive to guide the follow-up session
+	if a.pmFollowUp && evt.IssueNumber > 0 {
+		messages = append([]provider.Message{{
+			Role:    "user",
+			Content: fmt.Sprintf("[SYSTEM] This is a PM follow-up session. The sub-issue #%d has just been completed. Use forgejo_get_sub_issues to check the status of all sub-issues for parent issue #%d, then post a follow-up summary.", a.triggeringIssue, evt.IssueNumber),
+		}}, messages...)
 	}
 
 	return messages, nil
@@ -600,7 +668,6 @@ func extractParentRef(body string) int {
 		idx := strings.Index(body, prefix)
 		if idx >= 0 {
 			rest := body[idx+len(prefix):]
-			// Read the issue number
 			var num int
 			for i := 0; i < len(rest) && rest[i] >= '0' && rest[i] <= '9'; i++ {
 				num = num*10 + int(rest[i]-'0')
@@ -611,6 +678,91 @@ func extractParentRef(body string) int {
 		}
 	}
 	return 0
+}
+
+// closingRefRe matches standard closing keywords: Closes, Fixes, Resolves, Close, Fix, Resolve
+// followed by an optional colon, optional whitespace, and #N. Case-insensitive.
+var closingRefRe = regexp.MustCompile(`(?i)(?:close(?:s)?|fix(?:es)?|resolve(?:s)?)\s*:?\s*#(\d+)`)
+
+// parseClosingRefs extracts all issue numbers referenced by closing keywords
+// in the given text (e.g., "Closes #5", "Fixes: #5, #6", "resolves #5").
+func parseClosingRefs(text string) []int {
+	matches := closingRefRe.FindAllStringSubmatch(text, -1)
+	seen := make(map[int]bool)
+	var refs []int
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		var num int
+		for _, ch := range m[1] {
+			if ch >= '0' && ch <= '9' {
+				num = num*10 + int(ch-'0')
+			}
+		}
+		if num > 0 && !seen[num] {
+			seen[num] = true
+			refs = append(refs, num)
+		}
+	}
+	return refs
+}
+
+// fetchParentContext fetches the bodies and comments of issues referenced by
+// closing keywords in the PR body. Returns a formatted string for the reviewer's
+// context, or empty string if no references found or on API errors (non-fatal).
+func (a *Agent) fetchParentContext(ctx context.Context, repo string, prBody string) string {
+	refs := parseClosingRefs(prBody)
+	if len(refs) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Parent Issue Context\nThis PR references the following issues:\n")
+
+	for _, issueNum := range refs {
+		issue, err := a.forgejo.GetIssue(ctx, repo, issueNum)
+		if err != nil {
+			slog.Warn("fetchParentContext: failed to get issue", "issue", issueNum, "error", err)
+			continue
+		}
+		if issue == nil {
+			continue
+		}
+
+		body := issue.Body
+		if len(body) > 2000 {
+			body = body[:2000] + "\n\n... (truncated)"
+		}
+
+		sb.WriteString(fmt.Sprintf("\n### Issue #%d: %s\n**Body**: %s\n", issueNum, issue.Title, body))
+
+		comments, err := a.forgejo.ListComments(ctx, repo, issueNum)
+		if err != nil {
+			slog.Warn("fetchParentContext: failed to list comments", "issue", issueNum, "error", err)
+			continue
+		}
+		if len(comments) > 0 {
+			sb.WriteString("**Comments**:\n")
+			limit := 5
+			if len(comments) < limit {
+				limit = len(comments)
+			}
+			for i := 0; i < limit; i++ {
+				c := comments[i]
+				cBody := c.Body
+				if len(cBody) > 500 {
+					cBody = cBody[:500] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("- @%s: %s\n", c.User, cBody))
+			}
+			if len(comments) > 5 {
+				sb.WriteString(fmt.Sprintf("- ... and %d more comments\n", len(comments)-5))
+			}
+		}
+	}
+
+	return sb.String()
 }
 
 func (a *Agent) eventToUserMessage(evt *event.Event) string {
@@ -743,8 +895,38 @@ func buildRoleRegistry(
 	sessionInfo tool.SessionInfo,
 	agentCfg tool.AgentConfig,
 	role string,
+	cfg *config.Config,
+	sandboxReporter sandbox.ErrorReporter,
 ) *tool.Registry {
 	registry := tool.NewRegistry()
+
+	sandboxCfg := sandbox.Config{
+		Enabled:               cfg.Sandbox.Enabled,
+		Backend:               cfg.Sandbox.Backend,
+		RepoDir:               sess.RepoDir,
+		TmpfsSizeMB:           cfg.Sandbox.TmpfsSizeMB,
+		KeepProfilesOnFailure: cfg.Sandbox.KeepProfilesOnFailure,
+		ViolationCommentThreshold: cfg.Sandbox.ViolationCommentThreshold,
+		AllowedWriteDirs:      cfg.Sandbox.AllowedWriteDirs,
+	}
+
+	// Auto-detect Go cache dirs for sandbox allowed-write paths
+	goCacheDirs := sandbox.DetectGoCacheDirs()
+	if len(goCacheDirs) > 0 {
+		sandboxCfg.AllowedWriteDirs = append(sandboxCfg.AllowedWriteDirs, goCacheDirs...)
+		slog.Info("auto-detected Go cache dirs for sandbox", "dirs", goCacheDirs)
+	}
+
+	// Create violation counter for sandbox errors
+	var violCounter *sandbox.ViolationCounter
+	if sandboxReporter != nil && cfg.Sandbox.Enabled {
+		violCounter = sandbox.NewViolationCounter(
+			cfg.Sandbox.ViolationCommentThreshold,
+			sandboxReporter,
+			sess.Repository,
+			sess.IssueNumber,
+		)
+	}
 
 	// Common tools: every role gets these
 	registry.Register(tool.NewCommentTool(forgejoAdapter))
@@ -752,7 +934,12 @@ func buildRoleRegistry(
 	registry.Register(tool.NewGetIssueTool(forgejoAdapter))
 	registry.Register(tool.NewSearchCodeTool(forgejoAdapter))
 	registry.Register(tool.NewAddReactionTool(forgejoAdapter))
-	registry.Register(tool.NewBashTool(sessionInfo, agentCfg))
+	bashT := tool.NewBashTool(sessionInfo, agentCfg)
+	bashT.SetSandboxConfig(sandboxCfg)
+	if violCounter != nil {
+		bashT.SetViolationCounter(violCounter, sess.Key)
+	}
+	registry.Register(bashT)
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 
 	// New common tools (branches, PRs, files, hooks, etc.)
@@ -770,6 +957,7 @@ func buildRoleRegistry(
 	switch role {
 	case "pm":
 		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 5))
+		registry.Register(tool.NewGetSubIssuesTool(forgejoAdapter))
 		// PM cannot write code, create PRs, or merge
 	case "reviewer":
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, true))
@@ -779,7 +967,12 @@ func buildRoleRegistry(
 	default:
 		registry.Register(tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0))
 		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
-		registry.Register(tool.NewGitTool(sessionInfo, agentCfg))
+		gitT := tool.NewGitTool(sessionInfo, agentCfg)
+		gitT.SetSandboxConfig(sandboxCfg)
+		if violCounter != nil {
+			gitT.SetViolationCounter(violCounter, sess.Key)
+		}
+		registry.Register(gitT)
 		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, false))
 		// Admin tools for implementer role
@@ -787,6 +980,10 @@ func buildRoleRegistry(
 		registry.Register(tool.NewCreateHookTool(forgejoAdapter))
 		registry.Register(tool.NewDeleteHookTool(forgejoAdapter))
 		registry.Register(tool.NewCreateTokenTool(forgejoAdapter))
+	}
+
+	if role == "implementer" || role == "tester" {
+		registry.Register(tool.NewPingParentTool(forgejoAdapter))
 	}
 
 	return registry

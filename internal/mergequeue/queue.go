@@ -11,9 +11,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strings"
 
+	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
@@ -115,7 +114,7 @@ func (c *Client) CheckGate(ctx context.Context, repo, headBranch, baseBranch str
 // compareBranchFiles returns the files that differ between baseBranch
 // and headBranch using the Forgejo compare API.
 func (c *Client) compareBranchFiles(ctx context.Context, repo, base, head string) ([]string, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/compare/%s...%s", escaped, base, head)
 	body, err := c.doGet(ctx, apiPath)
 	if err != nil {
@@ -148,7 +147,7 @@ func (c *Client) compareBranchFiles(ctx context.Context, repo, base, head string
 
 // listOpenPRs returns all currently open PRs for a repo.
 func (c *Client) listOpenPRs(ctx context.Context, repo string) ([]PullRequest, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/pulls?state=open", escaped)
 	body, err := c.doGet(ctx, apiPath)
 	if err != nil {
@@ -164,7 +163,7 @@ func (c *Client) listOpenPRs(ctx context.Context, repo string) ([]PullRequest, e
 
 // listPRFiles returns the list of files changed in a PR.
 func (c *Client) listPRFiles(ctx context.Context, repo string, number int) ([]string, error) {
-	escaped := escapeRepoPath(repo)
+	escaped := forgejo.EscapeRepoPath(repo)
 	apiPath := fmt.Sprintf("/api/v1/repos/%s/pulls/%d/files", escaped, number)
 	body, err := c.doGet(ctx, apiPath)
 	if err != nil {
@@ -206,14 +205,6 @@ func (c *Client) doGet(ctx context.Context, apiPath string) (string, error) {
 		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
 	}
 	return string(data), nil
-}
-
-func escapeRepoPath(repo string) string {
-	parts := strings.Split(repo, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return strings.Join(parts, "/")
 }
 
 func appendUniq(slice []string, s string) []string {

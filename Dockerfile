@@ -19,7 +19,9 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o fordjent ./cmd/fordjent
 FROM debian:bookworm-slim AS slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git && rm -rf /var/lib/apt/lists/*
+    ca-certificates curl git bubblewrap && rm -rf /var/lib/apt/lists/*
+
+RUN bwrap --version
 
 RUN useradd -m -d /var/lib/fordjent -s /bin/sh fordjent \
     && mkdir -p /var/lib/fordjent/work \
@@ -45,7 +47,9 @@ ENTRYPOINT ["entrypoint.sh"]
 # =============================================================================
 FROM golang:1.25-alpine AS full
 
-RUN apk add --no-cache build-base git ca-certificates curl
+RUN apk add --no-cache build-base git ca-certificates curl bubblewrap
+
+RUN bwrap --version
 
 # golangci-lint — only in the full image where verify gates run
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.64.8

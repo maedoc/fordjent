@@ -42,6 +42,14 @@ budget:
   max_session_cost: 2.00
   max_monthly_cost: 50.00
 
+sandbox:
+  enabled: true
+  backend: auto
+  tmpfs_size_mb: 64
+  keep_profiles_on_failure: true
+  violation_comment_threshold: 3
+  allowed_write_dirs: []
+
 providers:
   - name: "wafer-qwen"
     api_base: "https://pass.wafer.ai/v1"
@@ -124,5 +132,10 @@ memory:
 
 database:
   path: ""
+
+scanner:
+  enabled: true
+  interval: "5m"
+  repo: "fjadmin/testbed"
 
 log_level: "info"

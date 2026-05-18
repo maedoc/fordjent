@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 type interactionForgejo struct {
 	srv           *httptest.Server
+	mu            sync.Mutex
 	issueTitle    string
 	issueLabels   []string
 	issueState    string
@@ -43,6 +45,28 @@ func newInteractionForgejo(t *testing.T) *interactionForgejo {
 func (f *interactionForgejo) URL() string { return f.srv.URL }
 
 func (f *interactionForgejo) Close() { f.srv.Close() }
+
+func (f *interactionForgejo) setFields(labels []string, state string, setters ...func(*interactionForgejo)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issueLabels = labels
+	f.issueState = state
+	for _, s := range setters {
+		s(f)
+	}
+}
+
+func (f *interactionForgejo) closedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.closedIssues)
+}
+
+func (f *interactionForgejo) createdCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.createdIssues)
+}
 
 func (f *interactionForgejo) handler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -77,42 +101,59 @@ func (f *interactionForgejo) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *interactionForgejo) handleGetIssue(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
 	issueLabels := mergeLabels(f.issueLabels, f.addedLabels, nil)
 	roleLabels := buildLabelObjects(issueLabels)
+	title := f.issueTitle
+	state := f.issueState
+	isPR := f.isPR
+	f.mu.Unlock()
+
 	resp := map[string]interface{}{
 		"number": 42,
-		"title":  f.issueTitle,
+		"title":  title,
 		"body":   "Test body",
-		"state":  f.issueState,
+		"state":  state,
 		"labels": roleLabels,
 	}
-	if f.isPR {
+	if isPR {
 		resp["is_pull_request"] = true
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (f *interactionForgejo) handleGetPR(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	title := f.issueTitle
+	prState := f.prState
+	prHeadRef := f.prHeadRef
+	prMerged := f.prMerged
+	f.mu.Unlock()
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"number": 7,
-		"title":  f.issueTitle,
-		"state":  f.prState,
-		"head":   map[string]interface{}{"ref": f.prHeadRef, "label": f.prHeadRef},
+		"title":  title,
+		"state":  prState,
+		"head":   map[string]interface{}{"ref": prHeadRef, "label": prHeadRef},
 		"base":   map[string]interface{}{"ref": "main", "label": "main"},
-		"merged": f.prMerged,
+		"merged": prMerged,
 	})
 }
 
 func (f *interactionForgejo) handlePostComment(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
 	f.comments = append(f.comments, body["body"])
+	f.mu.Unlock()
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
 }
 
 func (f *interactionForgejo) handleListLabels(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
 	allLbls := mergeLabels(f.issueLabels, f.addedLabels, f.createdLabels)
+	f.mu.Unlock()
 	labels := []map[string]interface{}{}
 	id := int64(1)
 	for _, l := range allLbls {
@@ -125,9 +166,12 @@ func (f *interactionForgejo) handleListLabels(w http.ResponseWriter, r *http.Req
 func (f *interactionForgejo) handleCreateLabel(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
 	f.createdLabels = append(f.createdLabels, body["name"])
+	n := len(f.createdLabels)
+	f.mu.Unlock()
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": int64(len(f.createdLabels)), "name": body["name"]})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": int64(n), "name": body["name"]})
 }
 
 func (f *interactionForgejo) handleAddLabels(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +179,8 @@ func (f *interactionForgejo) handleAddLabels(w http.ResponseWriter, r *http.Requ
 	var body struct {
 		Labels []int64 `json:"labels"`
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if json.Unmarshal(raw, &body) == nil && len(body.Labels) > 0 {
 		f.addedLabelIDs = append(f.addedLabelIDs, body.Labels...)
 		allLabels := mergeLabels(f.issueLabels, f.addedLabels, f.createdLabels)
@@ -152,24 +198,32 @@ func (f *interactionForgejo) handleAddLabels(w http.ResponseWriter, r *http.Requ
 func (f *interactionForgejo) handleRemoveLabel(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	label := parts[len(parts)-1]
+	f.mu.Lock()
 	f.removedLabels = append(f.removedLabels, label)
+	f.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (f *interactionForgejo) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
 	if state, ok := body["state"].(string); ok && state == "closed" {
 		f.closedIssues = append(f.closedIssues, 42)
 	}
 	f.issueState = "closed"
+	f.mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed"})
 }
 
 func (f *interactionForgejo) handleGitTrees(w http.ResponseWriter, r *http.Request) {
-	tree := make([]map[string]interface{}, 0, len(f.repoFiles))
-	for _, p := range f.repoFiles {
+	f.mu.Lock()
+	files := make([]string, len(f.repoFiles))
+	copy(files, f.repoFiles)
+	f.mu.Unlock()
+	tree := make([]map[string]interface{}, 0, len(files))
+	for _, p := range files {
 		tree = append(tree, map[string]interface{}{
 			"path": p,
 			"type": "blob",
@@ -181,8 +235,11 @@ func (f *interactionForgejo) handleGitTrees(w http.ResponseWriter, r *http.Reque
 }
 
 func (f *interactionForgejo) handleListIssues(w http.ResponseWriter, r *http.Request) {
-	if len(f.openIssues) > 0 {
-		_ = json.NewEncoder(w).Encode(f.openIssues)
+	f.mu.Lock()
+	issues := f.openIssues
+	f.mu.Unlock()
+	if len(issues) > 0 {
+		_ = json.NewEncoder(w).Encode(issues)
 		return
 	}
 	_ = json.NewEncoder(w).Encode([]interface{}{})
@@ -191,10 +248,13 @@ func (f *interactionForgejo) handleListIssues(w http.ResponseWriter, r *http.Req
 func (f *interactionForgejo) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
 	f.createdIssues = append(f.createdIssues, body["title"])
+	n := len(f.createdIssues)
+	f.mu.Unlock()
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"number": float64(len(f.createdIssues) + 100),
+		"number": float64(n + 100),
 		"title":  body["title"],
 		"body":   body["body"],
 		"state":  "open",
@@ -251,8 +311,7 @@ func TestFSMDoneAutoClosesIssue(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"done"}
-	f.issueState = "open"
+	f.setFields([]string{"done"}, "open")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -270,7 +329,7 @@ func TestFSMDoneAutoClosesIssue(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.closedIssues) == 0 {
+	if f.closedCount() == 0 {
 		t.Error("expected issue to be closed when 'done' label is applied")
 	}
 }
@@ -279,8 +338,7 @@ func TestFSMDoneAlreadyClosedNoDoubleClose(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"done"}
-	f.issueState = "closed"
+	f.setFields([]string{"done"}, "closed")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -298,7 +356,7 @@ func TestFSMDoneAlreadyClosedNoDoubleClose(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.closedIssues) > 0 {
+	if f.closedCount() > 0 {
 		t.Error("expected no CloseIssue call when issue is already closed")
 	}
 }
@@ -307,8 +365,7 @@ func TestFSMPlanningLabelDoesNotCloseIssue(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"planning"}
-	f.issueState = "open"
+	f.setFields([]string{"planning"}, "open")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -326,7 +383,7 @@ func TestFSMPlanningLabelDoesNotCloseIssue(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.closedIssues) > 0 {
+	if f.closedCount() > 0 {
 		t.Error("expected no CloseIssue call for 'planning' label")
 	}
 }
@@ -335,11 +392,11 @@ func TestAutomergeLabelSpawnsReviewer(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"automerge"}
-	f.issueState = "open"
-	f.isPR = true
-	f.prHeadRef = "feature/add-foo"
-	f.prState = "open"
+	f.setFields([]string{"automerge"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/add-foo"
+		f.prState = "open"
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -375,11 +432,11 @@ func TestAutomergeLabelNoSessionWithoutLabel(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"review"}
-	f.issueState = "open"
-	f.isPR = true
-	f.prHeadRef = "feature/add-foo"
-	f.prState = "open"
+	f.setFields([]string{"review"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/add-foo"
+		f.prState = "open"
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -418,9 +475,10 @@ func TestPRCommentRoutesToPullsSession(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueTitle = "Add new feature"
-	f.issueState = "open"
-	f.isPR = true
+	f.setFields(nil, "open", func(f *interactionForgejo) {
+		f.issueTitle = "Add new feature"
+		f.isPR = true
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -460,9 +518,10 @@ func TestIssueCommentRoutesToIssuesSession(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueTitle = "Fix login bug"
-	f.issueState = "open"
-	f.isPR = false
+	f.setFields(nil, "open", func(f *interactionForgejo) {
+		f.issueTitle = "Fix login bug"
+		f.isPR = false
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -504,8 +563,7 @@ func TestIssueLabelUpdatedFSMDetection(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"implementing", "role:implementer"}
-	f.issueState = "open"
+	f.setFields([]string{"implementing", "role:implementer"}, "open")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -523,7 +581,7 @@ func TestIssueLabelUpdatedFSMDetection(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.closedIssues) > 0 {
+	if f.closedCount() > 0 {
 		t.Error("implementing label should not close the issue")
 	}
 }
@@ -554,7 +612,7 @@ func TestRoleGateThenFSMStateTransition(t *testing.T) {
 	}
 
 	// Step 2: Add role:implementer + needs-role labels → session created
-	f.issueLabels = []string{"needs-role", "role:implementer"}
+	f.setFields([]string{"needs-role", "role:implementer"}, "open")
 	evtLabel := event.NewEvent(event.IssueLabelUpdated, "org/repo", 42, 0, "alice", "label_updated")
 	evtLabel.SessionKey = "org/repo/issues/42"
 	mgr.handleEvent(context.Background(), evtLabel)
@@ -569,7 +627,7 @@ func TestRoleGateThenFSMStateTransition(t *testing.T) {
 	// Step 3: Add "done" label → issue should be auto-closed
 	// FSM detection now runs BEFORE handleRoleAssignment, so done→close
 	// works regardless of RequireRoleTag.
-	f.issueLabels = []string{"role:implementer", "done"}
+	f.setFields([]string{"role:implementer", "done"}, "open")
 	evtDone := event.NewEvent(event.IssueLabelUpdated, "org/repo", 42, 0, "alice", "label_updated")
 	evtDone.SessionKey = "org/repo/issues/42"
 	evtDone.Payload = map[string]interface{}{
@@ -577,7 +635,7 @@ func TestRoleGateThenFSMStateTransition(t *testing.T) {
 	}
 	mgr.handleEvent(context.Background(), evtDone)
 
-	if len(f.closedIssues) == 0 {
+	if f.closedCount() == 0 {
 		t.Error("expected issue to be auto-closed when 'done' label is applied even with RequireRoleTag=true")
 	}
 }
@@ -586,8 +644,7 @@ func TestFSMBlockedLabelDoesNotPreventSession(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"blocked"}
-	f.issueState = "open"
+	f.setFields([]string{"blocked"}, "open")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -615,8 +672,7 @@ func TestFSMDoneCloseWithoutRoleGate(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueLabels = []string{"done", "implementing"}
-	f.issueState = "open"
+	f.setFields([]string{"done", "implementing"}, "open")
 
 	cfg := interactionTestConfig(t, f.URL())
 	cfg.Agent.RequireRoleTag = false
@@ -635,7 +691,7 @@ func TestFSMDoneCloseWithoutRoleGate(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.closedIssues) == 0 {
+	if f.closedCount() == 0 {
 		t.Error("expected issue to be auto-closed when 'done' label is applied and RequireRoleTag=false")
 	}
 }
@@ -645,8 +701,7 @@ func TestFSMInvalidTransitionBlocked(t *testing.T) {
 	defer f.Close()
 
 	// First set issue to "done" state
-	f.issueLabels = []string{"done"}
-	f.issueState = "closed"
+	f.setFields([]string{"done"}, "closed")
 
 	cfg := interactionTestConfig(t, f.URL())
 	bus := event.NewBus()
@@ -665,9 +720,8 @@ func TestFSMInvalidTransitionBlocked(t *testing.T) {
 	mgr.handleEvent(context.Background(), evtDone)
 
 	// Now try invalid transition: done → planning (should be blocked)
-	f.issueLabels = []string{"planning"}
-	f.issueState = "closed"
-	closedBefore := len(f.closedIssues)
+	f.setFields([]string{"planning"}, "closed")
+	closedBefore := f.closedCount()
 
 	evtPlanning := event.NewEvent(event.IssueLabelUpdated, "org/repo", 42, 0, "alice", "label_updated")
 	evtPlanning.SessionKey = "org/repo/issues/42"
@@ -676,7 +730,8 @@ func TestFSMInvalidTransitionBlocked(t *testing.T) {
 	}
 	mgr.handleEvent(context.Background(), evtPlanning)
 
-	if len(f.closedIssues) != closedBefore {
+	closedCount := f.closedCount()
+	if closedCount != closedBefore {
 		t.Error("invalid FSM transition (done→planning) should not trigger any actions like auto-close")
 	}
 }
@@ -709,9 +764,10 @@ func TestScaffoldDetection_BlocksOnEmptyRepo(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.repoFiles = []string{}
-	f.issueLabels = []string{"role:implementer"}
-	f.issueTitle = "Add feature X"
+	f.setFields([]string{"role:implementer"}, "open", func(f *interactionForgejo) {
+		f.repoFiles = []string{}
+		f.issueTitle = "Add feature X"
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	cfg.Agent.EnableScaffoldDetection = true
@@ -731,7 +787,7 @@ func TestScaffoldDetection_BlocksOnEmptyRepo(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.createdIssues) == 0 {
+	if f.createdCount() == 0 {
 		t.Error("expected scaffold issue to be created on empty repo")
 	}
 }
@@ -740,9 +796,10 @@ func TestScaffoldDetection_PassesOnPopulatedRepo(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.repoFiles = []string{"go.mod", "README.md", "main.go"}
-	f.issueLabels = []string{"role:implementer"}
-	f.issueTitle = "Add feature X"
+	f.setFields([]string{"role:implementer"}, "open", func(f *interactionForgejo) {
+		f.repoFiles = []string{"go.mod", "README.md", "main.go"}
+		f.issueTitle = "Add feature X"
+	})
 
 	cfg := interactionTestConfig(t, f.URL())
 	cfg.Agent.EnableScaffoldDetection = true
@@ -762,7 +819,7 @@ func TestScaffoldDetection_PassesOnPopulatedRepo(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if len(f.createdIssues) > 0 {
+	if f.createdCount() > 0 {
 		t.Error("scaffold issue should NOT be created on populated repo")
 	}
 }
@@ -771,9 +828,10 @@ func TestLabelUpdatedDoesNotCreateSession(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
-	f.issueTitle = "[implementer] Add a feature"
-	f.issueLabels = []string{"blocked"}
-	f.repoFiles = []string{"go.mod", "main.go"}
+	f.setFields([]string{"blocked"}, "open", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Add a feature"
+		f.repoFiles = []string{"go.mod", "main.go"}
+	})
 
 	cfg := testConfig(t, f.URL(), true)
 	cfg.Agent.EnableScaffoldDetection = false
