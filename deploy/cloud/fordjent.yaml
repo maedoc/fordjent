@@ -1,14 +1,17 @@
+# Fordjent cloud configuration
+# Templated by deploy script — DO NOT edit manually
+
 server:
   host: "0.0.0.0"
   port: 8080
 
 webhook:
-  secret: "REDACTED"
+  secret: "{{WEBHOOK_SECRET}}"
 
 forgejo:
-  url: "http://forgejo-local:3000"
-  token: "${FORGEJO_TOKEN}"
-  admin_token: "${FORGEJO_ADMIN_TOKEN}"
+  url: "http://forgejo:3000"
+  token: "{{FORGEJO_TOKEN}}"
+  admin_token: "{{FORGEJO_ADMIN_TOKEN}}"
   rate_limit: 60
 
 agent:
@@ -20,12 +23,12 @@ agent:
   max_turns_implementer: 50
   max_turns_reviewer: 20
   role_providers:
-    pm: "wafer-glm"
-    reviewer: "wafer-glm"
-    implementer: "wafer-qwen"
-    tester: "wafer-qwen"
-    devops: "wafer-qwen"
-  fallback_provider: "wafer-qwen"
+    pm: "scaleway-qwen"
+    reviewer: "scaleway-qwen"
+    implementer: "scaleway-qwen"
+    tester: "scaleway-qwen"
+    devops: "scaleway-qwen"
+  fallback_provider: "scaleway-qwen"
   commit_prefix: "[agent-automation]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -41,8 +44,8 @@ agent:
   auto_retry_delay: "5m"
   require_role_tag: true
   session_timeout: "60m"
-  git_name: "Fordjent Dev Agent"
-  git_email: "fordjent-dev@forgejo.local"
+  git_name: "Fordjent Agent"
+  git_email: "fordjent@wdmn.fr"
 
 budget:
   enabled: true
@@ -50,18 +53,18 @@ budget:
   max_monthly_cost: 50.00
 
 sandbox:
-  enabled: true
-  backend: bwrap
+  enabled: false
+  backend: auto
   tmpfs_size_mb: 64
   keep_profiles_on_failure: true
   violation_comment_threshold: 3
   allowed_write_dirs: []
 
 providers:
-  - name: "wafer-qwen"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "${WAFER_API_KEY}"
-    model: "Qwen3.5-397B-A17B"
+  - name: "scaleway-qwen"
+    api_base: "https://api.scaleway.ai/7e3db0d1-34c9-4398-8bf5-208bf15fbf05/v1"
+    api_key: "{{SCALEWAY_AI_KEY}}"
+    model: "qwen3.6-35b-a3b"
     max_tokens: 32768
     request_timeout: "90s"
     max_retries: 5
@@ -70,10 +73,10 @@ providers:
     max_concurrent_llm_calls: 3
     cost_per_1m_input_tokens: 0
     cost_per_1m_output_tokens: 0
-  - name: "wafer-glm"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "${WAFER_API_KEY}"
-    model: "GLM-5.1"
+  - name: "scaleway-glm"
+    api_base: "https://api.scaleway.ai/7e3db0d1-34c9-4398-8bf5-208bf15fbf05/v1"
+    api_key: "{{SCALEWAY_AI_KEY}}"
+    model: "mistral-medium-3.5-128b"
     max_tokens: 32768
     request_timeout: "120s"
     max_retries: 5
@@ -107,10 +110,10 @@ database:
 scanner:
   enabled: true
   interval: "5m"
-  repo: "fjadmin/testbed"
+  repo: "{{ADMIN_USER}}/{{TEST_REPO}}"
 
 auto_register:
   enabled: true
-  webhook_url: ""  # local deployment doesn't need auto webhook creation
+  webhook_url: "https://fordjent.wdmn.fr/acp/v1/events"
 
-log_level: "info"
+log_level: "{{LOG_LEVEL}}"

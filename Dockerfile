@@ -55,8 +55,8 @@ RUN bwrap --version
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.64.8
 
 RUN adduser -D -h /var/lib/fordjent -s /bin/sh fordjent \
-    && mkdir -p /var/lib/fordjent/work \
-    && chown -R fordjent:fordjent /var/lib/fordjent
+    && mkdir -p /var/lib/fordjent/work /var/cache/go-build /var/cache/go-mod \
+    && chown -R fordjent:fordjent /var/lib/fordjent /var/cache/go-build /var/cache/go-mod
 
 COPY --from=builder /build/fordjent /usr/local/bin/fordjent
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh

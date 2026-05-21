@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Server             ServerConfig     `yaml:"server"`
 	Webhook            WebhookConfig    `yaml:"webhook"`
+	AutoRegister       AutoRegisterConfig `yaml:"auto_register"`
 	Forgejo            ForgejoConfig    `yaml:"forgejo"`
 	Agent              AgentConfig      `yaml:"agent"`
 	Budget             BudgetConfig     `yaml:"budget"`
@@ -41,6 +42,11 @@ type ServerConfig struct {
 
 type WebhookConfig struct {
 	Secret string `yaml:"secret"`
+}
+
+type AutoRegisterConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	WebhookURL string `yaml:"webhook_url"` // public URL for webhook, e.g. https://fordjent.wdmn.fr/acp/v1/events
 }
 
 type ForgejoConfig struct {
@@ -209,6 +215,10 @@ func Load(path string) (*Config, error) {
 			CompactionPath: "docs/issues",
 		},
 		Database: DatabaseConfig{Path: ""},
+		AutoRegister: AutoRegisterConfig{
+			Enabled:    true,
+			WebhookURL: "",
+		},
 		LogLevel: "info",
 	}
 

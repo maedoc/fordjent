@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fordjent/fordjent/internal/config"
+	"github.com/fordjent/fordjent/internal/autoreg"
 	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
@@ -89,6 +90,7 @@ type Manager struct {
 	sandboxReporter *SandboxReporter
 	labelBoot       sync.Map // repo → bool, tracks which repos have had labels ensured
 	issueStates     sync.Map // "repo/issues/N" → lifecycle.IssueState, tracks previous FSM state
+	autoReg         *autoreg.AutoRegistrar
 }
 
 // SandboxReporter implements sandbox.ErrorReporter by posting violation comments to Forgejo.
@@ -186,6 +188,16 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	m.mqClient = mergequeue.NewClient(forgejoAdapter)
 	m.scheduler = scheduler.New(forgejoAdapter)
 	m.scheduler.SetForgejoClient(adminClient)
+
+	// Wire auto-registrar if enabled
+	if cfg.AutoRegister.Enabled {
+		m.autoReg = autoreg.NewAutoRegistrar(autoreg.AutoRegistrarConfig{
+			ForgejoClient: adminClient,
+			WebhookURL:    cfg.AutoRegister.WebhookURL,
+			WebhookSecret: cfg.Webhook.Secret,
+		})
+		slog.Info("auto-register enabled", "webhook_url", cfg.AutoRegister.WebhookURL)
+	}
 
 	if err := m.restoreSessions(); err != nil {
 		slog.Warn("failed to restore sessions from database", "error", err)
@@ -314,6 +326,15 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
+	// Auto-register: ensure webhook and labels exist for this repo.
+	// Run before any other logic so all repos get registered regardless of event type.
+	if m.autoReg != nil {
+		if err := m.autoReg.EnsureRegistered(ctx, evt.Repository); err != nil {
+			slog.Warn("auto-register failed", "repo", evt.Repository, "error", err)
+			// Non-fatal: continue processing the event
+		}
+	}
+
 	// Bootstrap scheduler/lifecycle/scaffold labels once per repo (sync to avoid races)
 	// Use admin client if available (bot may not have repo access yet).
 	if _, loaded := m.labelBoot.LoadOrStore(evt.Repository, true); !loaded {

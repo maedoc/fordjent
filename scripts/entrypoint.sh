@@ -10,4 +10,7 @@ git config --global user.email "$GIT_EMAIL"
 git config --global user.name "$GIT_NAME"
 git config --global push.default current
 
+# Ensure Go cache directories exist and are writable
+mkdir -p /var/cache/go-build /var/cache/go-mod 2>/dev/null || true
+
 exec fordjent -config /etc/fordjent/fordjent.yaml "$@"
