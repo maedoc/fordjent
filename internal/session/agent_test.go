@@ -12,6 +12,7 @@ import (
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/lifecycle"
+	"github.com/fordjent/fordjent/internal/policy"
 	"github.com/fordjent/fordjent/internal/provider"
 	"github.com/fordjent/fordjent/internal/tool"
 )
@@ -114,7 +115,7 @@ func TestDetectIssueState_Planning(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	state := agent.detectIssueState(context.Background(), evt)
@@ -136,7 +137,7 @@ func TestDetectIssueState_Blocked(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	state := agent.detectIssueState(context.Background(), evt)
@@ -158,7 +159,7 @@ func TestDetectIssueState_Opened(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	state := agent.detectIssueState(context.Background(), evt)
@@ -180,7 +181,7 @@ func TestDetectIssueState_NoIssueNumber(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/push/1", Repository: "org/repo", WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.Push, "org/repo", 0, 0, "alice", "push")
 	state := agent.detectIssueState(context.Background(), evt)
@@ -234,7 +235,7 @@ func TestBuildRoleRegistry_Reviewer(t *testing.T) {
 	sessionInfo := &sessionInfoAdapter{workDir: t.TempDir(), repoDir: t.TempDir()}
 	agentCfg := &agentConfigAdapter{cfg: cfg}
 
-	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "reviewer", cfg, nil, nil)
+	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "reviewer", cfg, nil, nil, policy.Policy{})
 
 	reviewerOnly := []string{"forgejo_merge_pr"}
 	implementerOnly := []string{"write_file", "git", "forgejo_create_pr", "forgejo_delete_branch", "forgejo_create_hook", "forgejo_delete_hook", "forgejo_create_token"}
@@ -263,7 +264,7 @@ func TestBuildRoleRegistry_PM(t *testing.T) {
 	sessionInfo := &sessionInfoAdapter{workDir: t.TempDir(), repoDir: t.TempDir()}
 	agentCfg := &agentConfigAdapter{cfg: cfg}
 
-	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "pm", cfg, nil, nil)
+	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "pm", cfg, nil, nil, policy.Policy{})
 
 	pmAllowed := []string{"forgejo_comment", "forgejo_create_issue", "bash", "read_file"}
 	pmForbidden := []string{"write_file", "git", "forgejo_create_pr", "forgejo_merge_pr", "forgejo_delete_branch"}
@@ -292,7 +293,7 @@ func TestBuildRoleRegistry_Implementer(t *testing.T) {
 	sessionInfo := &sessionInfoAdapter{workDir: t.TempDir(), repoDir: t.TempDir()}
 	agentCfg := &agentConfigAdapter{cfg: cfg}
 
-	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "implementer", cfg, nil, nil)
+	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "implementer", cfg, nil, nil, policy.Policy{})
 
 	required := []string{"write_file", "git", "forgejo_create_pr", "forgejo_merge_pr", "forgejo_comment", "forgejo_create_issue", "bash", "read_file"}
 	for _, name := range required {
@@ -315,7 +316,7 @@ func TestBuildSystemPrompt_IncludesStateInstructions(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "implementer", lifecycle.StatePlanning)
@@ -337,7 +338,7 @@ func TestBuildSystemPrompt_PRReviewMode(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, IssueNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
@@ -378,7 +379,7 @@ func TestBuildSystemPrompt_AutomergeReviewerPrompt(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, IssueNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateMerging)
@@ -403,7 +404,7 @@ func TestTargetDescription(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	if desc := agent.targetDescription(&event.Event{PRNumber: 7}); desc != "Pull Request #7" {
 		t.Errorf("expected 'Pull Request #7', got %q", desc)
@@ -448,7 +449,7 @@ func TestBuildSystemPrompt_DevOpsRole(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "devops", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "devops", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "devops", lifecycle.StateOpened)
@@ -473,7 +474,7 @@ func TestBuildSystemPrompt_TesterRole(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "tester", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "tester", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "tester", lifecycle.StateOpened)
@@ -498,7 +499,7 @@ func TestBuildSystemPrompt_PMRole(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "pm", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "pm", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened)
@@ -564,7 +565,7 @@ func TestFetchParentContext_NoRefs(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	result := agent.fetchParentContext(context.Background(), "org/repo", "This PR has no closing references")
 	if result != "" {
@@ -605,7 +606,7 @@ func TestFetchParentContext_WithRefs(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	result := agent.fetchParentContext(context.Background(), "org/repo", "Closes #5")
 	if result == "" {
@@ -645,7 +646,7 @@ func TestFetchParentContext_APIErrorNonFatal(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	result := agent.fetchParentContext(context.Background(), "org/repo", "Closes #99")
 	if result != "" && !strings.Contains(result, "Parent Issue Context") {
@@ -694,7 +695,7 @@ func TestFetchParentContext_MultipleRefs(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	result := agent.fetchParentContext(context.Background(), "org/repo", "Closes #5, fixes #6")
 	if !strings.Contains(result, "Issue #5") {
@@ -773,7 +774,7 @@ func TestBuildContext_IncludesParentContextForPR(t *testing.T) {
 	}
 
 	sess := &Session{Key: "org/repo/pulls/7", Repository: "org/repo", PRNumber: 7, IssueNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
-	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil)
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
 	messages, err := agent.buildContext(context.Background(), evt)
@@ -790,5 +791,111 @@ func TestBuildContext_IncludesParentContextForPR(t *testing.T) {
 	}
 	if !foundParentCtx {
 		t.Error("buildContext should include parent issue context for PR with closing ref")
+	}
+}
+
+func TestBuildSystemPrompt_PolicyNoAutoMerge(t *testing.T) {
+	srv := newTestAgentServer(t, nil)
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Forgejo:   config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Agent:     config.AgentConfig{MaxSessions: 10, WorkDir: t.TempDir(), IdleTimeout: 1 * time.Hour, MaxTurns: 5, CommitPrefix: "[agent]"},
+		Providers:  []config.ProviderConfig{{Name: "test", APIBase: "http://localhost/v1", APIKey: "test", Model: "test", MaxTokens: 100}},
+		Memory:    config.MemoryConfig{Enabled: false},
+		Security:  config.SecurityConfig{},
+	}
+
+	sess := &Session{Key: "org/repo/pulls/10", Repository: "org/repo", PRNumber: 10, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
+	agent.policy = policy.Policy{NoAutoMerge: true}
+	agent.policySet = true
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	if !strings.Contains(prompt, "no-auto-merge policy") {
+		t.Error("reviewer prompt should mention no-auto-merge policy")
+	}
+	if !strings.Contains(prompt, "MUST NOT call forgejo_merge_pr") {
+		t.Error("reviewer prompt should say MUST NOT call forgejo_merge_pr")
+	}
+}
+
+func TestBuildSystemPrompt_PolicyRequireReview(t *testing.T) {
+	srv := newTestAgentServer(t, nil)
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Forgejo:   config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Agent:     config.AgentConfig{MaxSessions: 10, WorkDir: t.TempDir(), IdleTimeout: 1 * time.Hour, MaxTurns: 5, CommitPrefix: "[agent]"},
+		Providers:  []config.ProviderConfig{{Name: "test", APIBase: "http://localhost/v1", APIKey: "test", Model: "test", MaxTokens: 100}},
+		Memory:    config.MemoryConfig{Enabled: false},
+		Security:  config.SecurityConfig{},
+	}
+
+	sess := &Session{Key: "org/repo/pulls/10", Repository: "org/repo", PRNumber: 10, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
+	agent.policy = policy.Policy{RequireReview: true}
+	agent.policySet = true
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	if !strings.Contains(prompt, "requires human review before merging") {
+		t.Error("reviewer prompt should mention require-review policy")
+	}
+	if !strings.Contains(prompt, "approved") {
+		t.Error("reviewer prompt should mention approved label requirement")
+	}
+}
+
+func TestBuildSystemPrompt_PolicyYolo(t *testing.T) {
+	srv := newTestAgentServer(t, nil)
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Forgejo:   config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Agent:     config.AgentConfig{MaxSessions: 10, WorkDir: t.TempDir(), IdleTimeout: 1 * time.Hour, MaxTurns: 5, CommitPrefix: "[agent]"},
+		Providers:  []config.ProviderConfig{{Name: "test", APIBase: "http://localhost/v1", APIKey: "test", Model: "test", MaxTokens: 100}},
+		Memory:    config.MemoryConfig{Enabled: false},
+		Security:  config.SecurityConfig{},
+	}
+
+	sess := &Session{Key: "org/repo/pulls/10", Repository: "org/repo", PRNumber: 10, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
+	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
+	agent.policy = policy.Policy{Yolo: true}
+	agent.policySet = true
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	// Yolo mode: reviewer should be told to merge bot PRs immediately
+	if !strings.Contains(prompt, "call forgejo_merge_pr IMMEDIATELY") {
+		t.Error("yolo reviewer prompt should tell reviewer to merge bot PRs immediately")
+	}
+}
+
+func TestBuildSystemPrompt_PolicyPlanFirst(t *testing.T) {
+	srv := newTestAgentServer(t, nil)
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Forgejo:   config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Agent:     config.AgentConfig{MaxSessions: 10, WorkDir: t.TempDir(), IdleTimeout: 1 * time.Hour, MaxTurns: 5, CommitPrefix: "[agent]"},
+		Providers:  []config.ProviderConfig{{Name: "test", APIBase: "http://localhost/v1", APIKey: "test", Model: "test", MaxTokens: 100}},
+		Memory:    config.MemoryConfig{Enabled: false},
+		Security:  config.SecurityConfig{},
+	}
+
+	sess := &Session{Key: "org/repo/issues/42", Repository: "org/repo", IssueNumber: 42, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
+	agent := NewAgent(cfg, sess, nil, nil, nil, "pm", nil, nil, nil)
+	agent.policy = policy.Policy{PlanFirst: true}
+	agent.policySet = true
+
+	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened)
+	if !strings.Contains(prompt, "plan-first policy") {
+		t.Error("pm prompt should mention plan-first policy")
+	}
+	if !strings.Contains(prompt, "plan-approved") {
+		t.Error("pm prompt should mention plan-approved label")
 	}
 }

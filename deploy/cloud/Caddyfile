@@ -1,0 +1,34 @@
+# Caddyfile for Forgejo + Fordjent cloud deployment
+# SNI-based routing: forgejo.wdmn.fr → Forgejo, fordjent.wdmn.fr → Fordjent webhook
+
+{
+    email admin@wdmn.fr
+}
+
+forgejo.wdmn.fr {
+    reverse_proxy forgejo:3000 {
+        # Increase timeouts for large git pushes
+        transport http {
+            read_timeout 300s
+            write_timeout 300s
+            dial_timeout 30s
+        }
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}
+
+fordjent.wdmn.fr {
+    reverse_proxy fordjent:8080
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+    }
+}

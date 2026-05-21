@@ -485,6 +485,7 @@ func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
 		{"implementing", "5319e7"},
 		{"review", "fbca04"},
 		{"automerge", "0e8a16"},
+		{"approved", "0e8a16"},
 		{"done", "ededed"},
 		// Role labels — required by detectRoleFromIssue() and the role gate
 		{"role:implementer", "5319e7"},
@@ -990,6 +991,22 @@ type Review struct {
 	User   *User  `json:"user"`
 	State  string `json:"state"` // "APPROVED", "REQUEST_CHANGES", etc.
 	Body   string `json:"body"`
+}
+
+// GetRepoTopics returns the topics/tags for a repository.
+func (c *Client) GetRepoTopics(ctx context.Context, repo string) ([]string, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "topics")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Topics []string `json:"topics"`
+	}
+	if err := json.Unmarshal([]byte(result), &resp); err != nil {
+		return nil, fmt.Errorf("decode topics: %w", err)
+	}
+	return resp.Topics, nil
 }
 
 // ListPRReviews returns reviews for a pull request.

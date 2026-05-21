@@ -18,6 +18,7 @@ import (
 	"github.com/fordjent/fordjent/internal/agent"
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/cost"
+	"github.com/fordjent/fordjent/internal/policy"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/lifecycle"
@@ -52,9 +53,12 @@ type Agent struct {
 	automergeSet     bool
 	pmFollowUp       bool
 	triggeringIssue  int
+	policy           policy.Policy
+	policySet        bool
+	policyDetector   *policy.CachedDetector
 }
 
-func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker) *Agent {
+func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
 	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	prov := cfg.ProviderForRole(role)
 	var llmClient provider.ChatCompleter = provider.NewClient(prov)
@@ -69,12 +73,21 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 
 	mem := memory.New(cfg, sess.WorkDir, forgejoClient)
 
+	// Detect repo policy (cached)
+	var repoPolicy policy.Policy
+	if policyDetector != nil {
+		repoPolicy = policyDetector.Detect(context.Background(), sess.Repository)
+	} else {
+		repoPolicy = policy.DefaultPolicy()
+	}
+	_ = repoPolicy // used in buildRoleRegistry
+
 	sessionInfo := &sessionInfoAdapter{workDir: sess.WorkDir, repoDir: sess.RepoDir}
 	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
 	isScaffold := strings.HasPrefix(strings.ToLower(sess.IssueTitle), "[scaffold]") || strings.HasPrefix(strings.ToLower(sess.IssueTitle), "scaffold")
 	agentCfg := &agentConfigAdapter{cfg: cfg, isScaffold: isScaffold}
 
-	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter, sched)
+	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter, sched, repoPolicy)
 
 	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
 
@@ -91,6 +104,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		role:            role,
 		pmFollowUp:      sess.IsPMFollowUp,
 		triggeringIssue: sess.TriggeringIssue,
+		policyDetector:  policyDetector,
 	}
 }
 
@@ -105,9 +119,20 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	// Step 1: Acknowledge with 👀 reaction
 	a.addReaction(ctx, evt, "eyes")
 
-	// Step 2: Detect analysis-only mode and FSM state
+	// Step 2: Detect analysis-only mode, FSM state, and repo policy
 	analysisMode := a.detectAnalysisMode(ctx, evt)
 	fsmState := a.detectIssueState(ctx, evt)
+
+	// Detect repo-level policy (cached per session)
+	if !a.policySet {
+		if a.policyDetector != nil {
+			a.policy = a.policyDetector.Detect(ctx, evt.Repository)
+		} else {
+			a.policy = policy.DefaultPolicy()
+		}
+		a.policySet = true
+		slog.Info("detected repo policy", "repo", evt.Repository, "policy", a.policy.String(), "session_key", a.sess.Key)
+	}
 
 	// Step 3: Build context for the LLM
 	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState)
@@ -290,6 +315,43 @@ Update the issue comment with your reflection, then continue working.`,
 				continue
 			}
 
+			// Policy: block forgejo_merge_pr when policy says so
+			if tc.Function.Name == "forgejo_merge_pr" {
+				if a.policy.NoAutoMerge && a.role == "reviewer" {
+					slog.Info("blocked merge by policy: no-auto-merge", "tool", tc.Function.Name, "session_key", a.sess.Key)
+					messages = append(messages, provider.Message{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+					Content:    "Error: This repo has a no-auto-merge policy. Post your review as a comment and wait for a human to merge the PR. Do NOT call forgejo_merge_pr.",
+					})
+					continue
+				}
+				if a.policy.RequireReview {
+					// Check if PR has 'approved' label
+					if evt.PRNumber > 0 {
+						prIssue, prErr := a.forgejo.GetIssue(ctx, evt.Repository, evt.PRNumber)
+						if prErr == nil && prIssue != nil {
+							hasApproved := false
+							for _, l := range prIssue.Labels {
+								if l.Name == "approved" {
+									hasApproved = true
+									break
+								}
+							}
+						if !hasApproved {
+							slog.Info("blocked merge by policy: require-review (no approved label)", "pr", evt.PRNumber, "session_key", a.sess.Key)
+							messages = append(messages, provider.Message{
+								Role:       "tool",
+								ToolCallID: tc.ID,
+								Content:    "Error: This repo requires human review before merging. The PR must have an 'approved' label. Post your review as a comment and wait for a human to add the 'approved' label.",
+							})
+							continue
+							}
+						}
+					}
+				}
+			}
+
 			slog.Info("executing tool",
 				"tool", tc.Function.Name,
 				"session_key", a.sess.Key,
@@ -440,6 +502,12 @@ Before creating sub-issues that depend on code from parent issues:
    - If issue #2 must be done before #3, add 'Depends on: #2' in #3's body.
    - If #4 depends on both #2 and #3, add 'Depends on: #2, #3'.`
 
+		if a.policy.PlanFirst {
+			modeInstructions += `
+
+- This repo has a plan-first policy. After posting your decomposition plan, tell the human to add the 'plan-approved' label to this parent issue to unblock the sub-issues for implementation. The sub-issues will remain in 'planning' state until this label is added.`
+		}
+
 		if a.pmFollowUp {
 			modeInstructions += fmt.Sprintf(`
 
@@ -461,9 +529,23 @@ Your job is:
 You are in Code Review mode. You do NOT write code. Your job is:
 - Read the PR diff carefully using bash (git diff origin/main...HEAD).
 - Check for correctness, style, test coverage, and edge cases.
-- If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_merge_pr IMMEDIATELY.
 - If issues found, post a comment describing what needs to change.
 - DO NOT leave PRs open indefinitely — either merge or request changes.`
+
+		// Policy-aware merge instructions
+		if a.policy.NoAutoMerge {
+			modeInstructions += `
+
+- IMPORTANT: This repo has a no-auto-merge policy. You MUST NOT call forgejo_merge_pr. Post your review as a comment and let a human decide when to merge.`
+		} else if a.policy.RequireReview {
+			modeInstructions += `
+
+- IMPORTANT: This repo requires human review before merging. You MUST NOT call forgejo_merge_pr unless the PR has an 'approved' label. Post your review as a comment and wait for a human to add the 'approved' label.`
+		} else {
+			modeInstructions += `
+
+- If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_merge_pr IMMEDIATELY.`
+		}
 
 		hasAutomerge := a.detectAutomerge(ctx, evt)
 		if hasAutomerge {
@@ -942,6 +1024,7 @@ func buildRoleRegistry(
 	cfg *config.Config,
 	sandboxReporter sandbox.ErrorReporter,
 	sched tool.DependencyChecker,
+	repoPolicy policy.Policy,
 ) *tool.Registry {
 	registry := tool.NewRegistry()
 
@@ -1003,6 +1086,7 @@ func buildRoleRegistry(
 	case "pm":
 		cit := tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 5)
 		cit.SetScheduler(sched)
+		cit.SetPlanFirst(repoPolicy.PlanFirst)
 		registry.Register(cit)
 		registry.Register(tool.NewGetSubIssuesTool(forgejoAdapter))
 		// PM cannot write code, create PRs, or merge

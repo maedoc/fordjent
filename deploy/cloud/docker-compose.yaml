@@ -1,0 +1,95 @@
+services:
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - fordjent-net
+    depends_on:
+      - forgejo
+      - fordjent
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9
+    container_name: forgejo
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__server__ROOT_URL=https://${FORGEJO_DOMAIN}/
+      - FORGEJO__server__HTTP_PORT=3000
+      - FORGEJO__server__SSH_DOMAIN=${FORGEJO_DOMAIN}
+      - FORGEJO__server__SSH_PORT=22
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__service__REQUIRE_SIGNIN_VIEW=false
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=*
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__security__SECRET_KEY=${FORGEJO_SECRET_KEY}
+      - FORGEJO__security__INTERNAL_TOKEN=${FORGEJO_INTERNAL_TOKEN}
+    volumes:
+      - forgejo-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - fordjent-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  fordjent:
+    image: fordjent:local
+    build:
+      context: /opt/fordjent-src
+      target: full
+    container_name: fordjent
+    restart: unless-stopped
+    depends_on:
+      forgejo:
+        condition: service_healthy
+    environment:
+      - FORGEJO_URL=http://forgejo:3000
+      - FORGEJO_TOKEN=${FORGEJO_TOKEN}
+      - FORGEJO_ADMIN_TOKEN=${FORGEJO_ADMIN_TOKEN}
+      - WAFER_API_KEY=${WAFER_API_KEY}
+      - SCALEWAY_AI_KEY=${SCALEWAY_AI_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - GOMODCACHE=/var/cache/go-mod
+      - GOCACHE=/var/cache/go-build
+      - FORDJENT_GIT_NAME=${FORDJENT_GIT_NAME:-Fordjent Agent}
+      - FORDJENT_GIT_EMAIL=${FORDJENT_GIT_EMAIL:-fordjent@wdmn.fr}
+    volumes:
+      - fordjent-data:/var/lib/fordjent
+      - go-cache:/var/cache
+      - ./fordjent.yaml:/etc/fordjent/fordjent.yaml:ro
+    networks:
+      - fordjent-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  forgejo-data:
+  fordjent-data:
+  go-cache:
+  caddy_data:
+  caddy_config:
+
+networks:
+  fordjent-net:
+    driver: bridge

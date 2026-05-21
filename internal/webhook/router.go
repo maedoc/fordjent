@@ -56,6 +56,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/status", r.handleStatus)
 	r.mux.HandleFunc("/tokens-per-minute", r.handleTokensPerMinute)
 	r.mux.HandleFunc("/activity", r.handleActivity)
+	r.mux.HandleFunc("/acp/v1/stream", r.handleStream)
 	r.mux.Handle("/admin", webui.Handler(cfg))
 	r.mux.Handle("/admin/", webui.Handler(cfg))
 
@@ -220,6 +221,60 @@ func (r *Router) handleActivity(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	fmt.Fprintln(w, "</table></body></html>")
+}
+
+func (r *Router) handleStream(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	lc := r.lc
+	if lc == nil {
+		http.Error(w, "lifecycle not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	mgr := lc.SSEManager()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	lastEventID := req.Header.Get("Last-Event-ID")
+	if lastEventID != "" {
+		missed := mgr.ReplaySince(lastEventID)
+		for _, evt := range missed {
+			fmt.Fprint(w, lifecycle.EncodeSSEEvent(evt))
+		}
+		flusher.Flush()
+	}
+
+	ch := mgr.Subscribe()
+	defer mgr.Unsubscribe(ch)
+
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprint(w, lifecycle.EncodeSSEEvent(evt))
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func queryCostDB(dbPath string) (map[string]interface{}, error) {

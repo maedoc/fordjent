@@ -34,6 +34,7 @@ type Lifecycle struct {
 	forgejo     *forgejo.Client
 	costTracker *cost.Tracker
 	labelPrefix string
+	sseMgr      *SubscriberManager
 }
 
 // New opens (or creates) the lifecycle SQLite DB and returns a tracker.
@@ -56,7 +57,12 @@ func New(dbPath string, client *forgejo.Client, costTracker *cost.Tracker) (*Lif
 		forgejo:     client,
 		costTracker: costTracker,
 		labelPrefix: "fordjent/",
+		sseMgr:      NewSubscriberManager(100),
 	}, nil
+}
+
+func (l *Lifecycle) SSEManager() *SubscriberManager {
+	return l.sseMgr
 }
 
 // RecordTransition inserts a new state row for a session. Each call appends
@@ -70,6 +76,11 @@ func (l *Lifecycle) RecordTransition(ctx context.Context, sessionKey, from, to, 
 	if err != nil {
 		slog.Warn("lifecycle: failed to record transition", "error", err, "session_key", sessionKey, "to", to)
 	}
+	l.sseMgr.Broadcast(SSEEvent{
+		Type: "transition",
+		Data: fmt.Sprintf(`{"session_key":%q,"from_state":%q,"to_state":%q,"reason":%q,"timestamp":%q}`,
+			sessionKey, from, to, reason, time.Now().UTC().Format(time.RFC3339)),
+	})
 	return err
 }
 
@@ -365,6 +376,15 @@ func (l *Lifecycle) RecordTurn(ctx context.Context, sessionKey string, turn, too
 	if err != nil {
 		slog.Warn("lifecycle: failed to record turn", "error", err, "session_key", sessionKey)
 	}
+	errMsg := ""
+	if turnErr != nil {
+		errMsg = turnErr.Error()
+	}
+	l.sseMgr.Broadcast(SSEEvent{
+		Type: "turn",
+		Data: fmt.Sprintf(`{"session_key":%q,"turn":%d,"tool_calls":%d,"latency_ms":%d,"tokens_in":%d,"tokens_out":%d,"error":%q,"timestamp":%q}`,
+			sessionKey, turn, toolCalls, latencyMs, tokensIn, tokensOut, errMsg, time.Now().UTC().Format(time.RFC3339)),
+	})
 }
 
 // RecordDelivery logs a webhook delivery to the database for tracking.
@@ -381,4 +401,13 @@ func (l *Lifecycle) RecordDelivery(ctx context.Context, eventType, action, repo 
 	if err != nil {
 		slog.Warn("lifecycle: failed to record webhook delivery", "error", err)
 	}
+	delErrStr := ""
+	if deliveryErr != nil {
+		delErrStr = deliveryErr.Error()
+	}
+	l.sseMgr.Broadcast(SSEEvent{
+		Type: "delivery",
+		Data: fmt.Sprintf(`{"event_type":%q,"action":%q,"repository":%q,"number":%d,"sender":%q,"status":%q,"error":%q,"timestamp":%q}`,
+			eventType, action, repo, number, sender, status, delErrStr, time.Now().UTC().Format(time.RFC3339)),
+	})
 }

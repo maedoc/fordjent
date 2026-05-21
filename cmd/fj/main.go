@@ -16,12 +16,14 @@ import (
 	"text/tabwriter"
 
 	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/tui"
 )
 
 var (
-	jsonOutput bool
-	forgejoURL string
-	repoOverride string
+	jsonOutput    bool
+	forgejoURL    string
+	fordjentURL   string
+	repoOverride  string
 )
 
 func main() {
@@ -104,6 +106,8 @@ func main() {
 		cmdDetect()
 	case "stats":
 		cmdStats(cmdArgs)
+	case "tui":
+		cmdTUI(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %s\n", cmd)
 		printUsage()
@@ -138,6 +142,7 @@ Commands:
   init            Initialize .fj config file
   detect          Show detected repository from git
   stats           Token and cost usage statistics
+  tui             Terminal UI dashboard
 
 Examples:
   fj issue list owner/repo
@@ -190,26 +195,35 @@ func loadConfig() {
 					section = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 					continue
 				}
-				if section == "forgejo" {
-					parts := strings.SplitN(line, "=", 2)
-					if len(parts) == 2 {
-						key := strings.TrimSpace(parts[0])
-						val := strings.TrimSpace(parts[1])
-						switch key {
-						case "url":
-							if forgejoURL == "" {
-								forgejoURL = val
-							}
-						case "token":
-							os.Setenv("FORGEJO_TOKEN", val)
-						case "user":
-							os.Setenv("FORGEJO_USER", val)
-						case "password":
-							os.Setenv("FORGEJO_PASSWORD", val)
-						case "repo":
-							if repoOverride == "" {
-								repoOverride = val
-							}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				switch section {
+				case "forgejo":
+					switch key {
+					case "url":
+						if forgejoURL == "" {
+							forgejoURL = val
+						}
+					case "token":
+						os.Setenv("FORGEJO_TOKEN", val)
+					case "user":
+						os.Setenv("FORGEJO_USER", val)
+					case "password":
+						os.Setenv("FORGEJO_PASSWORD", val)
+					case "repo":
+						if repoOverride == "" {
+							repoOverride = val
+						}
+					}
+				case "fordjent":
+					switch key {
+					case "url":
+						if fordjentURL == "" {
+							fordjentURL = val
 						}
 					}
 				}
@@ -1033,6 +1047,7 @@ func cmdInit(args []string) {
 	user := ""
 	password := ""
 	repo := ""
+	fordjentURLCfg := ""
 	force := false
 
 	for i := 0; i < len(args); i++ {
@@ -1062,6 +1077,11 @@ func cmdInit(args []string) {
 				repo = args[i+1]
 				i++
 			}
+		case "--fordjent-url":
+			if i+1 < len(args) {
+				fordjentURLCfg = args[i+1]
+				i++
+			}
 		case "--force", "-f":
 			force = true
 		}
@@ -1087,6 +1107,10 @@ func cmdInit(args []string) {
 	}
 	if repo != "" {
 		sb.WriteString(fmt.Sprintf("repo = %s\n", repo))
+	}
+	if fordjentURLCfg != "" {
+		sb.WriteString("\n[fordjent]\n")
+		sb.WriteString(fmt.Sprintf("url = %s\n", fordjentURLCfg))
 	}
 
 	if err := os.WriteFile(cfgPath, []byte(sb.String()), 0644); err != nil {
@@ -1116,10 +1140,61 @@ func formatNum(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
 
+func cmdTUI(args []string) {
+	loadConfig()
+	fURL := forgejoURL
+	if u := os.Getenv("FORGEJO_URL"); u != "" {
+		fURL = u
+	}
+	if fURL == "" {
+		fURL = "http://localhost:3000"
+	}
+	token := os.Getenv("FORGEJO_TOKEN")
+	repo := repoOverride
+	if repo == "" && len(args) > 0 {
+		repo = args[0]
+	}
+	if repo == "" {
+		repo = detectRepo()
+	}
+	fordjentURLCfg := fordjentURL
+	if u := os.Getenv("FORDJENT_URL"); u != "" {
+		fordjentURLCfg = u
+	}
+	if fordjentURLCfg == "" {
+		fordjentURLCfg = "http://localhost:8080"
+	}
+	if fURL == "" {
+		fmt.Fprintln(os.Stderr, "error: Forgejo URL not configured. Set FORGEJO_URL or run fj init.")
+		os.Exit(1)
+	}
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "error: Forgejo token not configured. Set FORGEJO_TOKEN or run fj init.")
+		os.Exit(1)
+	}
+	if repo == "" {
+		fmt.Fprintln(os.Stderr, "error: repo not specified. Use -r flag or ensure you're in a git repo.")
+		os.Exit(1)
+	}
+	if err := tui.Run(tui.Config{
+		ForgejoURL:   fURL,
+		ForgejoToken: token,
+		FordjentURL:  fordjentURLCfg,
+		Repo:         repo,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
 func cmdStats(args []string) {
-	fordjentURL := os.Getenv("FORDJENT_URL")
-	if fordjentURL == "" {
-		fordjentURL = "http://localhost:8080"
+	loadConfig()
+	fordjentURLCfg := fordjentURL
+	if u := os.Getenv("FORDJENT_URL"); u != "" {
+		fordjentURLCfg = u
+	}
+	if fordjentURLCfg == "" {
+		fordjentURLCfg = "http://localhost:8080"
 	}
 
 	since := ""
@@ -1129,12 +1204,12 @@ func cmdStats(args []string) {
 			i++
 		}
 		if args[i] == "--url" && i+1 < len(args) {
-			fordjentURL = args[i+1]
+			fordjentURLCfg = args[i+1]
 			i++
 		}
 	}
 
-	reqURL := fordjentURL + "/status"
+	reqURL := fordjentURLCfg + "/status"
 	if since != "" {
 		reqURL += "?since=" + url.QueryEscape(since)
 	}

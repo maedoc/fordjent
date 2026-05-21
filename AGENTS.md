@@ -1297,3 +1297,48 @@ Three validation waves to verify the Bug 1–3 fixes (dual-label, session recove
 | `internal/config/config.go` | `MaxTurnsReviewer` default: 10 → 20 (Bug 22) |
 | `fordjent.local.yaml` | `max_turns_reviewer: 20` (Bug 22) |
 | `AGENTS.md` | This update |
+
+## Cloud Deployment on Scaleway (May 21, 2026)
+
+### Architecture
+- **Instance**: DEV1-L (4 vCPU, 8GB RAM, ~€31/mo) on Scaleway `fr-par-2`
+- **DNS**: `forgejo.wdmn.fr` + `fordjent.wdmn.fr` via Gandi LiveDNS API
+- **TLS**: Automatic via Caddy + Let's Encrypt
+- **LLM**: Scaleway Qwen3.6-35b-a3b (`api.scaleway.ai`) — confirmed working with tool_calls
+- **Firewall**: UFW — 22/80/443 only
+- **Docker Compose**: Caddy + Forgejo + Fordjent (3 containers on `fordjent-net` bridge)
+
+### Bugs Fixed in This Session
+
+| # | Bug | Severity | Fix |
+|---|-----|----------|-----|
+| 1 | Forgejo app.ini mounted `:ro` but Forgejo needs to write JWT secrets | High | Removed `:ro` flag; copy app.ini into the volume instead of bind-mounting |
+| 2 | Caddyfile `transport` directive inside `reverse_proxy` block | High | Moved `transport http {}` inside the `reverse_proxy` block |
+| 3 | bwrap sandbox fails inside Docker (`--no-new-privileges` unsupported) | High | Set `sandbox.enabled: false` in cloud fordjent.yaml (nested sandboxing not supported in Docker) |
+| 4 | Go build cache `/var/cache/go-build` not writable by `fordjent` user | Medium | Added `mkdir -p /var/cache/go-build /var/cache/go-mod` + `chown` in Dockerfile and entrypoint.sh |
+| 5 | Cloud-init GPG key fetch fails silently | Low | Non-fatal — Docker was already installed from a partial run; remaining steps (bwrap, UFW) executed manually |
+
+### What Works End-to-End
+
+1. ✅ `fordjent-deploy up` creates Scaleway instance, DNS records via Gandi, provisions Docker
+2. ✅ TLS certs auto-provisioned by Caddy (both domains)
+3. ✅ Forgejo accessible at `https://forgejo.wdmn.fr` (v9.0.3)
+4. ✅ Fordjent webhook accessible at `https://fordjent.wdmn.fr/acp/v1/events`
+5. ✅ Agent picks up issues, writes code, creates PRs, merges them
+6. ✅ Scaleway Qwen3.6-35b-a3b model works with tool_calls (`finish_reason: "tool_calls"`)
+7. ✅ Status dashboard at `https://fordjent.wdmn.fr/status`
+8. ✅ `fordjent-deploy down` tears down instance, releases IP, removes DNS records
+
+### Files for Cloud Deployment
+
+| File | Purpose |
+|------|---------|
+| `deploy/cloud/docker-compose.yaml` | 3-service stack: Caddy + Forgejo + Fordjent |
+| `deploy/cloud/Caddyfile` | SNI routing with auto-TLS |
+| `deploy/cloud/forgejo.app.ini` | Forgejo config template |
+| `deploy/cloud/fordjent.yaml` | Fordjent config template (sandbox disabled, Scaleway AI provider) |
+| `deploy/env.sh` | Environment variable template |
+| `deploy/env.local.sh` | Local secrets (gitignored) |
+| `deploy/src/fordjent_deploy/` | Python CLI tool: `fordjent-deploy up/down/status` |
+| `deploy/src/fordjent_deploy/gandi_dns.py` | Gandi LiveDNS API client |
+| `deploy/README.md` | Usage documentation |

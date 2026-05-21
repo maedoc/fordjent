@@ -103,6 +103,7 @@ type forgejoCreateIssueTool struct {
 	subIssueCount  int
 	mu             sync.Mutex
 	scheduler      DependencyChecker
+	planFirst       bool // repo policy: add 'planning' label instead of 'blocked' to sub-issues
 }
 
 func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int, maxSubIssues int) *forgejoCreateIssueTool {
@@ -115,6 +116,12 @@ func NewCreateIssueTool(adapter *ForgejoAdapter, parentIssueNum int, maxSubIssue
 
 func (t *forgejoCreateIssueTool) SetScheduler(s DependencyChecker) {
 	t.scheduler = s
+}
+
+// SetPlanFirst indicates that sub-issues should be created in 'planning' state
+// instead of 'blocked' state, requiring human approval before implementation.
+func (t *forgejoCreateIssueTool) SetPlanFirst(planFirst bool) {
+	t.planFirst = planFirst
 }
 
 func (t *forgejoCreateIssueTool) Name() string { return "forgejo_create_issue" }
@@ -209,21 +216,30 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		return "", err
 	}
 
-	// If this issue has a parent, auto-tag with 'blocked' label
-	// then immediately check if the dependency is actually blocking
-	// (e.g., parent PM issue with no PR is not blocking).
+	// If this issue has a parent, auto-tag with appropriate label
+	// then immediately check if the dependency is actually blocking.
+	// With plan-first policy, sub-issues get 'planning' label instead of 'blocked'.
 	if t.parentIssueNum > 0 {
 		var created struct {
 			Number int `json:"number"`
 		}
 		_ = json.Unmarshal([]byte(result), &created)
 		if created.Number > 0 {
-			if err := t.adapter.Client().AddIssueLabels(ctx, params.Repository, created.Number, []string{"blocked"}); err != nil {
-				slog.Warn("create_issue: failed to add blocked label", "error", err, "issue", created.Number)
+			var initialLabel string
+			if t.planFirst {
+				initialLabel = "planning" // sub-issues wait for human to add plan-approved on parent
+				slog.Info("create_issue: sub-issue in planning state (plan-first policy)", "issue", created.Number, "repo", params.Repository)
+			} else {
+				initialLabel = "blocked"
 			}
-			if t.scheduler != nil {
-				if err := t.scheduler.CheckAndUnblock(ctx, params.Repository); err != nil {
-					slog.Warn("create_issue: CheckAndUnblock failed", "error", err, "repo", params.Repository)
+			if err := t.adapter.Client().AddIssueLabels(ctx, params.Repository, created.Number, []string{initialLabel}); err != nil {
+				slog.Warn("create_issue: failed to add label", "label", initialLabel, "error", err, "issue", created.Number)
+			}
+			if !t.planFirst {
+				if t.scheduler != nil {
+					if err := t.scheduler.CheckAndUnblock(ctx, params.Repository); err != nil {
+						slog.Warn("create_issue: CheckAndUnblock failed", "error", err, "repo", params.Repository)
+					}
 				}
 			}
 		}

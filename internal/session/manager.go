@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/autoreg"
+	"github.com/fordjent/fordjent/internal/policy"
 	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
@@ -91,6 +92,7 @@ type Manager struct {
 	labelBoot       sync.Map // repo → bool, tracks which repos have had labels ensured
 	issueStates     sync.Map // "repo/issues/N" → lifecycle.IssueState, tracks previous FSM state
 	autoReg         *autoreg.AutoRegistrar
+	policyDetector *policy.CachedDetector
 }
 
 // SandboxReporter implements sandbox.ErrorReporter by posting violation comments to Forgejo.
@@ -198,6 +200,10 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 		})
 		slog.Info("auto-register enabled", "webhook_url", cfg.AutoRegister.WebhookURL)
 	}
+
+	// Wire policy detector (uses admin client to read repo topics)
+	m.policyDetector = policy.NewCachedDetector(adminClient)
+	slog.Info("policy detector initialized", "default_policy", policy.DefaultPolicy().String())
 
 	if err := m.restoreSessions(); err != nil {
 		slog.Warn("failed to restore sessions from database", "error", err)
@@ -554,6 +560,13 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				openedEvt.Payload = evt.Payload
 				openedEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
 				m.handleEvent(ctx, openedEvt)
+
+				// If plan-approved was added to a parent issue, unblock sub-issues.
+				// Find issues with "Depends on: #N" in their body and transition them
+				// from "planning" to "ready".
+				if state == lifecycle.StatePlanApproved {
+					m.unblockSubIssues(ctx, evt.Repository, evt.IssueNumber)
+				}
 				return
 			}
 		}
@@ -872,7 +885,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 		}
 	}
 
-	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter, m.scheduler)
+	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter, m.scheduler, m.policyDetector)
 
 	for {
 		select {
@@ -1475,6 +1488,49 @@ func detectRoleFromBody(body string) string {
 		}
 	}
 	return ""
+}
+
+// unblockSubIssues finds sub-issues that depend on parentNum and transitions them
+// from 'planning' to 'ready' by removing the 'planning' label and adding 'ready'.
+// This is triggere when a human adds 'plan-approved' to the parent PM issue.
+func (m *Manager) unblockSubIssues(ctx context.Context, repo string, parentNum int) {
+	issues, err := m.forgejoClient.ListIssues(ctx, repo, "open", 50)
+	if err != nil {
+		slog.Warn("unblockSubIssues: failed to list issues", "error", err)
+		return
+	}
+
+	depPattern := fmt.Sprintf("Depends on: #%d", parentNum)
+	unblocked := 0
+	for _, iss := range issues {
+		if !strings.Contains(iss.Body, depPattern) {
+			continue
+		}
+		// Check if this sub-issue has the 'planning' label
+		hasPlanning := false
+		for _, l := range iss.Labels {
+			if l.Name == "planning" {
+				hasPlanning = true
+				break
+			}
+		}
+		if hasPlanning {
+			if err := m.forgejoClient.RemoveIssueLabel(ctx, repo, iss.Number, "planning"); err != nil {
+				slog.Warn("unblockSubIssues: failed to remove planning label", "error", err, "issue", iss.Number)
+			}
+			if err := m.forgejoClient.AddIssueLabels(ctx, repo, iss.Number, []string{"ready"}); err != nil {
+				slog.Warn("unblockSubIssues: failed to add ready label", "error", err, "issue", iss.Number)
+			}
+			unblocked++
+			if err := m.forgejoClient.PostIssueComment(ctx, repo, iss.Number, fmt.Sprintf("Plan approved on #%d. This issue is now ready for implementation.", parentNum)+"\n\n\x3c!-- ford -->"); err != nil {
+				slog.Warn("unblockSubIssues: failed to post comment", "error", err, "issue", iss.Number)
+			}
+			slog.Info("unblocked sub-issue after plan approval", "parent", parentNum, "sub_issue", iss.Number, "repo", repo)
+		}
+	}
+	if unblocked > 0 {
+		slog.Info("unblocked sub-issues after plan approval", "parent", parentNum, "count", unblocked, "repo", repo)
+	}
 }
 
 func detectRoleFromTitle(title string) string {
