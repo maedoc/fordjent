@@ -429,12 +429,38 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				if err != nil {
 					slog.Warn("push handler: failed to list issues", "error", err, "repo", evt.Repository)
 				} else {
+					scaffoldClosed := false
 					for _, issue := range issues {
 						if strings.HasPrefix(issue.Title, "[scaffold]") {
 							if err := m.forgejoClient.CloseIssue(schedCtx, evt.Repository, issue.Number); err != nil {
 								slog.Warn("push handler: failed to close scaffold issue", "error", err, "issue", issue.Number)
 							} else {
 								slog.Info("push handler: closed scaffold issue", "issue", issue.Number, "repo", evt.Repository)
+								scaffoldClosed = true
+							}
+						}
+					}
+
+					// If a scaffold was closed, remove 'blocked' labels from issues
+					// that were blocked by the scaffold detector
+					if scaffoldClosed {
+						for _, issue := range issues {
+							if issue.Number == 0 || strings.HasPrefix(issue.Title, "[scaffold]") {
+								continue
+							}
+							hasBlocked := false
+							for _, l := range issue.Labels {
+								if l.Name == "blocked" {
+									hasBlocked = true
+									break
+								}
+							}
+							if hasBlocked {
+								if err := m.forgejoClient.RemoveIssueLabel(schedCtx, evt.Repository, issue.Number, "blocked"); err != nil {
+									slog.Warn("push handler: failed to remove blocked label", "error", err, "issue", issue.Number)
+								} else {
+									slog.Info("push handler: unblocked issue after scaffold completion", "issue", issue.Number, "repo", evt.Repository)
+								}
 							}
 						}
 					}
