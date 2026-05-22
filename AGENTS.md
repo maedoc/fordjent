@@ -1424,3 +1424,75 @@ Three validation waves to verify the Bug 1–3 fixes (dual-label, session recove
 | `internal/tool/forgejo_tools.go` | Auto-request reviewer after PR creation |
 | `internal/tool/forgejo_tools_test.go` | Updated `TestCreatePRToolExecute` |
 | `internal/scaffold/scaffold.go` | Exported `DetectProjectLang()` |
+
+## Role-Based Agent Identities (May 22, 2026)
+
+### Problem
+All agent actions appeared under a single `fjadmin` user, making it impossible to tell which role (PM, implementer, reviewer) was responsible for a comment, PR, or label change.
+
+### Solution
+Created three role-based Forgejo users with distinct identities:
+
+| Role | User | Avatar | Description |
+|------|------|--------|-------------|
+| PM | `djent-pm` | 🎯 on indigo | Planning, decomposition, coordination |
+| Implementer / DevOps | `djent-dev` | ⚡ on green | Code writing, infrastructure, deployment |
+| Reviewer / Tester | `djent-qa` | 🔍 on amber | Code review, testing, quality assurance |
+
+### Implementation
+
+**Config** (new fields in `forgejo` section):
+```yaml
+forgejo:
+  role_tokens:
+    pm: "token-for-djent-pm..."
+    implementer: "token-for-djent-dev..."
+    devops: "token-for-djent-dev..."    # shares with implementer
+    reviewer: "token-for-djent-qa..."
+    tester: "token-for-djent-qa..."     # shares with reviewer
+  role_users:
+    pm: "djent-pm"
+    implementer: "djent-dev"
+    devops: "djent-dev"
+    reviewer: "djent-qa"
+    tester: "djent-qa"
+```
+
+**New API methods** (`internal/forgejo/client.go`):
+- `WithToken(token)` — returns a copy of the client with a different token (for role switching)
+- `AddAssignees(repo, issue, []usernames)` — PATCH `/repos/{owner}/{repo}/issues/{N}` with assignees
+- `RemoveAssignee(repo, issue, username)` — DELETE assignee from issue
+- `RequestReviewers(repo, pr, []usernames)` — POST requested reviewers on a PR
+
+**Agent changes**:
+- `NewAgent` checks `config.Forgejo.RoleTokens[role]` and creates a role-specific Forgejo client
+- All comments, PRs, reactions, and labels appear under the role user
+- On session start, the issue is auto-assigned to the role user via `AddAssignees`
+- Git commits use `djent-dev` as the default identity (configurable via `git_name`/`git_email`)
+
+**Language-aware build gate** (`internal/tool/forgejo_tools.go`):
+- `forgejo_create_pr` now detects the repo language via `scaffold.DetectProjectLang`
+- Go projects: `go build ./...`, `go test ./...`, `golangci-lint run`
+- Python projects: `python3 -m pytest` (non-blocking)
+- Unknown: skip build/test gate
+- Fixes bug where agents added `go.mod` stubs to Python projects
+
+**Reviewer request**:
+- `forgejo_create_pr` now requests collaborators as reviewers (not just the repo owner)
+- The PR author is excluded from the reviewer list (Forgejo returns 422 for self-review)
+- On repos where `djent-qa` is a collaborator, they will be auto-requested
+
+**Bootstrap**:
+- `bootstrap-local.sh` creates three Forgejo users (`djent-pm`, `djent-dev`, `djent-qa`)
+- Generates tokens for each and adds them as collaborators on repos
+- Uploads avatar PNGs with role initials (PM, DEV, QA) on colored circles
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/config/config.go` | `RoleTokens` and `RoleUsers` maps on `ForgejoConfig` |
+| `internal/forgejo/client.go` | `WithToken()`, `AddAssignees()`, `RemoveAssignee()`, `RequestReviewers()` |
+| `internal/session/agent.go` | Role-specific Forgejo client in `NewAgent()` |
+| `internal/session/manager.go` | Auto-assign role user on session start |
+| `internal/tool/forgejo_tools.go` | Language-aware build gate; collaborator-based reviewer request |
