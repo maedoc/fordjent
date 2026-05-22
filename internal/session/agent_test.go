@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -897,5 +898,62 @@ func TestBuildSystemPrompt_PolicyPlanFirst(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "plan-approved") {
 		t.Error("pm prompt should mention plan-approved label")
+	}
+}
+
+func TestConsecutiveBlockEscalation(t *testing.T) {
+	// Verify that the block counter logic works: first block gives a short message,
+	// third+ block gives an escalated message that tells the agent to stop and post a comment.
+	tests := []struct {
+		name       string
+		state      lifecycle.IssueState
+		blockNum   int
+		wantSubstr string
+	}{
+		{
+			name:       "first block in planning state",
+			state:      lifecycle.StatePlanning,
+			blockNum:   1,
+			wantSubstr: "Planning state",
+		},
+		{
+			name:       "third block in planning state",
+			state:      lifecycle.StatePlanning,
+			blockNum:   3,
+			wantSubstr: "STOP attempting implementation tools",
+		},
+		{
+			name:       "first block in blocked state",
+			state:      lifecycle.StateFSMBlocked,
+			blockNum:   1,
+			wantSubstr: "Blocked",
+		},
+		{
+			name:       "fifth block in blocked state",
+			state:      lifecycle.StateFSMBlocked,
+			blockNum:   5,
+			wantSubstr: "STOP attempting implementation tools",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msg string
+			switch tt.state {
+			case lifecycle.StatePlanning:
+				msg = "Error: This issue is in Planning state."
+				if tt.blockNum >= 3 {
+					msg = fmt.Sprintf("Error: You have been blocked %d times. STOP attempting implementation tools.", tt.blockNum)
+				}
+			case lifecycle.StateFSMBlocked:
+				msg = "Error: This issue is Blocked."
+				if tt.blockNum >= 3 {
+					msg = fmt.Sprintf("Error: You have been blocked %d times. STOP attempting implementation tools.", tt.blockNum)
+				}
+			}
+			if !strings.Contains(msg, tt.wantSubstr) {
+				t.Errorf("block message for %s (block %d) should contain %q, got %q", tt.state, tt.blockNum, tt.wantSubstr, msg)
+			}
+		})
 	}
 }

@@ -285,14 +285,20 @@ Update the issue comment with your reflection, then continue working.`,
 
 		// Execute tool calls
 		var firstToolErr error
+		consecutiveBlocks := 0
 		for _, tc := range result.Response.ToolCalls {
 			// Analysis mode: block implementation tools
 			if analysisMode && isImplementationTool(tc.Function.Name) {
 				slog.Info("blocked implementation tool in analysis mode", "tool", tc.Function.Name, "session_key", a.sess.Key)
+				consecutiveBlocks++
+				blockMsg := "Error: Analysis mode is active. You may only use planning tools (read_file, bash ls/cat, forgejo_list_issues, forgejo_create_issue, forgejo_comment). Please post your analysis and decomposition plan as a comment instead."
+				if consecutiveBlocks >= 3 {
+					blockMsg = "Error: STOP attempting implementation tools. You are in analysis mode. Call forgejo_comment NOW to post your plan, then end the session."
+				}
 				messages = append(messages, provider.Message{
 					Role:       "tool",
 					ToolCallID: tc.ID,
-					Content:    "Error: Analysis mode is active. You may only use planning tools (read_file, bash ls/cat, forgejo_list_issues, forgejo_create_issue, forgejo_comment). Please post your analysis and decomposition plan as a comment instead.",
+					Content:    blockMsg,
 				})
 				continue
 			}
@@ -300,12 +306,17 @@ Update the issue comment with your reflection, then continue working.`,
 			// FSM state: block implementation tools in planning/blocked states
 			if (fsmState == lifecycle.StatePlanning || fsmState == lifecycle.StateFSMBlocked) && isImplementationTool(tc.Function.Name) {
 				slog.Info("blocked implementation tool in FSM state", "tool", tc.Function.Name, "state", string(fsmState), "session_key", a.sess.Key)
+				consecutiveBlocks++
 				var blockMsg string
 				switch fsmState {
 				case lifecycle.StateFSMBlocked:
 					blockMsg = "Error: This issue is Blocked. Do not attempt implementation. Post a comment explaining the blocker."
 				case lifecycle.StatePlanning:
 					blockMsg = "Error: This issue is in Planning state. You may only use read-only and planning tools. Post your plan as a comment, then STOP."
+				}
+				if consecutiveBlocks >= 3 {
+					parentNum := evt.IssueNumber
+					blockMsg = fmt.Sprintf("Error: You have been blocked %d times. STOP attempting implementation tools. This issue is in %s state — you CANNOT write code. Call forgejo_comment to post a message explaining: (1) why you cannot proceed, and (2) what label or action is needed. For planning state: add 'plan-approved' to the parent issue (#%d) to unblock. Then end the session.", consecutiveBlocks, fsmState, parentNum)
 				}
 				messages = append(messages, provider.Message{
 					Role:       "tool",
