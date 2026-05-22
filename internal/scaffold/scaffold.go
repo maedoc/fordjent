@@ -1,6 +1,10 @@
 // Package scaffold detects empty repositories and ensures a scaffold issue exists
 // before other issues are processed. This prevents parallel workstreams from all
-// independently creating go.mod / README.md and conflicting.
+// independently creating project files and conflicting.
+//
+// The scaffold is language-agnostic: it detects the project language from existing
+// files (e.g., go.mod → Go, requirements.txt → Python) and generates appropriate
+// scaffolding. For truly empty repos, it creates a minimal README.md + .gitignore.
 package scaffold
 
 import (
@@ -50,18 +54,12 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 		}
 	}
 
-	// If repo has zero files OR lacks go.mod/README.md, treat as empty.
-	hasGoMod := false
-	hasReadme := false
-	for _, f := range files {
-		if f == "go.mod" {
-			hasGoMod = true
-		}
-		if strings.EqualFold(f, "README.md") {
-			hasReadme = true
-		}
-	}
-	if len(files) > 0 && hasGoMod && hasReadme {
+	// Detect project language from existing files.
+	projectLang := detectProjectLang(files)
+	slog.Info("scaffold: detected project language", "repo", repo, "language", projectLang)
+
+	// If repo has enough files and a project manifest, treat as populated.
+	if isRepoPopulated(files, projectLang) {
 		return false, nil
 	}
 
@@ -92,21 +90,16 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 	}
 
 	if scaffoldIssue == nil {
-		// Create the scaffold issue
-		title := "[scaffold] Add project scaffold (go.mod, README.md, etc.)"
-		body := fmt.Sprintf(
-			"This repository has only %d file(s) and appears to be missing basic project files. "+
-				"Please create `go.mod` and `README.md` (and `.gitignore` if appropriate) before filing feature issues.\n\n"+
-				"Other open issues have been labeled `blocked` until the scaffold is in place.",
-			len(files))
+		// Create the scaffold issue with language-appropriate guidance.
+		title, body := scaffoldIssueContent(projectLang, len(files))
 		iss, err := client.CreateIssue(ctx, repo, title, body)
 		if err != nil {
 			slog.Warn("scaffold: failed to create scaffold issue", "error", err, "repo", repo)
 			return false, nil
 		}
-		_ = writeClient.AddIssueLabels(ctx, repo, iss.Number, []string{ScaffoldLabel, "blocked"})
+		_ = writeClient.AddIssueLabels(ctx, repo, iss.Number, []string{ScaffoldLabel})
 		scaffoldIssue = iss
-		slog.Info("scaffold: created scaffold issue", "repo", repo, "issue", iss.Number)
+		slog.Info("scaffold: created scaffold issue", "repo", repo, "issue", iss.Number, "language", projectLang)
 	}
 
 	// Label the current issue blocked so the agent doesn't start on it yet.
@@ -123,4 +116,187 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 	}
 
 	return false, nil
+}
+
+// detectProjectLang examines repo files to determine the project language.
+func detectProjectLang(files []string) string {
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	// Check for language-specific manifests in priority order.
+	switch {
+	case fileSet["go.mod"]:
+		return "go"
+	case fileSet["go.sum"]:
+		return "go"
+	case fileSet["pyproject.toml"]:
+		return "python"
+	case fileSet["requirements.txt"]:
+		return "python"
+	case fileSet["setup.py"] || fileSet["setup.cfg"]:
+		return "python"
+	case fileSet["Pipfile"]:
+		return "python"
+	case fileSet["Cargo.toml"]:
+		return "rust"
+	case fileSet["package.json"]:
+		return "javascript"
+	case fileSet["pom.xml"] || fileSet["build.gradle"] || fileSet["build.gradle.kts"]:
+		return "java"
+	case fileSet["Gemfile"]:
+		return "ruby"
+	case fileSet["composer.json"]:
+		return "php"
+	}
+
+	// Check file extensions for hints.
+	pyCount := 0
+	goCount := 0
+	for _, f := range files {
+		ext := lastExt(f)
+		switch ext {
+		case ".py":
+			pyCount++
+		case ".go":
+			goCount++
+		}
+	}
+	if pyCount > goCount && pyCount > 0 {
+		return "python"
+	}
+	if goCount > 0 {
+		return "go"
+	}
+
+	return "unknown"
+}
+
+// lastExt returns the file extension (e.g., ".py" from "dir/file.py").
+func lastExt(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+		if path[i] == '/' {
+			break
+		}
+	}
+	return ""
+}
+
+// isRepoPopulated checks if a repo has enough files to be considered scaffolded.
+func isRepoPopulated(files []string, projectLang string) bool {
+	if len(files) == 0 {
+		return false
+	}
+
+	// Must have a README.
+	hasReadme := false
+	for _, f := range files {
+		if strings.EqualFold(f, "README.md") || strings.EqualFold(f, "README") || strings.EqualFold(f, "README.txt") {
+			hasReadme = true
+			break
+		}
+	}
+
+	// Must have a project manifest appropriate for the language.
+	hasManifest := false
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	switch projectLang {
+	case "go":
+		hasManifest = fileSet["go.mod"]
+	case "python":
+		hasManifest = fileSet["requirements.txt"] || fileSet["pyproject.toml"] ||
+			fileSet["setup.py"] || fileSet["setup.cfg"] || fileSet["Pipfile"]
+	case "rust":
+		hasManifest = fileSet["Cargo.toml"]
+	case "javascript":
+		hasManifest = fileSet["package.json"]
+	case "java":
+		hasManifest = fileSet["pom.xml"] || fileSet["build.gradle"] || fileSet["build.gradle.kts"]
+	case "ruby":
+		hasManifest = fileSet["Gemfile"]
+	case "php":
+		hasManifest = fileSet["composer.json"]
+	default:
+		// Unknown language: if there are 3+ files and a README, consider it populated.
+		return len(files) >= 3 && hasReadme
+	}
+
+	return hasReadme && hasManifest
+}
+
+// scaffoldIssueContent returns the title and body for a scaffold issue.
+func scaffoldIssueContent(projectLang string, fileCount int) (string, string) {
+	var title, body string
+
+	switch projectLang {
+	case "go":
+		title = "[scaffold] Set up Go project structure"
+		body = fmt.Sprintf(
+			"This repository has only %d file(s) and needs a Go project scaffold. "+
+				"Please create the following files:\n\n"+
+				"- `go.mod` — Go module definition\n"+
+				"- `README.md` — Project documentation\n"+
+				"- `.gitignore` — Go-specific ignore patterns\n\n"+
+				"Other open issues have been labeled `blocked` until the scaffold is in place.",
+			fileCount)
+
+	case "python":
+		title = "[scaffold] Set up Python project structure"
+		body = fmt.Sprintf(
+			"This repository has only %d file(s) and needs a Python project scaffold. "+
+				"Please create the following files:\n\n"+
+				"- `requirements.txt` or `pyproject.toml` — Python dependencies\n"+
+				"- `README.md` — Project documentation\n"+
+				"- `.gitignore` — Python-specific ignore patterns\n\n"+
+				"If the project uses Snakemake, also create:\n"+
+				"- `Snakefile` — Workflow definition\n\n"+
+				"Other open issues have been labeled `blocked` until the scaffold is in place.",
+			fileCount)
+
+	case "rust":
+		title = "[scaffold] Set up Rust project structure"
+		body = fmt.Sprintf(
+			"This repository has only %d file(s) and needs a Rust project scaffold. "+
+				"Please create the following files:\n\n"+
+				"- `Cargo.toml` — Rust package manifest\n"+
+				"- `README.md` — Project documentation\n"+
+				"- `.gitignore` — Rust-specific ignore patterns\n\n"+
+				"Other open issues have been labeled `blocked` until the scaffold is in place.",
+			fileCount)
+
+	case "javascript":
+		title = "[scaffold] Set up JavaScript/Node project structure"
+		body = fmt.Sprintf(
+			"This repository has only %d file(s) and needs a JavaScript project scaffold. "+
+				"Please create the following files:\n\n"+
+				"- `package.json` — Node package manifest\n"+
+				"- `README.md` — Project documentation\n"+
+				"- `.gitignore` — Node-specific ignore patterns\n\n"+
+				"Other open issues have been labeled `blocked` until the scaffold is in place.",
+			fileCount)
+
+	default:
+		title = "[scaffold] Set up project structure"
+		body = fmt.Sprintf(
+			"This repository has only %d file(s) and needs a basic project scaffold. "+
+				"Please create the following files:\n\n"+
+				"- `README.md` — Project documentation\n"+
+				"- `.gitignore` — Appropriate ignore patterns\n\n"+
+				"Look at other open issues in this repository for hints about the project's "+
+				"language and framework. If the issues mention Python, Snakemake, or BIDS, "+
+				"create a Python project structure (requirements.txt, etc.). "+
+				"If they mention Go, create a Go project structure (go.mod, etc.).\n\n"+
+				"Other open issues have been labeled `blocked` until the scaffold is in place.",
+			fileCount)
+	}
+
+	return title, body
 }
