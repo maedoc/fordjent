@@ -1573,25 +1573,39 @@ func extractIssueTitle(evt *event.Event) string {
 }
 
 func (m *Manager) postRoleGuidance(ctx context.Context, repo string, issueNumber int) {
-	body := `Thanks for creating this issue! Before I start implementing, please tag it with a role so I know how to approach it.
-
-**Available roles:**
-
-| Tag in title | Label | What I'll do |
-|---|---|---|
-| [pm] or [decompose] | role:pm | Analyze and create sub-issues |
-| [review] or [code review] | role:reviewer | Review code and approve/merge PRs |
-| [test] or [testing] | role:tester | Write comprehensive tests |
-| [devops] or [docker] | role:devops | Docker, CI/CD, deployment changes |
-| (no tag, any label) | role:implementer | Write production code and open a PR |
-
-**To assign a role, either:**
-- Edit the issue title to include one of the tags above (e.g., "[pm] Add auth system")
-- Add one of the matching labels
-
-Once a role is assigned, I'll start working on this automatically.
-
-<!-- ford -->`
+	body := strings.Join([]string{
+		"Thanks for creating this issue! I need a **role tag** in the title before I can start working on it.",
+		"",
+		"## How to assign a role",
+		"",
+		"Add one of these **tags to the issue title**:",
+		"",
+		"| Title tag | What I'll do |",
+		"|---|---|",
+		"| [pm] or [decompose] | Analyze the request and create sub-issues |",
+		"| [implementer] or [dev] | Write production code and open a PR |",
+		"| [review] or [code review] | Review code, suggest fixes, approve or merge PRs |",
+		"| [tester] or [testing] | Write tests and report bugs |",
+		"| [devops] or [docker] | Docker, CI/CD, infrastructure changes |",
+		"",
+		"**Example:** Change \"Add auth system\" to \"[implementer] Add auth system\"",
+		"",
+		"You can also add a matching **label** (e.g., role:implementer) instead of a title tag.",
+		"",
+		"## Tags vs Labels",
+		"",
+		"- **Tags** like [implementer] go in the **issue title** — I detect them automatically.",
+		"- **Labels** like role:implementer are added via the issue sidebar — also detected.",
+		"- Either one works. You don't need both.",
+		"",
+		"## Want zero-friction automation?",
+		"",
+		"By default, I use a **plan-first** policy: PM sub-issues start in planning state and need human approval before implementation begins.",
+		"",
+		"For full automation with no approval gates, add the **fordjent-yolo** topic to your repo (Settings > Topics).",
+		"",
+		"<!-- ford -->",
+	}, "\n")
 	if err := m.forgejoClient.PostIssueComment(ctx, repo, issueNumber, body); err != nil {
 		slog.Warn("role gate: failed to post guidance comment", "error", err, "issue", issueNumber)
 	}
