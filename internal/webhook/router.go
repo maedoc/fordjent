@@ -651,7 +651,6 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 		"number", num,
 	)
 
-	// Normalize to internal event
 	evt, err := r.normalizeEvent(eventType, action, payload)
 	if err != nil {
 		r.logger.Warn("unhandled event type", "type", eventType, "action", action, "error", err)
@@ -661,6 +660,19 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK) // Ack but ignore
 		fmt.Fprintln(w, "ignored")
 		return
+	}
+
+	// Forgejo v9 does not include is_pull_request or pull_request in
+	// issue_comment webhook payloads, so comments on PRs arrive with prNum==0
+	// and session key repo/issues/N. Fix the session key by checking via API.
+	if evt.PRNumber == 0 && evt.IssueNumber > 0 && strings.HasPrefix(string(evt.Type), "issue_comment") && r.forgejo != nil {
+		issue, err := r.forgejo.GetIssue(req.Context(), evt.Repository, evt.IssueNumber)
+		if err == nil && issue.PullRequest.IsPR() {
+			r.logger.Info("corrected issue_comment session key to pulls",
+				"issue", evt.IssueNumber, "repo", evt.Repository)
+			evt.PRNumber = evt.IssueNumber
+			evt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.IssueNumber)
+		}
 	}
 
 	metrics.IncEvents()

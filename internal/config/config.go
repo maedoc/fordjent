@@ -64,6 +64,7 @@ type AgentConfig struct {
 	MaxTurnsPM              int           `yaml:"max_turns_pm"`
 	MaxTurnsImplementer     int           `yaml:"max_turns_implementer"`
 	MaxTurnsReviewer       int           `yaml:"max_turns_reviewer"`
+	MaxCommentsPerSession  int           `yaml:"max_comments_per_session"`
 	CommitPrefix            string        `yaml:"commit_prefix"`
 	ContextWindow           int           `yaml:"context_window"`
 	CompactionThreshold     float64       `yaml:"compaction_threshold"`
@@ -165,6 +166,7 @@ func Load(path string) (*Config, error) {
 			MaxTurnsPM:              15,
 			MaxTurnsImplementer:     50,
 			MaxTurnsReviewer:       20,
+			MaxCommentsPerSession:  2,
 			CommitPrefix:            "[agent-automation]",
 			ContextWindow:           128000,
 			CompactionThreshold:     0.80,

@@ -193,8 +193,7 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 
 	body := params.Body
 	if t.parentIssueNum > 0 {
-		body += fmt.Sprintf("\n\nDepends on: #%d", t.parentIssueNum)
-		// Fetch parent issue body for context transfer
+		// Fetch parent issue body for context transfer (useful, not noise)
 		parent, parentErr := t.adapter.Client().GetIssue(ctx, params.Repository, t.parentIssueNum)
 		if parentErr == nil && parent != nil {
 			excerpt := parent.Body
@@ -234,6 +233,10 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 			}
 			if err := t.adapter.Client().AddIssueLabels(ctx, params.Repository, created.Number, []string{initialLabel}); err != nil {
 				slog.Warn("create_issue: failed to add label", "label", initialLabel, "error", err, "issue", created.Number)
+			}
+			// Add native dependency via API (replaces "Depends on: #N" text in body)
+			if err := t.adapter.Client().AddIssueDependency(ctx, params.Repository, created.Number, params.Repository, t.parentIssueNum); err != nil {
+				slog.Warn("create_issue: failed to add dependency via API", "error", err, "issue", created.Number, "depends_on", t.parentIssueNum)
 			}
 			if !t.planFirst {
 				if t.scheduler != nil {
@@ -462,13 +465,14 @@ func (t *forgejoGetSiblingIssuesTool) siblingHasOpenPR(ctx context.Context, repo
 	}
 	var issue struct {
 		PullRequest *struct {
-			URL string `json:"url"`
+			URL     string `json:"url"`
+			HTMLURL string `json:"html_url"`
 		} `json:"pull_request"`
 	}
 	if err := json.Unmarshal([]byte(result), &issue); err != nil {
 		return false
 	}
-	return issue.PullRequest != nil && issue.PullRequest.URL != ""
+	return issue.PullRequest != nil && (issue.PullRequest.URL != "" || issue.PullRequest.HTMLURL != "")
 }
 
 // extractSiblingParentRef extracts the parent issue number from a sibling's body.
@@ -1760,8 +1764,9 @@ func (t *forgejoGetSubIssuesTool) Execute(ctx context.Context, args json.RawMess
 			State       string `json:"state"`
 			Merged      bool   `json:"merged"`
 			PullRequest *struct {
-				URL    string `json:"url"`
-				Merged bool   `json:"merged"`
+				URL     string `json:"url"`
+				HTMLURL string `json:"html_url"`
+				Merged  bool   `json:"merged"`
 			} `json:"pull_request"`
 		}
 		if err := json.Unmarshal([]byte(detailResult), &detail); err != nil {
@@ -1769,7 +1774,7 @@ func (t *forgejoGetSubIssuesTool) Execute(ctx context.Context, args json.RawMess
 			continue
 		}
 
-		hasPR := detail.PullRequest != nil && detail.PullRequest.URL != ""
+		hasPR := detail.PullRequest != nil && (detail.PullRequest.URL != "" || detail.PullRequest.HTMLURL != "")
 		isMerged := detail.Merged || (detail.PullRequest != nil && detail.PullRequest.Merged)
 
 		switch {

@@ -58,7 +58,14 @@ type Issue struct {
 }
 
 type PRRef struct {
-	URL string `json:"url"`
+	URL     string `json:"url"`
+	HTMLURL string `json:"html_url"`
+}
+
+// IsPR returns true if this reference points to a real pull request.
+// Forgejo may populate either URL or HTMLURL depending on the API endpoint.
+func (p *PRRef) IsPR() bool {
+	return p != nil && (p.URL != "" || p.HTMLURL != "")
 }
 
 // Comment represents a Forgejo issue/PR comment.
@@ -1007,6 +1014,87 @@ func (c *Client) GetRepoTopics(ctx context.Context, repo string) ([]string, erro
 		return nil, fmt.Errorf("decode topics: %w", err)
 	}
 	return resp.Topics, nil
+}
+
+// CreateCommitStatus creates a commit status on a given SHA.
+// state must be one of: pending, success, error, failure.
+func (c *Client) CreateCommitStatus(ctx context.Context, repo, sha, state, contextStr, description, targetURL string) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "statuses", sha)
+	body := map[string]string{
+		"state":       state,
+		"context":     contextStr,
+		"description": description,
+	}
+	if targetURL != "" {
+		body["target_url"] = targetURL
+	}
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, body)
+	return err
+}
+
+// AddIssueDependency makes the issue in the URL depend on the issue in the body.
+// POST /repos/{owner}/{repo}/issues/{index}/dependencies
+func (c *Client) AddIssueDependency(ctx context.Context, repo string, issueNumber int, depRepo string, depNumber int) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "dependencies")
+	// Extract owner and repo name from depRepo ("owner/repo")
+	parts := strings.Split(depRepo, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid dep repo format: %s", depRepo)
+	}
+	body := map[string]interface{}{
+		"index": depNumber,
+		"owner": parts[0],
+		"repo":  parts[1],
+	}
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, body)
+	return err
+}
+
+// RemoveIssueDependency removes a dependency from an issue.
+// DELETE /repos/{owner}/{repo}/issues/{index}/dependencies
+func (c *Client) RemoveIssueDependency(ctx context.Context, repo string, issueNumber int, depRepo string, depNumber int) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "dependencies")
+	parts := strings.Split(depRepo, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid dep repo format: %s", depRepo)
+	}
+	body := map[string]interface{}{
+		"index": depNumber,
+		"owner": parts[0],
+		"repo":  parts[1],
+	}
+	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, body)
+	return err
+}
+
+// ListIssueDependencies lists what blocks this issue.
+// GET /repos/{owner}/{repo}/issues/{index}/dependencies
+func (c *Client) ListIssueDependencies(ctx context.Context, repo string, issueNumber int) ([]Issue, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "dependencies")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var deps []Issue
+	if err := json.Unmarshal([]byte(result), &deps); err != nil {
+		return nil, fmt.Errorf("unmarshal dependencies: %w", err)
+	}
+	return deps, nil
+}
+
+// ListIssueBlocks lists issues that are blocked by this issue.
+// GET /repos/{owner}/{repo}/issues/{index}/blocks
+func (c *Client) ListIssueBlocks(ctx context.Context, repo string, issueNumber int) ([]Issue, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "blocks")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var blocks []Issue
+	if err := json.Unmarshal([]byte(result), &blocks); err != nil {
+		return nil, fmt.Errorf("unmarshal blocks: %w", err)
+	}
+	return blocks, nil
 }
 
 // ListPRReviews returns reviews for a pull request.

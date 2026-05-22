@@ -499,7 +499,8 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Skip for green-light events (human already approved the issue).
 	// Skip for scaffold issues ([scaffold] prefix) — they are auto-generated and should
 	// be implemented immediately.
-	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
+	// Skip for PRs — PRs don't need role tags, they're already past the implementation stage.
+	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" && evt.PRNumber == 0 {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil {
 			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
@@ -975,7 +976,14 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					m.revertClaim(ctx, sess)
 				}
 			} else {
-				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role)
+				// Get head SHA for commit status
+				headSHA := ""
+				if sess.RepoDir != "" {
+					if out, err := exec.CommandContext(ctx, "git", "-C", sess.RepoDir, "rev-parse", "HEAD").Output(); err == nil {
+						headSHA = strings.TrimSpace(string(out))
+					}
+				}
+				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA)
 			}
 
 			sess.mu.Lock()
@@ -1142,7 +1150,7 @@ func (m *Manager) runAutoRetry(ctx context.Context) {
 			continue
 		}
 
-		isPR := issue.PullRequest != nil && issue.PullRequest.URL != ""
+		isPR := issue.PullRequest.IsPR()
 
 		var sessionKey string
 		if isPR {
@@ -1191,8 +1199,7 @@ func (m *Manager) runAutoRetry(ctx context.Context) {
 			evt.SessionKey = fmt.Sprintf("%s/issues/%d", rec.Repository, rec.IssueNumber)
 		}
 
-		body := fmt.Sprintf("Auto-retry: attempt %d/%d after max-turns failure. Resuming work.\n\n<!-- ford -->", retryCount+1, maxRetries)
-		_ = m.forgejoClient.PostIssueComment(ctx, rec.Repository, rec.IssueNumber, body)
+		_ = m.forgejoClient.AddReaction(ctx, rec.Repository, rec.IssueNumber, 0, "arrows_counterclockwise")
 
 		retryCtx, retryCancel := context.WithTimeout(ctx, 5*time.Minute)
 		go func() {
@@ -1550,9 +1557,8 @@ func (m *Manager) unblockSubIssues(ctx context.Context, repo string, parentNum i
 				slog.Warn("unblockSubIssues: failed to add ready label", "error", err, "issue", iss.Number)
 			}
 			unblocked++
-			if err := m.forgejoClient.PostIssueComment(ctx, repo, iss.Number, fmt.Sprintf("Plan approved on #%d. This issue is now ready for implementation.", parentNum)+"\n\n\x3c!-- ford -->"); err != nil {
-				slog.Warn("unblockSubIssues: failed to post comment", "error", err, "issue", iss.Number)
-			}
+			// Add reaction instead of comment — the 'ready' label already signals unblocked
+			_ = m.forgejoClient.AddReaction(ctx, repo, iss.Number, 0, "rocket")
 			slog.Info("unblocked sub-issue after plan approval", "parent", parentNum, "sub_issue", iss.Number, "repo", repo)
 		}
 	}

@@ -57,6 +57,8 @@ type Agent struct {
 	policy           policy.Policy
 	policySet        bool
 	policyDetector   *policy.CachedDetector
+	commentCount     int
+	commentLimit     int
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
@@ -106,6 +108,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		pmFollowUp:      sess.IsPMFollowUp,
 		triggeringIssue: sess.TriggeringIssue,
 		policyDetector:  policyDetector,
+		commentLimit:     cfg.Agent.MaxCommentsPerSession,
 	}
 }
 
@@ -373,6 +376,17 @@ Update the issue comment with your reflection, then continue working.`,
 
 			metrics.IncToolCalls()
 
+			// Enforce per-session comment limit to reduce noise
+			if tc.Function.Name == "forgejo_comment" && a.commentLimit > 0 && a.commentCount >= a.commentLimit {
+				limitMsg := fmt.Sprintf("Error: Comment limit (%d) reached for this session. Do not post more comments. If you need to communicate something important, edit an existing comment or use forgejo_create_issue instead.", a.commentLimit)
+				messages = append(messages, provider.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    limitMsg,
+				})
+				continue
+			}
+
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
 			if terr != nil {
 				if firstToolErr == nil {
@@ -387,6 +401,8 @@ Update the issue comment with your reflection, then continue working.`,
 				}
 				slog.Error("tool execution failed", "tool", tc.Function.Name, "error", terr)
 				res = fmt.Sprintf("Error: %s", terr)
+			} else if tc.Function.Name == "forgejo_comment" {
+				a.commentCount++
 			}
 
 			if a.cfg.Memory.Enabled {
@@ -635,9 +651,10 @@ You have access to the following tools:
 8. **Pre-flight check**: Before writing code, verify the repo state using bash or read_file. Check what packages exist, recent commits on origin/main, your current branch, and whether listed dependencies are merged. If dependencies aren't merged, post a comment and STOP.
 9. **ALWAYS rebase before creating a PR.** Before calling forgejo_create_pr, first run 'git fetch origin' and then 'git rebase origin/main' on your feature branch using the git tool (two separate calls) or the bash tool (combined). This prevents merge conflicts.
 10. **Do NOT create a new PR if one already exists** for the current branch. Push to the existing branch instead.
-11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues. Do NOT add 'blocked' labels to sub-issues — the scheduler will manage blocking/unblocking automatically based on 'Depends on: #N' declarations.
+11. **For large tasks**, analyze the work and use 'forgejo_create_issue' to break it into smaller, specific sub-issues. Include concrete file paths in sub-issue bodies. Always check whether referenced packages exist in the clone before creating sub-issues. Do NOT add 'blocked' labels to sub-issues — the scheduler will manage blocking/unblocking automatically.
 12. **When you create sub-issues via forgejo_create_issue, STOP implementing.** Your role is to decompose and coordinate — post a summary comment on the parent issue, then stop. Let the dedicated sub-issue sessions handle the actual implementation.
 13. **If a comment says this issue is unblocked** (e.g. 'Dependency #N is now merged. This issue is unblocked'), check git status, verify dependencies are satisfied, and proceed with implementation immediately.
+14. **Be concise in comments.** Post at most ONE progress/summary comment when your work is done. Do NOT post intermediate status updates, progress reports, or step-by-step commentary. The issue labels and commit statuses already show your progress.
 14. **Merged PRs show state "closed" in the API.** When checking if a dependency PR is resolved, look at the 'merged' field (true = merged), not the 'state' field. A PR with 'state: closed' may still be merged and ready.
 
 ### Pre-Flight Checklist (RUN FIRST)

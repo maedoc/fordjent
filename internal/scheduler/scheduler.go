@@ -134,7 +134,19 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 			continue
 		}
 
-		deps := parseDependsOn(issue.Body)
+		// Try native dependencies API first, fall back to text parsing
+		var deps []int
+		if s.forgejoClient != nil {
+			apiDeps, err := s.forgejoClient.ListIssueDependencies(ctx, repo, issue.Number)
+			if err == nil && len(apiDeps) > 0 {
+				for _, d := range apiDeps {
+					deps = append(deps, d.Number)
+				}
+			}
+		}
+		if len(deps) == 0 {
+			deps = parseDependsOn(issue.Body)
+		}
 		if len(deps) == 0 {
 			continue
 		}
@@ -202,13 +214,9 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 			}
 		}
 
-		// Post a comment with the ford marker so isAgentEvent() filters it
-		comment := fmt.Sprintf(
-			"All dependencies are now resolved. This issue is unblocked and ready to work on! (Priority: %d)\n\n<!-- ford -->",
-			c.priority,
-		)
-		if err := s.postComment(ctx, repo, issue.Number, comment); err != nil {
-			slog.Warn("scheduler: failed to post unblock comment", "error", err, "issue", issue.Number)
+		// Use reaction instead of long comment — the 'ready' label already signals unblocked
+		if s.forgejoClient != nil {
+			_ = s.forgejoClient.AddReaction(ctx, repo, issue.Number, 0, "rocket")
 		}
 
 		unblocked = append(unblocked, issue.Number)
@@ -507,7 +515,8 @@ func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) 
 			State       string `json:"state"`
 			Merged      bool   `json:"merged"`
 			PullRequest *struct {
-				URL string `json:"url"`
+				URL     string `json:"url"`
+				HTMLURL string `json:"html_url"`
 			} `json:"pull_request"`
 		}
 		if err := json.Unmarshal([]byte(body), &issue); err != nil {
@@ -516,7 +525,7 @@ func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) 
 		if issue.State == "closed" || issue.Merged {
 			return true, nil
 		}
-		if issue.PullRequest == nil || issue.PullRequest.URL == "" {
+		if issue.PullRequest == nil || (issue.PullRequest.URL == "" && issue.PullRequest.HTMLURL == "") {
 			return true, nil
 		}
 		return false, nil
@@ -747,11 +756,12 @@ func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int)
 	}
 	var issue struct {
 		PullRequest *struct {
-			URL string `json:"url"`
+			URL     string `json:"url"`
+			HTMLURL string `json:"html_url"`
 		} `json:"pull_request"`
 	}
 	if err := json.Unmarshal([]byte(issueBody), &issue); err != nil {
 		return false, fmt.Errorf("unmarshal issue: %w", err)
 	}
-	return issue.PullRequest != nil && issue.PullRequest.URL != "", nil
+	return issue.PullRequest != nil && (issue.PullRequest.URL != "" || issue.PullRequest.HTMLURL != ""), nil
 }
