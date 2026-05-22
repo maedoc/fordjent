@@ -1496,3 +1496,67 @@ forgejo:
 | `internal/session/agent.go` | Role-specific Forgejo client in `NewAgent()` |
 | `internal/session/manager.go` | Auto-assign role user on session start |
 | `internal/tool/forgejo_tools.go` | Language-aware build gate; collaborator-based reviewer request |
+
+## Milestones + Time Tracking (May 22, 2026)
+
+### Problem
+PM sub-issues had no visual progress tracking. Cost summary comments ("Session completed: N tokens, $0.00 USD") cluttered the issue timeline with zero-actionable data.
+
+### Solution
+Replaced both with Forgejo's native features: milestones for sub-issue grouping, time tracking for session duration.
+
+### Milestones
+
+**New tools** (registered for PM role):
+- `forgejo_create_milestone(repository, title, description)` — creates a milestone
+- `forgejo_set_milestone(repository, issue_number, milestone_id)` — attaches an issue
+- `forgejo_list_milestones(repository)` — lists all milestones with progress
+
+**PM system prompt**: After decomposing a task, create a milestone titled "#N: Description" and attach each sub-issue to it. The milestone progress bar (3/5 closed = 60%) replaces the scheduler's "All dependencies resolved" comment.
+
+**API methods** (`internal/forgejo/client.go`):
+- `CreateMilestone(repo, title, description)` → `*Milestone`
+- `GetMilestone(repo, id)` → `*Milestone`
+- `ListMilestones(repo)` → `[]Milestone`
+- `SetIssueMilestone(repo, issue, milestoneID)` → `error`
+- `CloseMilestone(repo, id)` → `error`
+
+### Time Tracking
+
+**Concept**: Instead of a comment that says "53s spent", log the duration via Forgejo's time tracking API. The entry appears in the issue sidebar as "djent-dev: 53s". The role-specific token ensures the correct user identity.
+
+**API methods**:
+- `AddTrackedTime(repo, issue, seconds)` → `(*TrackedTime, error)`
+- `GetTrackedTimes(repo, issue)` → `([]TrackedTime, error)`
+- `DeleteTrackedTime(repo, issue, timeID)` → `error`
+
+**Session flow**:
+1. `Session.StartTime` recorded when processing begins
+2. On completion/failure: `Manager.logSessionTime()` calls `AddTrackedTime` with role token
+3. Time appears in UI as `djent-dev: 53s` (the role user, not `fjadmin`)
+
+### What Was Removed
+
+| Was | Replaced By |
+|-----|-------------|
+| "Session completed (implementation): N tokens, $X.XX USD" comment | Commit status on PR SHA + time entry in sidebar |
+| "Max turns reached. Auto-retry may be attempted." comment | ❌ reaction + `fordjent/failed:max-turns` label + time entry |
+| "Session error: ..." comment | ❌ reaction + `fordjent/failed:error` label + time entry |
+| Scheduler "All dependencies are now resolved" comment | 🚀 reaction (milestone progress bar is self-evident) |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/forgejo/client.go` | Milestone, TrackedTime structs; 8 new API methods; `Milestone` field on Issue |
+| `internal/tool/forgejo_tools.go` | `forgejoCreateMilestoneTool`, `forgejoSetMilestoneTool`, `forgejoListMilestonesTool` |
+| `internal/session/agent.go` | Milestone tools registered for PM role; PM prompt updated |
+| `internal/lifecycle/lifecycle.go` | Removed all cost/summary/error comments; added sessionDuration param |
+| `internal/session/manager.go` | `Session.StartTime`; `logSessionTime` helper with role token |
+
+### Remaining Noise Sources
+
+After milestones + time tracking, the agent comment noise is approximately 95% reduced from the original (41 of 42 comments on marmaduke/test01). Remaining:
+- **Implementer summary comments** (e.g. "PR #N created with the Factorial implementation") — 1-2 per session, capped at 2
+- **Merge queue block comments** — 1 per session when files overlap
+- **Lifecycle pings** — none (all lifecycle comments removed)
