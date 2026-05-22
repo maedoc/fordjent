@@ -1382,3 +1382,45 @@ Three validation waves to verify the Bug 1–3 fixes (dual-label, session recove
 | `internal/session/manager.go` | Role gate guidance improved: tags vs labels explanation, `fordjent-yolo` suggestion |
 | `internal/session/agent.go` | PM prompt improved: plan-first guidance with `plan-approved` and `fordjent-yolo`; planning state UX with yolo suggestion; `strconv` import |
 | `internal/scaffold/scaffold.go` | Empty repo 400 error logged as INFO instead of WARN |
+
+## Bug Fix 26–29 + P3/P6 Features (May 22, 2026)
+
+### Bug Fix 26 — Auto-retry used wrong event type for PRs
+**Problem**: When auto-retry fired for a max-turns failure on a PR, it dispatched an `IssueOpened` event with session key `issues/N`, even though PR review sessions should use `pulls/N` and `PullRequestOpened` event type.
+
+**Fix**: `runAutoRetry()` now checks `issue.PullRequest.IsPR()` and sets `evt.Type = event.PullRequestOpened` for PRs, along with the correct `pulls/N` session key.
+
+### Bug Fix 27 — isIssueClosed treated all open issues as satisfied
+**Problem**: Previous fix (Bug #19) made `isIssueClosed` treat all issues without a `PullRequest` field as "not blocking". This was correct for PM/coordination issues but was later changed to treat them as blocking (returning `false`), which broke PM dependency satisfaction.
+
+**Fix**: Restored the original logic: open issues without a PR (coordination/PM issues) are treated as satisfied (not blocking). Open issues WITH an associated PR are blocking. Closed/merged issues are always satisfied.
+
+### Bug Fix 28 — Comment cap wasted LLM turns
+**Problem**: When the per-session comment limit (default 2) was reached, the `forgejo_comment` tool returned an error message. The LLM would then waste another turn trying to rephrase or call the tool again.
+
+**Fix**: Added `ToolsExcluding()` method to `tool.Registry` and `TurnExecutor.SetExcludeTools()`. When the comment limit is reached, `forgejo_comment` is removed from the LLM's tool schema entirely on subsequent turns. The old execution-time block remains as a safety net for the first hit.
+
+### Bug Fix 29 — PR detection in isIssueClosed used wrong condition
+**Problem**: (Already folded into Bug #27) The condition check for `PullRequest` was using `||` instead of `&&` for URL/HTMLURL empty checks, making PRs with missing URL fields incorrectly treated as non-PRs.
+
+**Fix**: Corrected to use `&&` in `issue.PullRequest.URL != "" || issue.PullRequest.HTMLURL != ""`.
+
+### P3 — Request Reviewers on PR Creation
+**Added**: `RequestReviewers()` method to `Forgejo.Client` that calls `POST /repos/{owner}/{repo}/pulls/{N}/requested_reviewers`. The `forgejo_create_pr` tool now automatically requests the repo owner as a reviewer after PR creation, replacing the noisy "Ready for review" comment pattern.
+
+### P6 — Language-Aware Implementer Prompt
+**Added**: `DetectProjectLang()` exported function in `scaffold/scaffold.go` that detects the repo's primary language from its file list. `buildSystemPrompt()` now includes language-specific instructions (e.g., "This is a Python project. Use Python conventions") in the system prompt, preventing the agent from creating `go.mod` in Python repos.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | Auto-retry uses `PullRequestOpened` for PRs |
+| `internal/scheduler/scheduler.go` | Restored `isIssueClosed` PM issue handling |
+| `internal/session/agent.go` | Language-aware prompt; comment cap schema exclusion |
+| `internal/agent/turn.go` | `SetExcludeTools()` + `ToolsExcluding()` |
+| `internal/tool/registry.go` | `ToolsExcluding()` method |
+| `internal/forgejo/client.go` | `RequestReviewers()` method |
+| `internal/tool/forgejo_tools.go` | Auto-request reviewer after PR creation |
+| `internal/tool/forgejo_tools_test.go` | Updated `TestCreatePRToolExecute` |
+| `internal/scaffold/scaffold.go` | Exported `DetectProjectLang()` |
