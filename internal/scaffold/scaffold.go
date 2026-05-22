@@ -41,7 +41,13 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 
 	files, err := client.ListRepoFiles(ctx, repo, "")
 	if err != nil {
-		slog.Warn("scaffold: failed to list repo files", "error", err, "repo", repo)
+		// Empty repos (no branches yet) return 400 "sha not found [main]".
+		// This is expected — treat as empty repo.
+		if strings.Contains(err.Error(), "sha not found") || strings.Contains(err.Error(), "400") {
+			slog.Info("scaffold: repo has no branches yet, treating as empty", "repo", repo)
+		} else {
+			slog.Warn("scaffold: failed to list repo files", "error", err, "repo", repo)
+		}
 	}
 
 	// If repo has zero files OR lacks go.mod/README.md, treat as empty.
