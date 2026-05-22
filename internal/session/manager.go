@@ -37,6 +37,7 @@ type Session struct {
 	WorkDir          string
 	RepoDir          string
 	LastActive       time.Time
+	StartTime        time.Time // when session processing began (for wall-clock tracking)
 	Cancel           context.CancelFunc
 	Sender           string // original webhook sender (e.g. fordjent-bot)
 	IsPMFollowUp     bool   // true if this is a PM re-activation follow-up session
@@ -922,7 +923,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			if ctx.Err() == context.DeadlineExceeded {
 				slog.Warn("session timed out: hard wall-clock limit reached", "session_key", sess.Key, "limit", m.cfg.Agent.SessionTimeout)
 				lcCtx, lcCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout))
+				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout), m.cfg.Agent.SessionTimeout)
 				lcCancel()
 			}
 			// Revert claim on timeout
@@ -950,6 +951,11 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				m.lc.OnSessionStart(ctx, sess.Key)
 			}
 
+			// Record wall-clock start time for time tracking
+			if sess.StartTime.IsZero() {
+				sess.StartTime = time.Now()
+			}
+
 			// Assign the issue to the role user (djent-pm, djent-dev, djent-qa)
 			if roleName := detectRoleFromSession(ctx, m.forgejoClient, sess); roleName != "" {
 				if roleUser, ok := m.cfg.Forgejo.RoleUsers[roleName]; ok && roleUser != "" {
@@ -973,14 +979,16 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
 				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
-					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key)
+					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime))
+				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				} else {
 					slog.Error("agent processing failed",
 						"error", err,
 						"event_id", evt.ID,
 						"session_key", sess.Key,
 					)
-					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err)
+					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err, time.Since(sess.StartTime))
+				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				}
 				// Revert claim: if this session claimed a ready issue, release it back to ready
 				if sess.claimedReady && sess.IssueNumber > 0 {
@@ -994,7 +1002,8 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						headSHA = strings.TrimSpace(string(out))
 					}
 				}
-				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA)
+				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime))
+				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 			}
 
 			sess.mu.Lock()
@@ -1002,6 +1011,23 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			sess.LastActive = time.Now()
 			sess.mu.Unlock()
 		}
+	}
+}
+
+// logSessionTime logs wall-clock session duration via Forgejo time tracking,
+// using the role-specific token so the entry appears under the role user.
+func (m *Manager) logSessionTime(ctx context.Context, repo string, issueNumber int, role string, startTime time.Time) {
+	dur := time.Since(startTime)
+	if dur <= 0 {
+		return
+	}
+	// Use role token if available, so time is logged as djent-dev / djent-qa
+	fc := m.forgejoClient
+	if roleToken, ok := m.cfg.Forgejo.RoleTokens[role]; ok && roleToken != "" {
+		fc = fc.WithToken(roleToken)
+	}
+	if _, err := fc.AddTrackedTime(ctx, repo, issueNumber, int(dur.Seconds())); err != nil {
+		slog.Warn("failed to log session time", "error", err, "duration", dur, "role", role)
 	}
 }
 

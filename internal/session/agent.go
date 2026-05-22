@@ -556,6 +556,7 @@ You are in PM mode. You do NOT write code. Your job is:
 - Understand the request and the existing codebase.
 - Decompose the work into specific, trackable sub-issues.
 - Use forgejo_create_issue to file each sub-issue.
+- Use forgejo_create_milestone to create a milestone ('#N: Description') that groups all sub-issues. Then use forgejo_set_milestone to attach each sub-issue to it. This shows a progress bar in the Forgejo UI.
 - Post a summary comment with your decomposition plan.
 - STOP after posting the comment. Do not implement.
 
@@ -1161,6 +1162,9 @@ func buildRoleRegistry(
 		cit.SetPlanFirst(repoPolicy.PlanFirst)
 		registry.Register(cit)
 		registry.Register(tool.NewGetSubIssuesTool(forgejoAdapter))
+		registry.Register(tool.NewCreateMilestoneTool(forgejoAdapter))
+		registry.Register(tool.NewSetMilestoneTool(forgejoAdapter))
+		registry.Register(tool.NewListMilestonesTool(forgejoAdapter))
 		// PM cannot write code, create PRs, or merge
 	case "reviewer":
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, true))

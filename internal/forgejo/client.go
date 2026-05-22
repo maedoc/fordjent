@@ -65,6 +65,7 @@ type Issue struct {
 	User        User       `json:"user"`
 	Labels      []Label    `json:"labels"`
 	PullRequest *PRRef     `json:"pull_request"`
+	Milestone   *Milestone `json:"milestone"`
 }
 
 type PRRef struct {
@@ -154,6 +155,123 @@ func (c *Client) RequestReviewers(ctx context.Context, repo string, number int, 
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
 		"reviewers": reviewers,
 	})
+	return err
+}
+
+// ── Milestones ──────────────────────────────────────────────────────────
+
+// Milestone represents a Forgejo milestone.
+type Milestone struct {
+	ID           int    `json:"id"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	State        string `json:"state"`
+	OpenIssues   int    `json:"open_issues"`
+	ClosedIssues int    `json:"closed_issues"`
+	DueOn        string `json:"due_on"`
+}
+
+// CreateMilestone creates a new milestone in a repository.
+func (c *Client) CreateMilestone(ctx context.Context, repo, title, description string) (*Milestone, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "milestones")
+	body, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{
+		"title":       title,
+		"description": description,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var ms Milestone
+	if err := json.Unmarshal([]byte(body), &ms); err != nil {
+		return nil, fmt.Errorf("decode milestone: %w", err)
+	}
+	return &ms, nil
+}
+
+// GetMilestone fetches a milestone by ID.
+func (c *Client) GetMilestone(ctx context.Context, repo string, id int) (*Milestone, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "milestones", fmt.Sprintf("%d", id))
+	body, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var ms Milestone
+	if err := json.Unmarshal([]byte(body), &ms); err != nil {
+		return nil, fmt.Errorf("decode milestone: %w", err)
+	}
+	return &ms, nil
+}
+
+// ListMilestones lists all milestones in a repository.
+func (c *Client) ListMilestones(ctx context.Context, repo string) ([]Milestone, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "milestones")
+	body, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var milestones []Milestone
+	if err := json.Unmarshal([]byte(body), &milestones); err != nil {
+		return nil, fmt.Errorf("decode milestones: %w", err)
+	}
+	return milestones, nil
+}
+
+// SetIssueMilestone sets the milestone on an issue.
+func (c *Client) SetIssueMilestone(ctx context.Context, repo string, issueNumber, milestoneID int) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber))
+	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]interface{}{"milestone": milestoneID})
+	return err
+}
+
+// CloseMilestone closes a milestone.
+func (c *Client) CloseMilestone(ctx context.Context, repo string, id int) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "milestones", fmt.Sprintf("%d", id))
+	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]string{"state": "closed"})
+	return err
+}
+
+// ── Time Tracking ───────────────────────────────────────────────────────
+
+// TrackedTime represents a time tracking entry on an issue.
+type TrackedTime struct {
+	ID       int    `json:"id"`
+	Time     int    `json:"time"` // seconds
+	UserName string `json:"user_name"`
+	Created  string `json:"created"`
+}
+
+// AddTrackedTime logs time spent on an issue (in seconds).
+func (c *Client) AddTrackedTime(ctx context.Context, repo string, issueNumber, seconds int) (*TrackedTime, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "times")
+	body, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]int{"time": seconds})
+	if err != nil {
+		return nil, err
+	}
+	var tt TrackedTime
+	if err := json.Unmarshal([]byte(body), &tt); err != nil {
+		return nil, fmt.Errorf("decode tracked time: %w", err)
+	}
+	return &tt, nil
+}
+
+// GetTrackedTimes returns all time entries for an issue.
+func (c *Client) GetTrackedTimes(ctx context.Context, repo string, issueNumber int) ([]TrackedTime, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "times")
+	body, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var times []TrackedTime
+	if err := json.Unmarshal([]byte(body), &times); err != nil {
+		return nil, fmt.Errorf("decode times: %w", err)
+	}
+	return times, nil
+}
+
+// DeleteTrackedTime removes a time tracking entry.
+func (c *Client) DeleteTrackedTime(ctx context.Context, repo string, issueNumber, timeID int) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "times", fmt.Sprintf("%d", timeID))
+	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
 	return err
 }
 

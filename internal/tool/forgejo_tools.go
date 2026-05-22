@@ -1889,3 +1889,154 @@ func parseSubIssueDeps(body string) []int {
 	}
 	return nums
 }
+
+// ── Milestone Tools ─────────────────────────────────────────────────────
+
+// forgejoCreateMilestoneTool creates a Forgejo milestone.
+type forgejoCreateMilestoneTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewCreateMilestoneTool(adapter *ForgejoAdapter) *forgejoCreateMilestoneTool {
+	return &forgejoCreateMilestoneTool{adapter: adapter}
+}
+
+func (t *forgejoCreateMilestoneTool) Name() string { return "forgejo_create_milestone" }
+
+func (t *forgejoCreateMilestoneTool) Description() string {
+	return "Create a milestone to group related sub-issues. Use this after breaking a task into sub-issues — create a milestone named after the parent issue ('#N: Title') and attach each sub-issue to it. This shows a progress bar in the Forgejo UI."
+}
+
+func (t *forgejoCreateMilestoneTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"title": map[string]interface{}{
+				"type":        "string",
+				"description": "Milestone title. Convention: '#N: Brief description' where #N is the parent issue number",
+			},
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional description. Can include scope, acceptance criteria, or dependencies",
+			},
+		},
+		"required": []string{"repository", "title"},
+	}
+}
+
+func (t *forgejoCreateMilestoneTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository  string `json:"repository"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	ms, err := t.adapter.Client().CreateMilestone(ctx, params.Repository, params.Title, params.Description)
+	if err != nil {
+		return "", fmt.Errorf("create milestone: %w", err)
+	}
+	return fmt.Sprintf("Milestone created: #%d — %s", ms.ID, ms.Title), nil
+}
+
+// forgejoSetMilestoneTool attaches an issue to a milestone.
+type forgejoSetMilestoneTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewSetMilestoneTool(adapter *ForgejoAdapter) *forgejoSetMilestoneTool {
+	return &forgejoSetMilestoneTool{adapter: adapter}
+}
+
+func (t *forgejoSetMilestoneTool) Name() string { return "forgejo_set_milestone" }
+
+func (t *forgejoSetMilestoneTool) Description() string {
+	return "Assign an issue to a milestone. Use the milestone ID returned by forgejo_create_milestone. This links the issue to the milestone's progress bar in the UI."
+}
+
+func (t *forgejoSetMilestoneTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"issue_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "Issue number to attach to the milestone",
+			},
+			"milestone_id": map[string]interface{}{
+				"type":        "integer",
+				"description": "Milestone ID (from forgejo_create_milestone result)",
+			},
+		},
+		"required": []string{"repository", "issue_number", "milestone_id"},
+	}
+}
+
+func (t *forgejoSetMilestoneTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository  string `json:"repository"`
+		IssueNumber int    `json:"issue_number"`
+		MilestoneID int    `json:"milestone_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	if err := t.adapter.Client().SetIssueMilestone(ctx, params.Repository, params.IssueNumber, params.MilestoneID); err != nil {
+		return "", fmt.Errorf("set milestone: %w", err)
+	}
+	return fmt.Sprintf("Issue #%d attached to milestone #%d", params.IssueNumber, params.MilestoneID), nil
+}
+
+// forgejoListMilestonesTool lists milestones in a repository.
+type forgejoListMilestonesTool struct {
+	adapter *ForgejoAdapter
+}
+
+func NewListMilestonesTool(adapter *ForgejoAdapter) *forgejoListMilestonesTool {
+	return &forgejoListMilestonesTool{adapter: adapter}
+}
+
+func (t *forgejoListMilestonesTool) Name() string { return "forgejo_list_milestones" }
+
+func (t *forgejoListMilestonesTool) Description() string {
+	return "List all milestones in the repository. Returns milestone IDs, titles, and progress (open/closed counts). Use this to find existing milestones before creating a new one."
+}
+
+func (t *forgejoListMilestonesTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+		},
+		"required": []string{"repository"},
+	}
+}
+
+func (t *forgejoListMilestonesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	milestones, err := t.adapter.Client().ListMilestones(ctx, params.Repository)
+	if err != nil {
+		return "", fmt.Errorf("list milestones: %w", err)
+	}
+	if len(milestones) == 0 {
+		return "No milestones found in this repository.", nil
+	}
+	result, _ := json.MarshalIndent(milestones, "", "  ")
+	return string(result), nil
+}

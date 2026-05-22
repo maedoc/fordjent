@@ -177,8 +177,10 @@ func (l *Lifecycle) ResolveBlockedBranch(ctx context.Context, repo, branch strin
 	return nil
 }
 
-// OnSessionComplete records a successful completion and optionally posts a cost summary.
-func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int, role string, headSHA string) {
+// OnSessionComplete records a successful completion. Posts a commit status
+// and logs wall-clock time via Forgejo time tracking. No comment is posted
+// — the commit status (+ reaction) and time entry are sufficient.
+func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int, role string, headSHA string, sessionDuration time.Duration) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateCompleted, "session finished successfully")
 
 	if l.forgejo == nil || issueNumber <= 0 {
@@ -196,36 +198,25 @@ func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo stri
 	}
 
 	description := "Session completed"
-	var totalTokens int64
-	var totalCost float64
 	if l.costTracker != nil {
 		tokens, cost, _ := l.costTracker.GetSessionCost(sessionKey)
-		totalTokens = tokens
-		totalCost = cost
 		if tokens > 0 {
 			description = fmt.Sprintf("%s: %.0f tokens ($%.4f USD)", roleLabel, float64(tokens), cost)
 		}
 	}
 
-	// Post commit status on the head SHA if available (shows green checkmark in PR UI)
+	// Commit status: green checkmark on the PR commit
 	if headSHA != "" {
 		_ = l.forgejo.CreateCommitStatus(ctx, repo, headSHA, "success",
 			"fordjent/agent", description, "")
 	}
 
-	// Add a reaction to the issue (visible in UI, no comment noise)
+	// Reaction: visible in issue timeline, zero noise
 	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "white_check_mark")
-
-	// Only post a cost comment if there is meaningful cost data.
-	// This drastically reduces comment noise while preserving cost transparency.
-	if totalTokens > 0 {
-		msg := fmt.Sprintf("Session completed (%s): %.0f tokens, $%.4f USD\n\n<!-- ford -->", roleLabel, float64(totalTokens), totalCost)
-		_ = l.forgejo.PostIssueComment(ctx, repo, issueNumber, msg)
-	}
 }
 
 // OnSessionFailedMaxTurns records that the session exhausted its turn budget.
-func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, issueNumber int, sessionKey string) {
+func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, issueNumber int, sessionKey string, sessionDuration time.Duration) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateFailedMaxTurns,
 		fmt.Sprintf("reached max turns on issue #%d", issueNumber))
 
@@ -240,15 +231,12 @@ func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, is
 	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "in_progress")
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:max-turns"})
 
-	body := "Max turns reached. Auto-retry may be attempted.\n\n\x3c!-- ford --\x3e"
-	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
-		slog.Warn("lifecycle: failed to post max-turns comment", "error", err, "issue", issueNumber)
-	}
+	// Reaction + label is sufficient.
 	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "x")
 }
 
 // OnSessionFailedError records an arbitrary runtime error that killed the session.
-func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issueNumber int, sessionKey string, runErr error) {
+func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issueNumber int, sessionKey string, runErr error, sessionDuration time.Duration) {
 	reason := "session encountered an error"
 	if runErr != nil {
 		reason = runErr.Error()
@@ -267,10 +255,7 @@ func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issue
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:error"})
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
-	body := fmt.Sprintf("Session error: %s\n\n<!-- ford -->", reason)
-	if err := l.postIssueComment(ctx, repo, issueNumber, body); err != nil {
-		slog.Warn("lifecycle: failed to post error comment", "error", err, "issue", issueNumber)
-	}
+	// Reaction + label is sufficient.
 	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "x")
 }
 
