@@ -1342,3 +1342,43 @@ Three validation waves to verify the Bug 1–3 fixes (dual-label, session recove
 | `deploy/src/fordjent_deploy/` | Python CLI tool: `fordjent-deploy up/down/status` |
 | `deploy/src/fordjent_deploy/gandi_dns.py` | Gandi LiveDNS API client |
 | `deploy/README.md` | Usage documentation |
+
+---
+
+## Bug Fix 25 — Scaffold Hardcodes Go for All Projects (May 22, 2026)
+
+**Problem**: The scaffold system had Go language hardcoded throughout — the issue title said "go.mod", the body mentioned "create `go.mod` and `README.md`", and the repo population check only looked for `go.mod`. When a Python/Snakemake user (`janf/poke2`) created a data science project, the agent:
+1. Created `go.mod` and a Go `.gitignore` instead of `requirements.txt` and a Python `.gitignore`
+2. The scaffold issue was titled "Add project scaffold (go.mod, README.md, etc.)" which biased the LLM
+3. The repo population check (`hasGoMod && hasReadme`) meant a Python repo with `requirements.txt` + `README.md` would still be considered "empty"
+
+**Analysis of `janf/poke2` issue #6**:
+- PM correctly decomposed "Setup a data science project" into 4 Python/Snakemake sub-issues (#2-5)
+- Scaffold detector created issue #6 with Go-specific title and body
+- Agent proceeded to create `go.mod` + Go `.gitignore` — completely wrong for a Python project
+- Agent tried 3× to push to `main` (blocked by protected branch), then created PR #7 with Go files
+- `no-auto-merge` policy prevented merging the wrong scaffold
+- On auto-retry, scaffold detection re-blocked issue #6 because go.mod was on a branch, not merged to main
+
+**Fix**: Language-aware scaffold detection and content generation:
+- Added `detectProjectLang(files)` — examines repo files for language manifests (`go.mod` → Go, `requirements.txt`/`pyproject.toml` → Python, etc.), falls back to file extension counting, defaults to "unknown"
+- Added `isRepoPopulated(files, lang)` — per-language population checks (Python: requirements.txt + README.md, Go: go.mod + README.md, etc.), unknown: 3+ files + README.md
+- Added `scaffoldIssueContent(lang, fileCount)` — generates language-appropriate issue titles and bodies (Go: "Set up Go project structure", Python: "Set up Python project structure" with Snakemake mention, unknown: "Set up project structure" with hints to check other issues)
+- Scaffold issue no longer gets `blocked` label (the scaffold IS the unblocker)
+- For unknown language: issue body says "Look at other open issues for hints about the language and framework"
+
+**Post-fix actions on `janf/poke2`**:
+- Added `fordjent-yolo` topic for zero-friction automation
+- Seeded `requirements.txt` and Python `.gitignore` via API
+- Closed bad Go PR #7 and duplicate issues #6, #7
+- Posted explanatory comment on issue #1
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/scaffold/scaffold.go` | Language detection (`detectProjectLang`), population check (`isRepoPopulated`), language-specific content (`scaffoldIssueContent`); scaffold issue no longer gets `blocked` label |
+| `internal/scaffold/scaffold_test.go` | 12 new tests: language detection (8 cases), population check (8 cases), content generation (4 cases) |
+| `internal/session/manager.go` | Role gate guidance improved: tags vs labels explanation, `fordjent-yolo` suggestion |
+| `internal/session/agent.go` | PM prompt improved: plan-first guidance with `plan-approved` and `fordjent-yolo`; planning state UX with yolo suggestion; `strconv` import |
+| `internal/scaffold/scaffold.go` | Empty repo 400 error logged as INFO instead of WARN |
