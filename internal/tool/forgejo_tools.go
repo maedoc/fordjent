@@ -734,18 +734,30 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		if err == nil {
 			slog.Info("create_pr: PR created successfully", "repo", params.Repository, "head", params.Head, "base", params.Base)
 
-			// Request the repo owner as a reviewer (reduces comment noise
-			// vs posting "Ready for review" comment)
-			parts := strings.SplitN(params.Repository, "/", 2)
-			if len(parts) == 2 {
-				var prResp struct {
-					Number int `json:"number"`
-				}
-				if err := json.Unmarshal([]byte(result), &prResp); err == nil && prResp.Number > 0 {
-					if rerr := t.adapter.Client().RequestReviewers(ctx, params.Repository, prResp.Number, []string{parts[0]}); rerr != nil {
-						slog.Warn("create_pr: failed to request reviewer", "error", rerr, "pr", prResp.Number)
+			// Request repo collaborators as reviewers (reduces comment noise
+			// vs posting "Ready for review" comment). The PR author can't be
+			// their own reviewer, so exclude them.
+			var prResp struct {
+				Number int `json:"number"`
+				User   struct{ Login string `json:"login"` } `json:"user"`
+			}
+			if err := json.Unmarshal([]byte(result), &prResp); err == nil && prResp.Number > 0 {
+				collabs, cerr := t.adapter.Client().ListCollaborators(ctx, params.Repository)
+				if cerr == nil {
+					var reviewers []string
+					for _, c := range collabs {
+						if c.Login != prResp.User.Login {
+							reviewers = append(reviewers, c.Login)
+						}
+					}
+					if len(reviewers) > 0 {
+						if rerr := t.adapter.Client().RequestReviewers(ctx, params.Repository, prResp.Number, reviewers); rerr != nil {
+							slog.Warn("create_pr: failed to request reviewers", "error", rerr, "pr", prResp.Number, "reviewers", reviewers)
+						} else {
+							slog.Info("create_pr: requested reviewers", "pr", prResp.Number, "reviewers", reviewers)
+						}
 					} else {
-						slog.Info("create_pr: requested reviewer", "pr", prResp.Number, "reviewer", parts[0])
+						slog.Debug("create_pr: no collaborators besides author, skipping reviewer request", "pr", prResp.Number)
 					}
 				}
 			}

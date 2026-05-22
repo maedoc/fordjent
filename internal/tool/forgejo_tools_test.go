@@ -97,19 +97,22 @@ func TestListIssuesToolDefaultParams(t *testing.T) {
 func TestCreatePRToolExecute(t *testing.T) {
 	var receivedBody map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
 		path := r.URL.EscapedPath()
 		switch path {
 		case "/api/v1/repos/org/repo/pulls":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST for pulls, got %s", r.Method)
+			}
 			json.NewDecoder(r.Body).Decode(&receivedBody)
-			json.NewEncoder(w).Encode(map[string]interface{}{"number": 7})
+			json.NewEncoder(w).Encode(map[string]interface{}{"number": 7, "user": map[string]string{"login": "org"}})
 		case "/api/v1/repos/org/repo/pulls/7/requested_reviewers":
 			// Reviewer request — expected side effect of PR creation
 			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/repos/org/repo/collaborators":
+			// Collaborators list — PR author is org, so no external reviewers
+			json.NewEncoder(w).Encode([]map[string]string{{"login": "org", "permission": "admin"}})
 		default:
-			t.Errorf("unexpected path: %s", path)
+			t.Errorf("unexpected path: %s %s", r.Method, path)
 		}
 	}))
 	defer server.Close()
