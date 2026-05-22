@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/fordjent/fordjent/internal/agent"
@@ -516,7 +517,12 @@ Before creating sub-issues that depend on code from parent issues:
 		if a.policy.PlanFirst {
 			modeInstructions += `
 
-- This repo has a plan-first policy. After posting your decomposition plan, tell the human to add the 'plan-approved' label to this parent issue to unblock the sub-issues for implementation. The sub-issues will remain in 'planning' state until this label is added.`
+- IMPORTANT: This repo uses a **plan-first policy**. Sub-issues you create will be in 'planning' state and CANNOT be implemented until a human approves.
+  After posting your decomposition plan, you MUST:
+  1. Post a comment on this parent issue explaining your plan.
+  2. Tell the human to add the 'plan-approved' label to THIS issue (#` + strconv.Itoa(evt.IssueNumber) + `) to unblock the sub-issues.
+  3. Suggest that if they want full automation without human approval, they can add the 'fordjent-yolo' topic to their repo settings (Settings → Topics).
+  The sub-issues will remain in 'planning' state until the 'plan-approved' label is added.`
 		}
 
 		if a.pmFollowUp {
@@ -1170,14 +1176,17 @@ You have full access to implementation tools. Proceed with coding.`
 		return `
 
 ## STATE: Planning
-This issue is in planning mode. You MUST:
+This issue is in planning mode and CANNOT be implemented yet. You MUST:
 1. Read and understand the codebase
 2. Propose a concrete implementation plan
 3. Break into sub-issues if needed
 4. Post a summary comment
-5. STOP — do not write code
+5. STOP — do NOT attempt to write code, commit, or create PRs
 
-Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this state.`
+Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED in this state.
+
+To unblock this issue, a human needs to add the 'plan-approved' label to the parent issue.
+If full automation without approval is desired, add the 'fordjent-yolo' topic to the repo in Settings → Topics.`
 	case lifecycle.StateFSMBlocked:
 		return `
 
