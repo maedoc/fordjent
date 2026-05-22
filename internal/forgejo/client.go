@@ -138,6 +138,15 @@ func (c *Client) MergePR(ctx context.Context, repo string, number int, style str
 	return err
 }
 
+// RequestReviewers adds reviewer requests to a pull request.
+func (c *Client) RequestReviewers(ctx context.Context, repo string, number int, reviewers []string) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "requested_reviewers")
+	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
+		"reviewers": reviewers,
+	})
+	return err
+}
+
 // doRequest is a shared helper for Forgejo API calls.
 func (c *Client) doRequest(ctx context.Context, method, apiPath string, body interface{}) (string, error) {
 	var reqBody io.Reader

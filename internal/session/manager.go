@@ -1187,15 +1187,16 @@ func (m *Manager) runAutoRetry(ctx context.Context) {
 
 		evt := &event.Event{
 			ID:          fmt.Sprintf("auto-retry-%d-%d", rec.IssueNumber, time.Now().UnixNano()),
-			Type:        event.IssueOpened,
 			Repository:  rec.Repository,
 			IssueNumber: rec.IssueNumber,
 			Sender:      "fordjent-auto-retry",
 		}
 		if isPR {
+			evt.Type = event.PullRequestOpened
 			evt.PRNumber = rec.IssueNumber
 			evt.SessionKey = fmt.Sprintf("%s/pulls/%d", rec.Repository, rec.IssueNumber)
 		} else {
+			evt.Type = event.IssueOpened
 			evt.SessionKey = fmt.Sprintf("%s/issues/%d", rec.Repository, rec.IssueNumber)
 		}
 

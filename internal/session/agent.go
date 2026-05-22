@@ -28,6 +28,7 @@ import (
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
 	"github.com/fordjent/fordjent/internal/sandbox"
+	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
 )
@@ -378,12 +379,14 @@ Update the issue comment with your reflection, then continue working.`,
 
 			// Enforce per-session comment limit to reduce noise
 			if tc.Function.Name == "forgejo_comment" && a.commentLimit > 0 && a.commentCount >= a.commentLimit {
-				limitMsg := fmt.Sprintf("Error: Comment limit (%d) reached for this session. Do not post more comments. If you need to communicate something important, edit an existing comment or use forgejo_create_issue instead.", a.commentLimit)
+				limitMsg := fmt.Sprintf("Error: Comment limit (%d) reached. Session is complete — do not post any more comments.", a.commentLimit)
 				messages = append(messages, provider.Message{
 					Role:       "tool",
 					ToolCallID: tc.ID,
 					Content:    limitMsg,
 				})
+				// Remove forgejo_comment from future LLM schema so it won't try again
+				a.executor.SetExcludeTools(map[string]bool{"forgejo_comment": true})
 				continue
 			}
 
@@ -480,6 +483,30 @@ func (a *Agent) effectiveMaxTurns() int {
 
 func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState) string {
 	toolsDesc := a.tools.Descriptions()
+
+	// Detect repo language for language-aware prompting
+	repoLang := scaffold.DetectProjectLang(ctx, a.forgejo, evt.Repository)
+	var langInstruction string
+	if repoLang != "" {
+		switch repoLang {
+		case "python":
+			langInstruction = "\nThis is a Python project. Use Python conventions: requirements.txt or pyproject.toml for dependencies, .py files, pytest for testing."
+		case "go":
+			langInstruction = "\nThis is a Go project. Use Go conventions: go.mod for dependencies, .go files, go test for testing."
+		case "rust":
+			langInstruction = "\nThis is a Rust project. Use Rust conventions: Cargo.toml for dependencies, .rs files, cargo test for testing."
+		case "javascript":
+			langInstruction = "\nThis is a JavaScript/TypeScript project. Use JS/TS conventions: package.json for dependencies, .js/.ts files."
+		case "java":
+			langInstruction = "\nThis is a Java project. Use Java conventions: pom.xml or build.gradle for dependencies, .java files."
+		case "ruby":
+			langInstruction = "\nThis is a Ruby project. Use Ruby conventions: Gemfile for dependencies, .rb files."
+		case "php":
+			langInstruction = "\nThis is a PHP project. Use PHP conventions: composer.json for dependencies, .php files."
+		default:
+			langInstruction = fmt.Sprintf("\nThis project appears to use %s. Follow its conventions.", repoLang)
+		}
+	}
 
 	var modeInstructions string
 	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
@@ -633,7 +660,7 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 - Event: %s (action: %s)
 - Sender: @%s
 - Target: %s
-%s
+%s%s
 %s
 
 ## Your Capabilities
@@ -672,6 +699,7 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		evt.Sender,
 		a.targetDescription(evt),
 		modeInstructions,
+		langInstruction,
 		stateInstructions,
 		toolsDesc,
 		a.cfg.Agent.CommitPrefix,

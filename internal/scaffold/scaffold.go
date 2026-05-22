@@ -118,6 +118,16 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 	return false, nil
 }
 
+// DetectProjectLang fetches the repo file list and determines the project language.
+func DetectProjectLang(ctx context.Context, forgejoClient *forgejo.Client, repo string) string {
+	files, err := forgejoClient.ListRepoFiles(ctx, repo, "")
+	if err != nil {
+		slog.Warn("scaffold: failed to list repo files for language detection", "error", err)
+		return ""
+	}
+	return detectProjectLang(files)
+}
+
 // detectProjectLang examines repo files to determine the project language.
 func detectProjectLang(files []string) string {
 	fileSet := make(map[string]bool)

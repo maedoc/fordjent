@@ -733,6 +733,23 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
 		if err == nil {
 			slog.Info("create_pr: PR created successfully", "repo", params.Repository, "head", params.Head, "base", params.Base)
+
+			// Request the repo owner as a reviewer (reduces comment noise
+			// vs posting "Ready for review" comment)
+			parts := strings.SplitN(params.Repository, "/", 2)
+			if len(parts) == 2 {
+				var prResp struct {
+					Number int `json:"number"`
+				}
+				if err := json.Unmarshal([]byte(result), &prResp); err == nil && prResp.Number > 0 {
+					if rerr := t.adapter.Client().RequestReviewers(ctx, params.Repository, prResp.Number, []string{parts[0]}); rerr != nil {
+						slog.Warn("create_pr: failed to request reviewer", "error", rerr, "pr", prResp.Number)
+					} else {
+						slog.Info("create_pr: requested reviewer", "pr", prResp.Number, "reviewer", parts[0])
+					}
+				}
+			}
+
 			return fmt.Sprintf("Pull request created: %s", result), nil
 		}
 		slog.Warn("create_pr: API call failed", "attempt", attempt+1, "error", err, "head", params.Head)

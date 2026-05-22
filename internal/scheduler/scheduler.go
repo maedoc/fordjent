@@ -525,10 +525,13 @@ func (s *Scheduler) isIssueClosed(ctx context.Context, repo string, number int) 
 		if issue.State == "closed" || issue.Merged {
 			return true, nil
 		}
-		if issue.PullRequest == nil || (issue.PullRequest.URL == "" && issue.PullRequest.HTMLURL == "") {
-			return true, nil
+		// Open issue with an associated PR → still blocking (waiting for merge)
+		if issue.PullRequest != nil && (issue.PullRequest.URL != "" || issue.PullRequest.HTMLURL != "") {
+			return false, nil
 		}
-		return false, nil
+		// Open issue without a PR → it's a coordination/PM issue that won't have a PR.
+		// Treat as satisfied (not blocking) — the scheduler only tracks PR-based dependencies.
+		return true, nil
 	})
 }
 

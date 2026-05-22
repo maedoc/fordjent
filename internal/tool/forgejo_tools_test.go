@@ -100,11 +100,17 @@ func TestCreatePRToolExecute(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.EscapedPath() != "/api/v1/repos/org/repo/pulls" {
-			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
+		path := r.URL.EscapedPath()
+		switch path {
+		case "/api/v1/repos/org/repo/pulls":
+			json.NewDecoder(r.Body).Decode(&receivedBody)
+			json.NewEncoder(w).Encode(map[string]interface{}{"number": 7})
+		case "/api/v1/repos/org/repo/pulls/7/requested_reviewers":
+			// Reviewer request — expected side effect of PR creation
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected path: %s", path)
 		}
-		json.NewDecoder(r.Body).Decode(&receivedBody)
-		json.NewEncoder(w).Encode(map[string]interface{}{"number": 7})
 	}))
 	defer server.Close()
 

@@ -99,3 +99,26 @@ func (r *Registry) List() []string {
 	}
 	return names
 }
+
+// ToolsExcluding returns tool definitions excluding the named tools.
+// Used to hide tools that the agent should not call (e.g., forgejo_comment after limit).
+func (r *Registry) ToolsExcluding(exclude map[string]bool) []provider.ToolDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var defs []provider.ToolDef
+	for _, t := range r.tools {
+		if exclude[t.Name()] {
+			continue
+		}
+		defs = append(defs, provider.ToolDef{
+			Type: "function",
+			Function: provider.FunctionDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		})
+	}
+	return defs
+}

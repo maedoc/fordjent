@@ -39,6 +39,7 @@ type TurnExecutor struct {
 	sessionKey   string
 	repository   string
 	requestCount int
+	excludeTools map[string]bool // tools to exclude from LLM schema
 }
 
 func NewTurnExecutor(
@@ -54,14 +55,20 @@ func NewTurnExecutor(
 		cfg.Agent.CompactionKeepTurns,
 	)
 	return &TurnExecutor{
-		cfg:         cfg,
+		cfg:          cfg,
 		llm:         llm,
 		tools:       tools,
 		tracker:     tracker,
 		costTracker: costTracker,
 		sessionKey:  sessionKey,
 		repository:  repository,
+		excludeTools: make(map[string]bool),
 	}
+}
+
+// SetExcludeTools sets which tools should be excluded from the LLM schema.
+func (te *TurnExecutor) SetExcludeTools(names map[string]bool) {
+	te.excludeTools = names
 }
 
 // Run executes one LLM turn: handles compaction before the call, records cost after.
@@ -89,7 +96,8 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 	}
 
 	// Call LLM (retry is handled inside Client.Chat)
-	response, usage, err := te.llm.Chat(ctx, systemPrompt, messages, te.tools.Tools())
+	toolDefs := te.tools.ToolsExcluding(te.excludeTools)
+	response, usage, err := te.llm.Chat(ctx, systemPrompt, messages, toolDefs)
 	latency := time.Since(start)
 
 	if err != nil {
