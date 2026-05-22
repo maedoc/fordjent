@@ -471,11 +471,13 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Role gate: if require_role_tag is enabled and the issue has no role tag/label,
 	// post a guidance comment and wait for the user to assign one.
 	// Skip for green-light events (human already approved the issue).
+	// Skip for scaffold issues ([scaffold] prefix) — they are auto-generated and should
+	// be implemented immediately.
 	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil {
 			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
-		} else if detectRoleFromIssue(issue) == "" {
+		} else if detectRoleFromIssue(issue) == "" && !strings.HasPrefix(issue.Title, "[scaffold]") {
 			slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
 			m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
 			if err := m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"}); err != nil {
@@ -1547,7 +1549,7 @@ func detectRoleFromTitle(title string) string {
 	if strings.Contains(lower, "[test]") || strings.Contains(lower, "[tester]") || strings.Contains(lower, "[testing]") || strings.Contains(lower, "[qa]") {
 		return "tester"
 	}
-	if strings.Contains(lower, "[implementer]") || strings.Contains(lower, "[implement]") || strings.Contains(lower, "[dev]") || strings.Contains(lower, "[developer]") {
+	if strings.Contains(lower, "[implementer]") || strings.Contains(lower, "[implement]") || strings.Contains(lower, "[dev]") || strings.Contains(lower, "[developer]") || strings.Contains(lower, "[scaffold]") {
 		return "implementer"
 	}
 	return ""
