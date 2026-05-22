@@ -36,6 +36,16 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
+// WithToken returns a copy of the client with a different token.
+// Used to switch user identity for role-based posting.
+func (c *Client) WithToken(token string) *Client {
+	return &Client{
+		baseURL:  c.baseURL,
+		token:    token,
+		client:   c.client,
+	}
+}
+
 // NewClientWithBasicAuth creates a client with basic authentication.
 func NewClientWithBasicAuth(baseURL, user, password string) *Client {
 	return &Client{
@@ -251,6 +261,21 @@ func (c *Client) AddReaction(ctx context.Context, repo string, issueNumber, comm
 	}
 
 	_, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{"content": emoji})
+	return err
+}
+
+// AddAssignees adds users as assignees to an issue or PR.
+// Forgejo/Gitea uses PATCH on the issue with {assignees: ["user"]} body.
+func (c *Client) AddAssignees(ctx context.Context, repo string, issueNumber int, assignees []string) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber))
+	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]interface{}{"assignees": assignees})
+	return err
+}
+
+// RemoveAssignee removes a user from the assignees of an issue or PR.
+func (c *Client) RemoveAssignee(ctx context.Context, repo string, issueNumber int, assignee string) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber), "assignees", assignee)
+	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, nil)
 	return err
 }
 

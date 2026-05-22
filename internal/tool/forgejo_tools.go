@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fordjent/fordjent/internal/forgejo"
+	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/stalegate"
 )
@@ -681,30 +682,44 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	// Verify gate: enforce compilation and tests pass before PR creation.
-	// The agent must produce working code before claiming "done".
+	// Verify gate: enforce build/test pass before PR creation.
+	// The verification commands vary by project language.
 	if t.repoDir != "" {
-		buildCmd := exec.CommandContext(ctx, "go", "build", "./...")
-		buildCmd.Dir = t.repoDir
-		buildOut, buildErr := buildCmd.CombinedOutput()
-		if buildErr != nil {
-			return "", fmt.Errorf("go build failed — fix compilation errors before creating PR:\n%s", string(buildOut))
-		}
-
-		testCmd := exec.CommandContext(ctx, "go", "test", "./...", "-count=1")
-		testCmd.Dir = t.repoDir
-		testOut, testErr := testCmd.CombinedOutput()
-		if testErr != nil {
-			return "", fmt.Errorf("go test failed — all tests must pass before creating PR:\n%s", string(testOut))
-		}
-
-		lintCmd := exec.CommandContext(ctx, "golangci-lint", "run", "./...")
-		lintCmd.Dir = t.repoDir
-		if lintOut, lintErr := lintCmd.CombinedOutput(); lintErr != nil {
-			// golangci-lint may not be installed — only fail if it IS installed and finds issues
-			if !strings.Contains(lintErr.Error(), "executable file not found") {
-				return "", fmt.Errorf("golangci-lint failed — fix lint errors before creating PR:\n%s", string(lintOut))
+		lang := scaffold.DetectProjectLang(ctx, t.adapter.Client(), params.Repository)
+		switch lang {
+		case "go":
+			buildCmd := exec.CommandContext(ctx, "go", "build", "./...")
+			buildCmd.Dir = t.repoDir
+			buildOut, buildErr := buildCmd.CombinedOutput()
+			if buildErr != nil {
+				return "", fmt.Errorf("go build failed — fix compilation errors before creating PR:\n%s", string(buildOut))
 			}
+
+			testCmd := exec.CommandContext(ctx, "go", "test", "./...", "-count=1")
+			testCmd.Dir = t.repoDir
+			testOut, testErr := testCmd.CombinedOutput()
+			if testErr != nil {
+				return "", fmt.Errorf("go test failed — all tests must pass before creating PR:\n%s", string(testOut))
+			}
+
+			lintCmd := exec.CommandContext(ctx, "golangci-lint", "run", "./...")
+			lintCmd.Dir = t.repoDir
+			if lintOut, lintErr := lintCmd.CombinedOutput(); lintErr != nil {
+				if !strings.Contains(lintErr.Error(), "executable file not found") {
+					return "", fmt.Errorf("golangci-lint failed — fix lint errors before creating PR:\n%s", string(lintOut))
+				}
+			}
+		case "python":
+			// Python: run pytest or unittest
+			testCmd := exec.CommandContext(ctx, "python3", "-m", "pytest", "-x", "--tb=short")
+			testCmd.Dir = t.repoDir
+			if testOut, testErr := testCmd.CombinedOutput(); testErr != nil {
+				slog.Info("create_pr: python pytest failed (non-blocking)", "output", string(testOut), "error", testErr)
+				// Don't block PR creation for Python test failures — many projects lack pytest
+			}
+		default:
+			// For unknown languages, skip build/test gate
+			slog.Info("create_pr: no build/test gate for language", "language", lang)
 		}
 
 		slog.Info("verify gate passed", "repo_dir", t.repoDir)

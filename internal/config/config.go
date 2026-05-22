@@ -50,10 +50,12 @@ type AutoRegisterConfig struct {
 }
 
 type ForgejoConfig struct {
-	URL        string `yaml:"url"`
-	Token      string `yaml:"token"`
-	AdminToken string `yaml:"admin_token"`
-	RateLimit  int    `yaml:"rate_limit"`
+	URL        string            `yaml:"url"`
+	Token      string            `yaml:"token"`
+	AdminToken string            `yaml:"admin_token"`
+	RateLimit  int               `yaml:"rate_limit"`
+	RoleTokens map[string]string `yaml:"role_tokens"` // role → Forgejo token, e.g. {"implementer": "abc..."}
+	RoleUsers  map[string]string `yaml:"role_users"`  // role → Forgejo username, e.g. {"implementer": "djent-dev"}
 }
 
 type AgentConfig struct {

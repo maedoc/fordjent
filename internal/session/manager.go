@@ -950,6 +950,17 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				m.lc.OnSessionStart(ctx, sess.Key)
 			}
 
+			// Assign the issue to the role user (djent-pm, djent-dev, djent-qa)
+			if roleName := detectRoleFromSession(ctx, m.forgejoClient, sess); roleName != "" {
+				if roleUser, ok := m.cfg.Forgejo.RoleUsers[roleName]; ok && roleUser != "" {
+					if err := m.forgejoClient.AddAssignees(ctx, evt.Repository, evt.IssueNumber, []string{roleUser}); err != nil {
+						slog.Warn("failed to assign role user to issue", "error", err, "issue", evt.IssueNumber, "role", roleName, "user", roleUser)
+					} else {
+						slog.Info("assigned role user to issue", "issue", evt.IssueNumber, "role", roleName, "user", roleUser)
+					}
+				}
+			}
+
 			if err := agt.ProcessEvent(ctx, evt); err != nil {
 				if errors.Is(err, sentinel.ErrBlocked) {
 					slog.Info("session blocked by merge queue", "session_key", sess.Key)

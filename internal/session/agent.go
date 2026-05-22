@@ -63,7 +63,15 @@ type Agent struct {
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
-	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, cfg.Forgejo.Token)
+	// Use role-specific Forgejo token if available (posts/comments as djent-pm, djent-dev, etc.)
+	forgejoToken := cfg.Forgejo.Token
+	if cfg.Forgejo.RoleTokens != nil {
+		if roleToken, ok := cfg.Forgejo.RoleTokens[role]; ok {
+			forgejoToken = roleToken
+			slog.Info("using role-specific Forgejo token", "role", role)
+		}
+	}
+	forgejoClient := forgejo.NewClient(cfg.Forgejo.URL, forgejoToken)
 	prov := cfg.ProviderForRole(role)
 	var llmClient provider.ChatCompleter = provider.NewClient(prov)
 
@@ -87,7 +95,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 	_ = repoPolicy // used in buildRoleRegistry
 
 	sessionInfo := &sessionInfoAdapter{workDir: sess.WorkDir, repoDir: sess.RepoDir}
-	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, cfg.Forgejo.Token)
+	forgejoAdapter := tool.NewForgejoAdapter(cfg.Forgejo.URL, forgejoToken)
 	isScaffold := strings.HasPrefix(strings.ToLower(sess.IssueTitle), "[scaffold]") || strings.HasPrefix(strings.ToLower(sess.IssueTitle), "scaffold")
 	agentCfg := &agentConfigAdapter{cfg: cfg, isScaffold: isScaffold}
 
