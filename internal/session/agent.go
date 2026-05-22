@@ -124,9 +124,11 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	analysisMode := a.detectAnalysisMode(ctx, evt)
 	fsmState := a.detectIssueState(ctx, evt)
 
-	// Detect repo-level policy (cached per session)
+	// Detect repo-level policy (cached per session, invalidated on each new session
+	// so topic changes are picked up quickly)
 	if !a.policySet {
 		if a.policyDetector != nil {
+			a.policyDetector.Invalidate(evt.Repository) // force re-fetch on first event of each session
 			a.policy = a.policyDetector.Detect(ctx, evt.Repository)
 		} else {
 			a.policy = policy.DefaultPolicy()
