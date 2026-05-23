@@ -216,7 +216,7 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 	// Build request messages
 	var reqMessages []messageJSON
 	reqMessages = append(reqMessages, messageJSON{
-		Role:    "system",
+		Role:    "user",  // "user" role avoids Scaleway strictness about system messages
 		Content: systemPrompt,
 	})
 

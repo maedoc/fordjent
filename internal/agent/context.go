@@ -76,28 +76,17 @@ func (t *ContextTracker) Compact(messages []provider.Message) []provider.Message
 		return messages
 	}
 
-	// Find the first system message (role == "system")
-	sysIdx := -1
-	for i, m := range messages {
-		if m.Role == "system" {
-			sysIdx = i
-			break
-		}
-	}
-
 	keepStart := len(messages) - t.KeepTurns
 	if keepStart < 0 {
 		keepStart = 0
 	}
 
+	// Build compacted context: drop old messages, keep compaction marker + recent turns.
+	// Use "user" role for marker to avoid Scaleway API strictness about system-after-tool.
 	var compacted []provider.Message
-	if sysIdx >= 0 {
-		compacted = append(compacted, messages[sysIdx])
-	}
-	// Inject a marker
 	compacted = append(compacted, provider.Message{
-		Role:    "system", // visible to model as context note
-		Content: "[Context Compacted] Earlier conversation history has been summarized. Continue from the latest context below.",
+		Role:    "user",
+		Content: "[Context Compacted] Earlier conversation history has been removed to stay within token limits. Continue from the latest context below.",
 	})
 	compacted = append(compacted, messages[keepStart:]...)
 

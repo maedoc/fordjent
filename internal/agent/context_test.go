@@ -51,14 +51,11 @@ func TestContextTrackerCompactKeepsRecent(t *testing.T) {
 		{Role: "assistant", Content: "resp3"},
 	}
 	compact := ct.Compact(msgs)
-	// Should keep system + marker + last 3 messages
-	if len(compact) != 5 {
-		t.Fatalf("expected 5 messages after compact, got %d", len(compact))
+	// Should keep compaction marker + last 3 messages (no more preserving old system message)
+	if len(compact) != 4 {
+		t.Fatalf("expected 4 messages after compact, got %d", len(compact))
 	}
-	if compact[0].Content != "sys" {
-		t.Fatal("expected system message preserved")
-	}
-	if compact[1].Content != "[Context Compacted] Earlier conversation history has been summarized. Continue from the latest context below." {
+	if compact[0].Content != "[Context Compacted] Earlier conversation history has been removed to stay within token limits. Continue from the latest context below." {
 		t.Fatal("expected compaction marker")
 	}
 	// Last message should be resp3
