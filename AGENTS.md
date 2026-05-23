@@ -1597,6 +1597,50 @@ Deployed a comprehensive set of fixes addressing 6 pain points discovered during
 - Deployed to cloud: `ba4ae9f`
 - Dashboard: 200 (23.8KB)
 
+### Testbed3 Stress Test Results (May 23, 2026)
+
+After deploying mitigations, a stress test on testbed3 revealed a critical new bug:
+
+#### Bug 17 — Scaleway API rejects system-role messages (Critical)
+**Problem**: Scaleway AI API is stricter than OpenAI — rejects ANY `role: "system"` message after a `role: "tool"` message, and also rejects multiple system messages. Error: `HTTP 400: Unexpected role 'system' after role 'tool'` and `System message must be at the beginning`.
+
+**Root cause**: Three code paths injected system-role messages that could appear mid-sequence:
+1. `internal/agent/turn.go`: Steering messages at 40/60/80/90% thresholds
+2. `internal/agent/context.go`: Compaction marker (`[Context Compacted]`)
+3. `internal/provider/client.go`: Initial system prompt construction
+
+The compaction code also preserved the old system message alongside the new marker, creating two system messages in sequence — both invalid.
+
+**Fix** (commit `9d2cb64`): Changed ALL three to `role: "user"` with descriptive prefixes:
+- Steering: `[Fordjent Steering]`
+- Compaction: `[Context Compacted]`
+- Initial prompt: unchanged content, just `"user"` role
+
+Removed old system message preservation from compaction code.
+
+#### Bug Found — Docker layer caching masks source changes
+**Problem**: Even with `--no-cache` flag, `docker compose build` sometimes uses cached Go build layers, deploying stale binaries.
+
+**Workaround**: `docker builder prune -af` before build, or use a cache-busting build arg.
+
+**Permanent fix**: Add `ARG CACHE_BUST` to Dockerfile and pass `--build-arg CACHE_BUST=$(date +%s)` in deploy script.
+
+#### What Worked in testbed3
+- ✅ Time tracking: `djent-dev: 76s`, `djent-pm: 7s`, `djent-qa: 152s`
+- ✅ Role identity: PRs by `djent-dev`, comments by correct bot
+- ✅ PM decomposition: `[implementer]` and `[tester]` tags in sub-issues
+- ✅ Milestones created by PM
+- ✅ 440 `turn()` tool calls in 5 minutes — steering system active
+- ✅ Issue #40 created PR #41 successfully (when binary had the fix)
+- ✅ Requested reviewers on PRs
+
+#### Remaining Gaps
+- 405 on merge API (Forgejo v9 issue, not investigated further)
+- Docker cache defeats source changes (needs ARG CACHE_BUST)
+- Cloud SSH occasionally unresponsive under load
+- Some sessions still hit max-turns (agent exploration loops reduced but not eliminated)
+- `fordjent/failed:error` label added even for sessions that partially succeeded
+
 ### Expected Outcomes
 - Turn budget failures reduced by ~80% (steering + turn tool give agent self-awareness)
 - Wrong-role assignment eliminated (PM now includes role tags)
