@@ -55,6 +55,8 @@ services:
     build:
       context: /opt/fordjent-src
       target: full
+      args:
+        CACHE_BUST: "0"  # Override with --build-arg CACHE_BUST=$(date +%s) to force rebuild
     container_name: fordjent
     restart: unless-stopped
     depends_on:

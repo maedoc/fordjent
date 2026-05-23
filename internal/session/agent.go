@@ -451,6 +451,15 @@ Update the issue comment with your reflection, then continue working.`,
 				ToolCallID: tc.ID,
 				Content:    res,
 			})
+
+			// After creating a PR as implementer, stop immediately.
+			// Prevents false failed_error labels from post-PR turn failures.
+			if tc.Function.Name == "forgejo_create_pr" && a.role == "implementer" {
+				slog.Info("PR created, stopping implementer session",
+					"session_key", a.sess.Key, "turn", turn)
+				a.addReaction(ctx, evt, "white_check_mark")
+				return nil
+			}
 		}
 
 		sig := buildTurnSignature(result.Response.ToolCalls)

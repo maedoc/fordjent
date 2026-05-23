@@ -777,6 +777,14 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 				}
 			}
 
+			// Add 'automerge' label to trigger Forgejo native auto-merge.
+			// Works around 405 error on manual API merge calls.
+			if lerr := t.adapter.Client().AddIssueLabels(ctx, params.Repository, prResp.Number, []string{"automerge"}); lerr != nil {
+				slog.Warn("create_pr: failed to add automerge label", "error", lerr, "pr", prResp.Number)
+			} else {
+				slog.Info("create_pr: added automerge label", "pr", prResp.Number)
+			}
+
 			return fmt.Sprintf("Pull request created: %s", result), nil
 		}
 		slog.Warn("create_pr: API call failed", "attempt", attempt+1, "error", err, "head", params.Head)

@@ -6,6 +6,11 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
+
+# Cache-busting argument — pass --build-arg CACHE_BUST=$(date +%s) to force rebuild
+ARG CACHE_BUST=0
+RUN echo "Cache bust: ${CACHE_BUST}"
+
 COPY . .
 RUN go mod tidy
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o fordjent ./cmd/fordjent

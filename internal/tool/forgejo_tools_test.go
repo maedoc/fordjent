@@ -111,6 +111,15 @@ func TestCreatePRToolExecute(t *testing.T) {
 		case "/api/v1/repos/org/repo/collaborators":
 			// Collaborators list — PR author is org, so no external reviewers
 			json.NewEncoder(w).Encode([]map[string]string{{"login": "org", "permission": "admin"}})
+		case "/api/v1/repos/org/repo/labels":
+			// List labels — called by AddIssueLabels to validate
+			json.NewEncoder(w).Encode([]map[string]string{{"name": "automerge"}})
+		case "/api/v1/repos/org/repo/issues/7/labels":
+			// Add labels to issue/PR — automerge label
+			json.NewEncoder(w).Encode([]map[string]string{{"name": "automerge"}})
+		case "/api/v1/repos/org/repo/issues/7":
+			// Get issue — called by AddIssueLabels to check existing labels
+			json.NewEncoder(w).Encode(map[string]interface{}{"number": 7, "labels": []interface{}{}})
 		default:
 			t.Errorf("unexpected path: %s %s", r.Method, path)
 		}
