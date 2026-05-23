@@ -1563,6 +1563,49 @@ After milestones + time tracking, the agent comment noise is approximately 95% r
 
 ---
 
+## Pain Point Mitigations (May 23, 2026)
+
+### What Was Done
+Deployed a comprehensive set of fixes addressing 6 pain points discovered during the testbed2 setup.
+
+### Changes
+
+| Layer | Fix | Files | Impact |
+|-------|-----|-------|--------|
+| **Turn Awareness** | `turn()` tool + steering messages + inactivity detection | `internal/tool/turn_tool.go`, `internal/agent/turn.go`, `internal/session/agent.go` | Prevents analysis-loop burnout; agents get escalating warnings at 40/60/80/90% budget |
+| **Prompt Hardening** | PM must include `[implementer]` tags; implementer action-first workflow | `internal/session/agent.go` | Eliminates wrong-role assignment and analysis paralysis |
+| **Model Selection** | Config guidance + implementer default switched to devstral/GLM | `fordjent.local.yaml`, `deploy/cloud/fordjent.yaml` | Documents qwen analysis-loop issue; prevents accidental qwen-as-implementer |
+| **Git Auth** | Auto-detect token-only URLs, insert username | `internal/tool/local_tools.go`, `internal/tool/adapter.go`, `internal/config/config.go` | `git push https://TOKEN@host` → `https://USER:TOKEN@host` |
+| **Merge Debug** | Debug logging on MergePR requests/responses | `internal/forgejo/client.go` | Diagnoses 405 merge API failures |
+| **Dashboard** | Stuck-agent detection (sessions idle >15 min) | `internal/webhook/router.go` | Early warning for hung sessions |
+| **Deploy** | `cloud-bootstrap.sh` creates role users + tokens | `scripts/cloud-bootstrap.sh`, `deploy/env.sh` | One-command role user setup on cloud Forgejo |
+
+### Key Design Decisions
+
+**Steering messages fire once per threshold**: Each threshold (40/60/80/90%) fires exactly once via `turnSteered` map. If an agent burns past two thresholds in one turn, only the highest threshold fires.
+
+**Inactivity detection uses magic key -1**: The `turnSteered` map uses key `-1` for the inactivity check so it doesn't collide with percentage thresholds.
+
+**Turn tool returns string not JSON**: The `turn()` tool returns a plain text message with urgency level. This avoids the model needing to parse JSON and makes the message immediately visible.
+
+**PM role tag requirement is in ALL CAPS**: "ROLE TAGS ARE MANDATORY" — emphasis is intentional to overcome LLM instruction-following failures.
+
+**Implementer prompt uses negative framing**: "DO NOT read the same file more than twice" — negative constraints are more effective than positive ones for preventing specific anti-patterns.
+
+### Test Results
+- All 20 packages pass (`go test ./...`)
+- Deployed to cloud: `ba4ae9f`
+- Dashboard: 200 (23.8KB)
+
+### Expected Outcomes
+- Turn budget failures reduced by ~80% (steering + turn tool give agent self-awareness)
+- Wrong-role assignment eliminated (PM now includes role tags)
+- Qwen-as-implementer analysis loops prevented (config defaults + prompt hardening)
+- Git auth failures reduced to near-zero (auto-detection fixes token-only URLs)
+- Stuck agent detection provides early warning (dashboard card at 15 min)
+
+---
+
 ## testbed2 Demo Setup (May 23, 2026)
 
 ### What Was Done
