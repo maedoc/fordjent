@@ -61,6 +61,7 @@ type Agent struct {
 	policyDetector   *policy.CachedDetector
 	commentCount     int
 	commentLimit     int
+	subIssueCount    int  // tracks forgejo_create_issue calls (for PM exit logic)
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
@@ -440,6 +441,8 @@ Update the issue comment with your reflection, then continue working.`,
 				res = fmt.Sprintf("Error: %s", terr)
 			} else if tc.Function.Name == "forgejo_comment" {
 				a.commentCount++
+			} else if tc.Function.Name == "forgejo_create_issue" {
+				a.subIssueCount++
 			}
 
 			if a.cfg.Memory.Enabled {
@@ -457,6 +460,14 @@ Update the issue comment with your reflection, then continue working.`,
 			if tc.Function.Name == "forgejo_create_pr" && a.role == "implementer" {
 				slog.Info("PR created, stopping implementer session",
 					"session_key", a.sess.Key, "turn", turn)
+				a.addReaction(ctx, evt, "white_check_mark")
+				return nil
+			}
+
+			// After PM posts a plan comment (with sub-issues created), stop.
+			if tc.Function.Name == "forgejo_comment" && a.role == "pm" && a.subIssueCount > 0 {
+				slog.Info("PM plan posted, stopping PM session",
+					"session_key", a.sess.Key, "turn", turn, "sub_issues", a.subIssueCount)
 				a.addReaction(ctx, evt, "white_check_mark")
 				return nil
 			}
