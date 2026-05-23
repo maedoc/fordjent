@@ -116,10 +116,10 @@ func (te *TurnExecutor) ApplySteering(messages []provider.Message) []provider.Me
 	for threshold, msg := range thresholds {
 		if pct >= float64(threshold) && !te.turnSteered[threshold] {
 			te.turnSteered[threshold] = true
-			// Inject steering message as a system message
+			// Inject steering message as a user message (system role breaks Scaleway API after tool messages)
 			messages = append(messages, provider.Message{
-				Role:    "system",
-				Content: msg,
+				Role:    "user",
+				Content: "[Fordjent Steering] " + msg,
 			})
 		}
 	}
@@ -132,8 +132,8 @@ func (te *TurnExecutor) ApplySteering(messages []provider.Message) []provider.Me
 			if !te.turnSteered[-1] { // use -1 as special key for inactivity
 				te.turnSteered[-1] = true
 				messages = append(messages, provider.Message{
-					Role:    "system",
-					Content: "[Steering] You are in implementer role but haven't written any code files yet (no write_file calls). If you understand the task, use write_file to create your first code file. If you're blocked, use forgejo_comment to explain what's blocking you.",
+					Role:    "user",
+					Content: "[Fordjent Steering] You are in implementer role but haven't written any code files yet (no write_file calls). If you understand the task, use write_file to create your first code file. If you're blocked, use forgejo_comment to explain what's blocking you.",
 				})
 			}
 		}
