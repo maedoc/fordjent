@@ -1641,6 +1641,24 @@ Removed old system message preservation from compaction code.
 - Some sessions still hit max-turns (agent exploration loops reduced but not eliminated)
 - `fordjent/failed:error` label added even for sessions that partially succeeded
 
+### Bug 18 — Docker Layer Caching (Fixed)
+**Problem**: `docker compose build --no-cache` still used cached Go build layers.
+
+**Fix** (commit `418ab4c`):
+1. Added `ARG CACHE_BUST=0` to Dockerfile before `COPY . .`
+2. Added `args: CACHE_BUST: "0"` to docker-compose.yaml
+3. Deploy command: `CACHE_BUST=$(date +%s) docker compose build --build-arg CACHE_BUST=$(date +%s) fordjent`
+
+### Bug 19 — False failed_error Labels (Fixed)
+**Problem**: Implementer sessions that successfully created code + PR were labeled `fordjent/failed:error` because the agent continued running turns after PR creation and hit transient API errors.
+
+**Fix**: Agent now returns nil (success) immediately after `forgejo_create_pr` completes for implementer role. Logs `"PR created, stopping implementer session"`.
+
+### Automerge Workaround for 405 Merge (Implemented)
+**Problem**: `POST /api/v1/repos/{repo}/pulls/{N}/merge` returns HTTP 405.
+
+**Workaround**: `forgejo_create_pr` now adds the `automerge` label to every PR. Forgejo natively detects this label and auto-merges when all conditions are met. This bypasses the broken API merge endpoint entirely.
+
 ### Expected Outcomes
 - Turn budget failures reduced by ~80% (steering + turn tool give agent self-awareness)
 - Wrong-role assignment eliminated (PM now includes role tags)
