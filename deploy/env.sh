@@ -8,3 +8,6 @@ export SCW_PROJECT_ID=""
 export SCALEWAY_AI_KEY=""
 export WAFER_API_KEY=""
 export GANDI_API_KEY=""
+
+# Role user password (used by cloud-bootstrap.sh)
+export ROLE_USER_PASSWORD="Fordjent123!"

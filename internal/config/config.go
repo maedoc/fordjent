@@ -87,6 +87,7 @@ type AgentConfig struct {
 	CleanupArchiveDays int               `yaml:"cleanup_archive_days"`
 	GitName            string            `yaml:"git_name"`
 	GitEmail           string            `yaml:"git_email"`
+	GitUser            string            `yaml:"git_user"`
 	FastProvider       string            `yaml:"fast_provider"`  // DEPRECATED: use role_providers instead
 	RoleProviders      map[string]string `yaml:"role_providers"` // role → provider name, e.g. {"pm": "kimi-k2.6", "reviewer": "glm-5.1"}
 	FallbackProvider   string            `yaml:"fallback_provider"`
@@ -184,6 +185,7 @@ func Load(path string) (*Config, error) {
 			CleanupArchiveDays:      30,
 			GitName:                 "Fordjent Agent",
 			GitEmail:                "fordjent@forgejo.local",
+			GitUser:                 "fjadmin",
 			ReflectionInterval:      5,
 			RecoveryWindowHours:    24,
 			EnableAutoRetry:       true,

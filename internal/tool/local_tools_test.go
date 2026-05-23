@@ -29,6 +29,7 @@ func (t *testAgentConfig) RequirePRForWorkflows() bool    { return true }
 func (t *testAgentConfig) DryRun() bool                  { return false }
 func (t *testAgentConfig) AllowProtectedPush() bool      { return t.allowProtected }
 func (t *testAgentConfig) IsScaffold() bool              { return t.allowProtected }
+func (t *testAgentConfig) GitUser() string              { return "fjadmin" }
 
 func setupTestRepo(t *testing.T) string {
 	t.Helper()

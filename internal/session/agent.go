@@ -102,7 +102,30 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 
 	registry := buildRoleRegistry(forgejoAdapter, mq, sess, sessionInfo, agentCfg, role, cfg, sandboxReporter, sched, repoPolicy)
 
-	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository)
+	// Compute effective max turns for this role
+	maxTurns := cfg.Agent.MaxTurns
+	switch role {
+	case "pm":
+		if cfg.Agent.MaxTurnsPM > 0 {
+			maxTurns = cfg.Agent.MaxTurnsPM
+		}
+	case "implementer":
+		if cfg.Agent.MaxTurnsImplementer > 0 {
+			maxTurns = cfg.Agent.MaxTurnsImplementer
+		}
+	case "reviewer":
+		if cfg.Agent.MaxTurnsReviewer > 0 {
+			maxTurns = cfg.Agent.MaxTurnsReviewer
+		}
+	}
+
+	executor := agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository, maxTurns, role)
+
+	// Register the turn tool (available to all roles)
+	turnGetter := func() (int, int) {
+		return executor.CurrentTurn(), executor.MaxTurns()
+	}
+	registry.Register(tool.NewTurnTool(turnGetter))
 
 	return &Agent{
 		cfg:             cfg,
@@ -152,7 +175,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	}
 
 	// Step 3: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState)
+	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState, a.executor.CurrentTurn(), a.executor.MaxTurns())
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
@@ -401,6 +424,7 @@ Update the issue comment with your reflection, then continue working.`,
 			}
 
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			a.executor.RecordToolCall(tc.Function.Name)
 			if terr != nil {
 				if firstToolErr == nil {
 					firstToolErr = terr
@@ -441,6 +465,9 @@ Update the issue comment with your reflection, then continue working.`,
 			})
 			slog.Warn("stall detected", "session_key", a.sess.Key, "turn", turn)
 		}
+
+		// Apply steering messages (turn budget warnings, inactivity detection)
+		messages = a.executor.ApplySteering(messages)
 
 		// Record turn progress in lifecycle DB for diagnostics (after tool execution)
 		if a.lc != nil {
@@ -491,7 +518,7 @@ func (a *Agent) effectiveMaxTurns() int {
 	return a.cfg.Agent.MaxTurns
 }
 
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState) string {
+func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState, turn, maxTurns int) string {
 	toolsDesc := a.tools.Descriptions()
 
 	// Detect repo language for language-aware prompting
@@ -568,7 +595,15 @@ Before creating sub-issues that depend on code from parent issues:
 3. Only create sub-issues for work that can be done with currently available code.
 4. **CRITICAL**: In each sub-issue body, add a line 'Depends on: #N' (where #N is the parent issue or another sub-issue that must be completed first). This enables the scheduler to automatically unblock issues when their dependencies are merged. Example:
    - If issue #2 must be done before #3, add 'Depends on: #2' in #3's body.
-   - If #4 depends on both #2 and #3, add 'Depends on: #2, #3'.`
+   - If #4 depends on both #2 and #3, add 'Depends on: #2, #3'.
+5. **ROLE TAGS ARE MANDATORY**: Every sub-issue title MUST start with a role tag in brackets:
+   - [implementer] for code implementation tasks (writing code, creating files)
+   - [devops] for CI/CD, Docker, infrastructure, deployment tasks
+   - [tester] for testing, QA, integration test tasks
+   - [reviewer] for code review, PR review tasks
+   - Example: "[implementer] Implement git init command"
+   - Example: "[tester] Write integration tests for auth flow"
+   - Without these tags, the agent won't be assigned the correct tools and will fail.`
 
 		if a.policy.PlanFirst {
 			modeInstructions += `
@@ -674,10 +709,26 @@ You are in Implementer mode. Your focus is writing production code:
 - Write tests for your implementation.
 - Create a PR when done.
 
-If you encounter ambiguity or need clarification on requirements, use forgejo_ping_parent to ask the PM a question on the parent issue. Find the parent issue number from the 'Depends on: #N' reference in your issue body. Include your specific question and any relevant context about what's blocking you. The PM will respond on the parent issue.`
+If you encounter ambiguity or need clarification on requirements, use forgejo_ping_parent to ask the PM a question on the parent issue. Find the parent issue number from the 'Depends on: #N' reference in your issue body. Include your specific question and any relevant context about what's blocking you. The PM will respond on the parent issue.
+
+**Action-first workflow** — follow this sequence, minimizing exploration:
+1. Read the issue requirements and existing code ONCE (1-2 turns max for code reading).
+2. Check one or two files to understand the repo structure (use read_file or bash ls).
+3. Write ALL your code files using write_file. Create multiple files in a single turn if the model supports it.
+4. Test: use bash to run go build ./... (or language-appropriate build command).
+5. Commit with git commit and, if needed, create a PR with forgejo_create_pr.
+6. Post ONE summary comment. Stop.
+
+**Anti-patterns to AVOID:**
+- DO NOT read the same file more than twice.
+- DO NOT use git status/log/diff more than once per turn.
+- DO NOT explore the repo structure more than needed.
+- DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.`
 	}
 
 	stateInstructions := issueStateInstructions(fsmState)
+
+	turnBudgetInfo := fmt.Sprintf("\n\n## Turn Budget\nYou have %d turns total and are currently on turn %d. You have access to a turn() tool that tells you how many turns you've used and how many remain. Check it periodically, especially if you've been working for a while.", maxTurns, turn)
 
 	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
 
@@ -686,7 +737,7 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 - Event: %s (action: %s)
 - Sender: @%s
 - Target: %s
-%s%s
+%s%s%s
 %s
 
 ## Your Capabilities
@@ -727,6 +778,7 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		modeInstructions,
 		langInstruction,
 		stateInstructions,
+		turnBudgetInfo,
 		toolsDesc,
 		a.cfg.Agent.CommitPrefix,
 		strings.Join(a.cfg.Security.ProtectedBranches, ", "),

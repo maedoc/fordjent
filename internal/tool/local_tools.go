@@ -480,6 +480,7 @@ type gitTool struct {
 	sandboxCfg  sandbox.Config
 	violCounter *sandbox.ViolationCounter
 	sessionKey  string
+	gitUser     string // Forgejo username for remote URL credentials
 }
 
 func NewGitTool(info SessionInfo, cfg AgentConfig) *gitTool {
@@ -487,6 +488,7 @@ func NewGitTool(info SessionInfo, cfg AgentConfig) *gitTool {
 		repoDir:    info.RepoDir(),
 		agentCfg:   cfg,
 		sandboxCfg: sandbox.DefaultConfig(info.RepoDir()),
+		gitUser:    cfg.GitUser(),
 	}
 }
 
@@ -643,6 +645,37 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		if isProtected && (t.agentCfg == nil || !t.agentCfg.AllowProtectedPush()) {
 			return "", fmt.Errorf("commit on protected branch %q blocked. Create a feature branch first (e.g., git checkout -b feature/my-feature). Only scaffold sessions may commit on main.", currentBranch)
 		} else {
+			// Detect and fix token-only remote URLs (e.g., https://TOKEN@host).
+			// Git needs USER:TOKEN@host format; token-only causes "could not read Password".
+			if t.gitUser != "" {
+				remoteCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "remote", "get-url", "origin")
+				remoteCmd.Dir = t.repoDir
+				remoteOut, _ := remoteCmd.CombinedOutput()
+				remoteURL := strings.TrimSpace(string(remoteOut))
+				if strings.Contains(remoteURL, "@") {
+					// Check if the part between :// and @ has no : (missing username).
+					// Token-only format like https://TOKEN@host needs USER: prefix.
+					schemeEnd := strings.Index(remoteURL, "://")
+					atPos := strings.Index(remoteURL, "@")
+					needsUser := schemeEnd < 0 || (atPos > schemeEnd && !strings.Contains(remoteURL[schemeEnd+3:atPos], ":"))
+					if needsUser {
+						fixedURL := remoteURL
+						if schemeEnd >= 0 {
+							fixedURL = remoteURL[:schemeEnd+3] + t.gitUser + ":" + remoteURL[schemeEnd+3:]
+						} else {
+							fixedURL = t.gitUser + ":" + remoteURL
+						}
+						setCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "remote", "set-url", "origin", fixedURL)
+						setCmd.Dir = t.repoDir
+						if setOut, setErr := setCmd.CombinedOutput(); setErr != nil {
+							slog.Warn("git auto-push: failed to fix remote URL", "error", setErr, "output", string(setOut))
+						} else {
+							slog.Info("git auto-push: fixed remote URL credentials", "remote", fixedURL)
+						}
+					}
+				}
+			}
+
 			pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer pushCancel()
 			pushCmd := exec.CommandContext(pushCtx, "git", "push", "-u", "origin", "HEAD")
@@ -651,7 +684,8 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 			if pushErr != nil {
 				return fmt.Sprintf("%s\n[auto-push warning] %s\n%s", string(out), pushErr, string(pushOut)), nil
 			}
-			out = append(out, []byte(fmt.Sprintf("\n[auto-push] %s", strings.TrimSpace(string(pushOut))))...)
+			pushSummary := []byte(fmt.Sprintf("\n[auto-push] %s", strings.TrimSpace(string(pushOut))))
+			out = append(out, pushSummary...)
 		}
 	}
 

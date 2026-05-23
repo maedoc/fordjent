@@ -320,7 +320,7 @@ func TestBuildSystemPrompt_IncludesStateInstructions(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "implementer", lifecycle.StatePlanning)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "implementer", lifecycle.StatePlanning, 0, 5)
 	if !strings.Contains(prompt, "Planning") {
 		t.Error("system prompt should include planning state instructions")
 	}
@@ -342,7 +342,7 @@ func TestBuildSystemPrompt_PRReviewMode(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "PR Review Mode") {
 		t.Error("system prompt should include PR Review Mode for PR comment events")
 	}
@@ -383,7 +383,7 @@ func TestBuildSystemPrompt_AutomergeReviewerPrompt(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "reviewer", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateMerging)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateMerging, 0, 5)
 	if !strings.Contains(prompt, "automerge") {
 		t.Error("reviewer prompt should mention automerge when PR has automerge label")
 	}
@@ -453,7 +453,7 @@ func TestBuildSystemPrompt_DevOpsRole(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "devops", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "devops", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "devops", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "DevOps") {
 		t.Error("devops prompt should include DevOps role instructions")
 	}
@@ -478,7 +478,7 @@ func TestBuildSystemPrompt_TesterRole(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "tester", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "tester", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "tester", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "Test Engineer") {
 		t.Error("tester prompt should include Test Engineer role instructions")
 	}
@@ -503,7 +503,7 @@ func TestBuildSystemPrompt_PMRole(t *testing.T) {
 	agent := NewAgent(cfg, sess, nil, nil, nil, "pm", nil, nil, nil)
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "Project Manager") {
 		t.Error("pm prompt should include Project Manager role instructions")
 	}
@@ -813,7 +813,7 @@ func TestBuildSystemPrompt_PolicyNoAutoMerge(t *testing.T) {
 	agent.policySet = true
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "no-auto-merge policy") {
 		t.Error("reviewer prompt should mention no-auto-merge policy")
 	}
@@ -840,7 +840,7 @@ func TestBuildSystemPrompt_PolicyRequireReview(t *testing.T) {
 	agent.policySet = true
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "requires human review before merging") {
 		t.Error("reviewer prompt should mention require-review policy")
 	}
@@ -867,7 +867,7 @@ func TestBuildSystemPrompt_PolicyYolo(t *testing.T) {
 	agent.policySet = true
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
 	// Yolo mode: reviewer should be told to merge bot PRs immediately
 	if !strings.Contains(prompt, "call forgejo_merge_pr IMMEDIATELY") {
 		t.Error("yolo reviewer prompt should tell reviewer to merge bot PRs immediately")
@@ -892,7 +892,7 @@ func TestBuildSystemPrompt_PolicyPlanFirst(t *testing.T) {
 	agent.policySet = true
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened)
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened, 0, 5)
 	if !strings.Contains(prompt, "plan-first policy") {
 		t.Error("pm prompt should mention plan-first policy")
 	}

@@ -22,10 +22,15 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   max_turns_reviewer: 20
+  # Role-specific LLM providers.
+  # IMPORTANT: implementer should use a model with strong tool-calling action bias.
+  # scaleway-qwen (qwen3.6) tends to loop on exploration (828 git calls, 0 write_file observed).
+  # scaleway-devstral has an action-first profile and is preferred for implementer.
+  # PM and reviewer can use either model — they only need read/comment tools.
   role_providers:
     pm: "scaleway-devstral"
     reviewer: "scaleway-devstral"
-    implementer: "scaleway-qwen"
+    implementer: "scaleway-devstral"  # Changed from qwen — see model guidance above
     tester: "scaleway-qwen"
     devops: "scaleway-qwen"
   fallback_provider: "scaleway-qwen"

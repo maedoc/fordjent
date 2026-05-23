@@ -1017,6 +1017,7 @@ func (r *Router) handleDashboard(w http.ResponseWriter, req *http.Request) {
 
 	// Gather data
 	activeSessions := queryActiveSessions(lifecycleDBPath)
+	stuckSessions := queryStuckSessions(lifecycleDBPath)
 	costSummary, _ := queryCostDB(costDBPath)
 	lifecycleSummary, _ := queryLifecycleDB(lifecycleDBPath)
 	byModel, _ := queryCostDBPerModel(costDBPath, time.Time{})
@@ -1104,6 +1105,24 @@ a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
 		fmt.Fprint(w, `</table></div>`)
 	} else {
 		fmt.Fprint(w, `<div class="section"><h2>Active Sessions</h2><p style="color:#8b949e">No active sessions.</p></div>`)
+	}
+
+	// Stuck sessions — active but no activity for >15 minutes
+	if len(stuckSessions) > 0 {
+		fmt.Fprint(w, `<div class="section"><h2>⚠️ Stuck Sessions</h2><table><tr><th>Session</th><th>Repo</th><th>Issue</th><th>Last Activity</th><th>Idle (min)</th></tr>`)
+		for _, s := range stuckSessions {
+			sessionKey := fmt.Sprint(s["session_key"])
+			traceURL := fmt.Sprintf("/trace/%s", sessionKey)
+			idleMin := "?"
+			if im, ok := s["idle_minutes"]; ok {
+				idleMin = fmt.Sprintf("%.0f", im)
+			}
+			fmt.Fprintf(w, `<tr><td><a href="%s">%s</a></td><td>%s</td><td>%s</td><td>%s</td><td><span class="tag tag-amber">%s min</span></td></tr>`,
+				html.EscapeString(traceURL), html.EscapeString(sessionKey),
+				html.EscapeString(fmt.Sprint(s["repo"])), html.EscapeString(fmt.Sprint(s["issue_number"])),
+				html.EscapeString(fmt.Sprint(s["last_active"])), html.EscapeString(idleMin))
+		}
+		fmt.Fprint(w, `</table></div>`)
 	}
 
 	// Model usage
@@ -1222,6 +1241,57 @@ func queryRecentFailures(dbPath string, limit int) []map[string]interface{} {
 		out = append(out, map[string]interface{}{
 			"session_key": key, "repo": repoStr, "issue_number": issueStr,
 			"to_state": toState, "reason": reason, "occurred_at": occurred,
+		})
+	}
+	return out
+}
+
+// queryStuckSessions returns sessions that have been stuck in 'working' state
+// for more than 15 minutes without any state transition.
+func queryStuckSessions(dbPath string) []map[string]interface{} {
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT session_key, MAX(occurred_at) as last_active
+		FROM session_transitions
+		WHERE to_state = 'working'
+		GROUP BY session_key
+		HAVING last_active < datetime('now', '-15 minutes')
+		ORDER BY last_active ASC
+		LIMIT 10
+	`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	now := time.Now().UTC()
+	for rows.Next() {
+		var key, lastActive string
+		if err := rows.Scan(&key, &lastActive); err != nil {
+			continue
+		}
+		// Parse repo/issue from session key (format: owner/repo/issues/N or owner/repo/pulls/N)
+		parts := strings.Split(key, "/")
+		repoStr := ""
+		issueStr := ""
+		if len(parts) >= 4 {
+			repoStr = parts[0] + "/" + parts[1]
+			issueStr = parts[3]
+		}
+		// Calculate idle minutes
+		idleMin := 0.0
+		if t, err := time.Parse("2006-01-02 15:04:05", lastActive); err == nil {
+			idleMin = now.Sub(t).Minutes()
+		}
+		out = append(out, map[string]interface{}{
+			"session_key": key, "repo": repoStr, "issue_number": issueStr,
+			"last_active": lastActive, "idle_minutes": idleMin,
 		})
 	}
 	return out

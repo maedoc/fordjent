@@ -27,6 +27,7 @@ func (m *mockAgentConfig) RequirePRForWorkflows() bool  { return true }
 func (m *mockAgentConfig) DryRun() bool                 { return false }
 func (m *mockAgentConfig) AllowProtectedPush() bool      { return false }
 func (m *mockAgentConfig) IsScaffold() bool              { return false }
+func (m *mockAgentConfig) GitUser() string              { return "fjadmin" }
 
 func TestRegistryRegisterAndGet(t *testing.T) {
 	registry := NewRegistry()

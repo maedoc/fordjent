@@ -19,10 +19,14 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   max_turns_reviewer: 20
+  # Role-specific LLM providers.
+  # IMPORTANT: implementer should use a model with strong tool-calling action bias.
+  # qwen models (qwen3.6, qwen2.5) tend to loop on exploration — prefer GLM or devstral for implementer.
+  # PM and reviewer can use either model — they only need read/comment tools.
   role_providers:
     pm: "wafer-glm"
     reviewer: "wafer-glm"
-    implementer: "wafer-qwen"
+    implementer: "wafer-glm"  # Changed from wafer-qwen — see model guidance above
     tester: "wafer-qwen"
     devops: "wafer-qwen"
   fallback_provider: "wafer-qwen"

@@ -14,4 +14,5 @@ type AgentConfig interface {
 	DryRun() bool
 	AllowProtectedPush() bool // scaffold sessions may push to protected branches
 	IsScaffold() bool        // true when the session is for a scaffold issue
+	GitUser() string         // Forgejo username for remote URL credentials
 }

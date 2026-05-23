@@ -76,6 +76,7 @@ func (a *agentConfigAdapter) AllowProtectedPush() bool {
 	return a.cfg.Agent.AllowProtectedPush || a.isScaffold
 }
 func (a *agentConfigAdapter) IsScaffold() bool { return a.isScaffold }
+func (a *agentConfigAdapter) GitUser() string { return a.cfg.Agent.GitUser }
 
 // Manager manages agent session lifecycle.
 type Manager struct {
