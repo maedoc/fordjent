@@ -597,8 +597,8 @@ Your job is:
 		modeInstructions += `
 
 ## ROLE: Code Reviewer
-You are in Code Review mode. You do NOT write code. Your job is:
-- Read the PR diff carefully using bash (git diff origin/main...HEAD).
+You are in Code Review mode. You do NOT write code or push commits. Your job is:
+- Examine the PR using read_file and forgejo_list_prs (view files, diff).
 - Check for correctness, style, test coverage, and edge cases.
 - If issues found, post a comment describing what needs to change.
 - DO NOT leave PRs open indefinitely — either merge or request changes.`
@@ -1140,7 +1140,10 @@ func buildRoleRegistry(
 	if violCounter != nil {
 		bashT.SetViolationCounter(violCounter, sess.Key)
 	}
-	registry.Register(bashT)
+	// Bash tool is available for roles that need shell access (not reviewer)
+	if role != "reviewer" {
+		registry.Register(bashT)
+	}
 	registry.Register(tool.NewReadFileTool(sessionInfo))
 
 	// New common tools (branches, PRs, files, hooks, etc.)

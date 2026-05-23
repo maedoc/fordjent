@@ -382,6 +382,14 @@ func (c *Config) ProviderByName(name string) *ProviderConfig {
 	return nil
 }
 
+// FordjentBaseURL returns the public base URL (without trailing /acp/...)
+func (c *Config) FordjentBaseURL() string {
+	if c.AutoRegister.WebhookURL == "" {
+		return fmt.Sprintf("http://%s:%d", c.Server.Host, c.Server.Port)
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(c.AutoRegister.WebhookURL, "/acp/v1/events"), "/acp/v1/events/")
+}
+
 // ProviderForRole returns the provider to use for a given agent role.
 // Checks role_providers map first, then fast_provider for pm/reviewer, then default.
 func (c *Config) ProviderForRole(role string) *ProviderConfig {

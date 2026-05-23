@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -56,6 +57,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/status", r.handleStatus)
 	r.mux.HandleFunc("/tokens-per-minute", r.handleTokensPerMinute)
 	r.mux.HandleFunc("/activity", r.handleActivity)
+	r.mux.HandleFunc("/trace/", r.handleTrace) // /trace/{owner}/{repo}/{issues|pulls}/{N}
 	r.mux.HandleFunc("/acp/v1/stream", r.handleStream)
 	r.mux.Handle("/admin", webui.Handler(cfg))
 	r.mux.Handle("/admin/", webui.Handler(cfg))
@@ -991,4 +993,131 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	}
 
 	return false
+}
+
+// handleTrace serves a session's memory trace as HTML.
+// Path: /trace/{owner}/{repo}/{issues|pulls}/{N}
+func (r *Router) handleTrace(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse path: /trace/owner/repo/issues/N or /trace/owner/repo/pulls/N
+	parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/trace/"), "/")
+	if len(parts) < 4 {
+		http.Error(w, "invalid trace path: expected /trace/owner/repo/issues/N", http.StatusBadRequest)
+		return
+	}
+	owner, repo, kind, num := parts[0], parts[1], parts[2], parts[3]
+	if kind != "issues" && kind != "pulls" {
+		http.Error(w, "path must be /issues/N or /pulls/N", http.StatusBadRequest)
+		return
+	}
+
+	// Build path to memory JSONL
+	workDir := r.cfg.Agent.WorkDir
+	if workDir == "" {
+		http.Error(w, "WorkDir not configured", http.StatusServiceUnavailable)
+		return
+	}
+	memPath := filepath.Join(workDir, owner, repo, kind, num, "memory.jsonl")
+
+	data, err := os.ReadFile(memPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("session trace not found: %v", err), http.StatusNotFound)
+		return
+	}
+
+	// Parse JSONL lines
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Fordjent Trace — %s/%s/%s/%s</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;background:#0d1117;color:#c9d1d9}
+h1{color:#58a6ff}h2{color:#f0f6fc;border-bottom:1px solid #30363d;padding-bottom:.3em}
+.turn{border:1px solid #30363d;border-radius:6px;margin:1em 0;padding:1em;background:#161b22}
+.turn-header{color:#8b949e;font-size:.85em;margin-bottom:.5em}
+.tool{background:#1c2128;border-left:3px solid #58a6ff;padding:.5em 1em;margin:.5em 0;border-radius:0 4px 4px 0}
+.tool-name{color:#7ee787;font-weight:600}
+.tool-output{color:#c9d1d9;white-space:pre-wrap;font-size:.9em;max-height:300px;overflow-y:auto}
+.response{color:#a5d6ff;white-space:pre-wrap;line-height:1.5}
+.error{color:#f85149}pre{overflow-x:auto}
+.mark{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.8em;font-weight:600}
+.mark-success{background:#238636;color:#fff}.mark-fail{background:#da3633;color:#fff}.mark-info{background:#1f6feb;color:#fff}
+</style></head><body>
+<h1>Fordjent Session Trace</h1>
+<p><strong>Repository:</strong> %s/%s &middot; <strong>%s:</strong> #%s &middot; <strong>Turns:</strong> %d</p>
+`,
+		html.EscapeString(owner), html.EscapeString(repo), kind, html.EscapeString(num),
+		html.EscapeString(owner), html.EscapeString(repo), kind, html.EscapeString(num), len(lines))
+
+	allTools := make(map[string]int)
+		for _, line := range lines {
+		var entry struct {
+			Timestamp  string `json:"timestamp"`
+			Turn       int    `json:"turn"`
+			EventType  string `json:"event_type"`
+			ToolName   string `json:"tool_name"`
+			ToolArgs   string `json:"tool_args"`
+			ToolResult string `json:"tool_result"`
+			Response   string `json:"response"`
+			Error      string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+
+		fmt.Fprintf(w, `<div class="turn"><div class="turn-header">Turn %d &middot; %s &middot; %s</div>`,
+			entry.Turn, entry.Timestamp, entry.EventType)
+
+		if entry.Error != "" {
+			fmt.Fprintf(w, `<div class="error"><strong>Error:</strong> %s</div>`, html.EscapeString(entry.Error))
+		}
+
+		if entry.ToolName != "" {
+			allTools[entry.ToolName]++
+			fmt.Fprintf(w, `<div class="tool"><span class="tool-name">%s</span>`, html.EscapeString(entry.ToolName))
+			if entry.ToolArgs != "" && entry.ToolArgs != "{}" {
+				fmt.Fprintf(w, `<pre>%s</pre>`, html.EscapeString(tryFormatJSON(entry.ToolArgs)))
+			}
+			if entry.ToolResult != "" {
+				displayResult := entry.ToolResult
+				if len(displayResult) > 2000 {
+					displayResult = displayResult[:2000] + "\n... (truncated)"
+				}
+				fmt.Fprintf(w, `<div class="tool-output">%s</div>`, html.EscapeString(displayResult))
+			}
+			fmt.Fprint(w, `</div>`)
+		}
+
+		if entry.Response != "" {
+			fmt.Fprintf(w, `<div class="response">%s</div>`, html.EscapeString(entry.Response))
+		}
+		fmt.Fprint(w, `</div>`)
+	}
+
+	// Summary
+	fmt.Fprint(w, `<h2>Summary</h2><table>`)
+	for name, count := range allTools {
+		fmt.Fprintf(w, `<tr><td>%s calls</td><td>%d</td></tr>`, html.EscapeString(name), count)
+	}
+	fmt.Fprint(w, `</table><p style="color:#8b949e;margin-top:2em">Fordjent agent &middot; session trace</p></body></html>`)
+}
+
+func tryFormatJSON(raw string) string {
+	// Pretty-print if valid JSON
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	formatted, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return raw
+	}
+	return string(formatted)
 }

@@ -180,7 +180,7 @@ func (l *Lifecycle) ResolveBlockedBranch(ctx context.Context, repo, branch strin
 // OnSessionComplete records a successful completion. Posts a commit status
 // and logs wall-clock time via Forgejo time tracking. No comment is posted
 // — the commit status (+ reaction) and time entry are sufficient.
-func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int, role string, headSHA string, sessionDuration time.Duration) {
+func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo string, issueNumber int, role string, headSHA string, sessionDuration time.Duration, roleToken string, fordjentBaseURL string) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateCompleted, "session finished successfully")
 
 	if l.forgejo == nil || issueNumber <= 0 {
@@ -205,18 +205,26 @@ func (l *Lifecycle) OnSessionComplete(ctx context.Context, sessionKey, repo stri
 		}
 	}
 
-	// Commit status: green checkmark on the PR commit
+	// Commit status: green checkmark on the PR commit with trace link
 	if headSHA != "" {
+		targetURL := ""
+		if fordjentBaseURL != "" {
+			targetURL = fmt.Sprintf("%s/trace/%s/%s/%d", fordjentBaseURL, repo, "issues", issueNumber)
+		}
 		_ = l.forgejo.CreateCommitStatus(ctx, repo, headSHA, "success",
-			"fordjent/agent", description, "")
+			"fordjent/agent", description, targetURL)
 	}
 
-	// Reaction: visible in issue timeline, zero noise
-	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "white_check_mark")
+	// Reaction: use role token so it appears as djent-dev / djent-qa
+	rc := l.forgejo
+	if roleToken != "" {
+		rc = rc.WithToken(roleToken)
+	}
+	_ = rc.AddReaction(ctx, repo, issueNumber, 0, "white_check_mark")
 }
 
 // OnSessionFailedMaxTurns records that the session exhausted its turn budget.
-func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, issueNumber int, sessionKey string, sessionDuration time.Duration) {
+func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, issueNumber int, sessionKey string, sessionDuration time.Duration, roleToken string) {
 	_ = l.RecordTransition(ctx, sessionKey, StateWorking, StateFailedMaxTurns,
 		fmt.Sprintf("reached max turns on issue #%d", issueNumber))
 
@@ -231,12 +239,16 @@ func (l *Lifecycle) OnSessionFailedMaxTurns(ctx context.Context, repo string, is
 	_ = l.forgejo.RemoveIssueLabel(ctx, repo, issueNumber, "in_progress")
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:max-turns"})
 
-	// Reaction + label is sufficient.
-	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "x")
+	// Reaction with role token
+	rc := l.forgejo
+	if roleToken != "" {
+		rc = rc.WithToken(roleToken)
+	}
+	_ = rc.AddReaction(ctx, repo, issueNumber, 0, "x")
 }
 
 // OnSessionFailedError records an arbitrary runtime error that killed the session.
-func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issueNumber int, sessionKey string, runErr error, sessionDuration time.Duration) {
+func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issueNumber int, sessionKey string, runErr error, sessionDuration time.Duration, roleToken string) {
 	reason := "session encountered an error"
 	if runErr != nil {
 		reason = runErr.Error()
@@ -255,8 +267,12 @@ func (l *Lifecycle) OnSessionFailedError(ctx context.Context, repo string, issue
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"fordjent/failed:error"})
 	_ = l.forgejo.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
 
-	// Reaction + label is sufficient.
-	_ = l.forgejo.AddReaction(ctx, repo, issueNumber, 0, "x")
+	// Reaction with role token
+	rc := l.forgejo
+	if roleToken != "" {
+		rc = rc.WithToken(roleToken)
+	}
+	_ = rc.AddReaction(ctx, repo, issueNumber, 0, "x")
 }
 
 // CountFailedRetries counts how many times a session has hit failed_max_turns.

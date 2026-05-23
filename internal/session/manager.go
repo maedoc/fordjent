@@ -369,13 +369,21 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			}
 
 			// PM reactivation: if all sub-issues of a PM parent are complete,
-			// publish PMReactivate events to create follow-up sessions.
+			// publish PMReactivate events and close the milestone.
 			for _, pmr := range pmResults {
 				slog.Info("scheduler: PM parent issue fully resolved, emitting PMReactivate",
 					"parent_issue", pmr.ParentIssueNumber,
 					"triggering_issue", pmr.TriggeringIssue,
 					"repo", evt.Repository,
 				)
+
+				// Close the parent's milestone if all sub-issues are done
+				parentIssue, err := m.forgejoClient.GetIssue(schedCtx, evt.Repository, pmr.ParentIssueNumber)
+				if err == nil && parentIssue != nil && parentIssue.Milestone != nil {
+					_ = m.forgejoClient.CloseMilestone(schedCtx, evt.Repository, parentIssue.Milestone.ID)
+					slog.Info("closed milestone", "milestone_id", parentIssue.Milestone.ID, "title", parentIssue.Milestone.Title)
+				}
+
 				reactivateEvt := event.NewEvent(
 					event.PMReactivate,
 					evt.Repository,
@@ -923,7 +931,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			if ctx.Err() == context.DeadlineExceeded {
 				slog.Warn("session timed out: hard wall-clock limit reached", "session_key", sess.Key, "limit", m.cfg.Agent.SessionTimeout)
 				lcCtx, lcCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout), m.cfg.Agent.SessionTimeout)
+				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout), m.cfg.Agent.SessionTimeout, m.roleToken(role))
 				lcCancel()
 			}
 			// Revert claim on timeout
@@ -979,7 +987,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
 				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
-					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime))
+					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime), m.roleToken(role))
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				} else {
 					slog.Error("agent processing failed",
@@ -987,7 +995,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						"event_id", evt.ID,
 						"session_key", sess.Key,
 					)
-					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err, time.Since(sess.StartTime))
+					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err, time.Since(sess.StartTime), m.roleToken(role))
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				}
 				// Revert claim: if this session claimed a ready issue, release it back to ready
@@ -1002,7 +1010,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						headSHA = strings.TrimSpace(string(out))
 					}
 				}
-				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime))
+				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime), m.roleToken(role), m.cfg.FordjentBaseURL())
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 			}
 
@@ -1012,6 +1020,16 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			sess.mu.Unlock()
 		}
 	}
+}
+
+// roleToken returns the Forgejo token for a given role, or empty string.
+func (m *Manager) roleToken(role string) string {
+	if m.cfg.Forgejo.RoleTokens != nil {
+		if t, ok := m.cfg.Forgejo.RoleTokens[role]; ok {
+			return t
+		}
+	}
+	return ""
 }
 
 // logSessionTime logs wall-clock session duration via Forgejo time tracking,
