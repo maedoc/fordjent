@@ -54,6 +54,7 @@ type Agent struct {
 	automerge        bool
 	automergeSet     bool
 	pmFollowUp       bool
+	scaffoldAnswer   bool
 	triggeringIssue  int
 	policy           policy.Policy
 	policySet        bool
@@ -115,6 +116,7 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		lc:              lc,
 		role:            role,
 		pmFollowUp:      sess.IsPMFollowUp,
+		scaffoldAnswer:  sess.IsScaffoldAnswer,
 		triggeringIssue: sess.TriggeringIssue,
 		policyDetector:  policyDetector,
 		commentLimit:     cfg.Agent.MaxCommentsPerSession,
@@ -592,6 +594,21 @@ Your job is:
 5. If you identify additional work, use forgejo_create_issue to file new sub-issues.
 6. Do NOT write code. Do NOT create PRs.
 7. Post your follow-up summary as a comment on the parent issue.`, a.triggeringIssue)
+		}
+
+		if a.scaffoldAnswer {
+			modeInstructions += `
+
+## SCAFFOLD ANSWER MODE
+You are in Scaffold Answer mode. A human has answered your questions about the project setup.
+Your job:
+1. Read the issue comments (use forgejo_list_issues or the issue body) to get the human's answers.
+2. Create the project scaffold files: README.md, .gitignore, and the language-specific manifest (go.mod, requirements.txt, pyproject.toml, package.json, etc.).
+3. If the human specified a framework (Snakemake, Django, React, etc.), include the appropriate config files.
+4. Commit all files and create a PR.
+5. After the PR is created, remove the 'question' label from this issue.
+6. This session targets the current issue which IS the scaffold definition. You are NOT creating a separate scaffold issue — you are implementing the scaffold files.
+Do NOT push to main. Create a branch for the scaffold (e.g., feature/project-scaffold).`
 		}
 	case "reviewer":
 		modeInstructions += `

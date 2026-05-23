@@ -21,8 +21,15 @@ const (
 )
 
 // CheckAndBlock inspects the repository file count. If it is below the threshold
-// and the current issue is not itself the scaffold issue, it either creates a
-// scaffold issue or labels the current issue blocked.
+// and the current issue is not itself the scaffold issue, it posts clarifying
+// questions and blocks the issue until the human answers.
+//
+// After the human replies, a scaffold answer session will:
+//  1. Read the human's answers from issue comments
+//  2. Create the appropriate scaffold files
+//  3. Remove "question" and "blocked" labels
+//  4. Close the question issue (it IS the scaffold issue)
+//
 // If adminClient is non-nil, it is used to add the bot as collaborator and apply
 // labels (requires repo-owner-level permissions that the bot token may not have).
 // Returns (blocked, error). A non-nil error does not imply blocked.
@@ -73,49 +80,108 @@ func CheckAndBlock(ctx context.Context, client *forgejo.Client, repo string, iss
 		}
 	}
 
-	// Check whether there is already an open scaffold issue.
+	// Build the question with language hints from existing files and sibling issues.
+	questionBody := scaffoldQuestionBody(projectLang, files)
+
+	// If the triggering issue itself is a [scaffold] issue created by a previous
+	// scaffold detection, don't re-post questions — just let it proceed.
+	if issueNumber > 0 {
+		iss, err := client.GetIssue(ctx, repo, issueNumber)
+		if err == nil && strings.Contains(strings.ToLower(iss.Title), "scaffold") {
+			slog.Info("scaffold: triggering issue is itself a scaffold issue, skipping question",
+				"repo", repo, "issue", issueNumber)
+			return false, nil
+		}
+	}
+
+	// Check for an existing scaffold question issue (open, with "question" label).
 	openIssues, err := client.ListOpenIssues(ctx, repo)
 	if err != nil {
 		slog.Warn("scaffold: failed to list open issues", "error", err, "repo", repo)
 		return false, nil
 	}
 
-	var scaffoldIssue *forgejo.Issue
+	var existingQuestionIssue *forgejo.Issue
 	for i := range openIssues {
 		iss := &openIssues[i]
-		if strings.Contains(strings.ToLower(iss.Title), "scaffold") {
-			scaffoldIssue = iss
+		for _, l := range iss.Labels {
+			if l.Name == "question" {
+				existingQuestionIssue = iss
+				break
+			}
+		}
+		if existingQuestionIssue != nil {
 			break
 		}
 	}
 
-	if scaffoldIssue == nil {
-		// Create the scaffold issue with language-appropriate guidance.
-		title, body := scaffoldIssueContent(projectLang, len(files))
-		iss, err := client.CreateIssue(ctx, repo, title, body)
-		if err != nil {
-			slog.Warn("scaffold: failed to create scaffold issue", "error", err, "repo", repo)
-			return false, nil
+	if existingQuestionIssue != nil {
+		// A question already exists. If this isn't it, point to it and block.
+		if issueNumber > 0 && existingQuestionIssue.Number != issueNumber {
+			_ = writeClient.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"})
+			msg := fmt.Sprintf("I have questions about this project's setup on #%d. "+
+				"Please answer there, and I'll set up the project scaffold."+
+				"\n\nOnce the scaffold is done and the `question` label is removed, "+
+				"I can work on this issue.",
+				existingQuestionIssue.Number)
+			_ = client.PostIssueComment(ctx, repo, issueNumber, msg+"\n\n<!-- ford -->")
+			slog.Info("scaffold: blocked issue while question exists",
+				"repo", repo, "issue", issueNumber, "question_issue", existingQuestionIssue.Number)
+			return true, nil
 		}
-		_ = writeClient.AddIssueLabels(ctx, repo, iss.Number, []string{ScaffoldLabel})
-		scaffoldIssue = iss
-		slog.Info("scaffold: created scaffold issue", "repo", repo, "issue", iss.Number, "language", projectLang)
+		// This IS the question issue. Check if human has answered.
+		comments, err := client.ListComments(ctx, repo, existingQuestionIssue.Number)
+		if err == nil {
+			for _, c := range comments {
+				// Skip bot comments (marker check)
+				if strings.Contains(c.Body, "<!-- ford -->") {
+					continue
+				}
+				// Human has answered! Let the session proceed with scaffold-answer mode.
+				slog.Info("scaffold: human answered scaffold question",
+					"repo", repo, "issue", existingQuestionIssue.Number)
+				return false, nil
+			}
+		}
+		// No human answer yet. Don't block — the issue already exists as question.
+		slog.Info("scaffold: waiting for human answer on question",
+			"repo", repo, "issue", existingQuestionIssue.Number)
+		return false, nil
 	}
 
-	// Label the current issue blocked so the agent doesn't start on it yet.
-	if issueNumber > 0 && (scaffoldIssue == nil || scaffoldIssue.Number != issueNumber) {
-		if err := writeClient.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"}); err != nil {
-			slog.Warn("scaffold: failed to add blocked label", "error", err, "issue", issueNumber)
-		}
-		// Post a pointer comment
-		msg := fmt.Sprintf("This repository needs a scaffold first. Please wait for #%d to be resolved, then remove the `blocked` label from this issue to continue.", scaffoldIssue.Number)
-		if err := client.PostIssueComment(ctx, repo, issueNumber, msg+"\n\n<!-- ford -->"); err != nil {
-			slog.Warn("scaffold: failed to post blocked comment", "error", err, "issue", issueNumber)
-		}
+	// No existing question issue: create one on the triggering issue.
+	if issueNumber > 0 {
+		_ = writeClient.AddIssueLabels(ctx, repo, issueNumber, []string{"question"})
+		_ = client.PostIssueComment(ctx, repo, issueNumber, questionBody+"\n\n<!-- ford -->")
+		slog.Info("scaffold: posted scaffold question", "repo", repo, "issue", issueNumber)
 		return true, nil
 	}
 
 	return false, nil
+}
+
+// scaffoldQuestionBody generates a question comment asking about language and framework.
+func scaffoldQuestionBody(projectLang string, files []string) string {
+	lang := "unknown"
+	if projectLang != "" {
+		lang = projectLang
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("### I need a few details to set up this project correctly\n\n")
+
+	if lang != "unknown" {
+		sb.WriteString(fmt.Sprintf("I detected **%s** files. Is this a %s project?\n\n", lang, lang))
+	}
+
+	sb.WriteString("**Please reply with:**\n\n")
+	sb.WriteString("1. **Language**: Python, Go, Rust, JavaScript, Java, Ruby, PHP, or other?\n")
+	sb.WriteString("2. **Framework** (if any): Django, Flask, Snakemake, React, etc.\n")
+	sb.WriteString("3. **Project name**: What should I call this project?\n")
+	sb.WriteString("4. **Any other requirements**: Testing framework, CI, specific file structure?\n\n")
+	sb.WriteString("I'll set up the scaffold once you reply!")
+
+	return sb.String()
 }
 
 // DetectProjectLang fetches the repo file list and determines the project language.

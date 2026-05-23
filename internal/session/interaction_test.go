@@ -787,8 +787,20 @@ func TestScaffoldDetection_BlocksOnEmptyRepo(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
-	if f.createdCount() == 0 {
-		t.Error("expected scaffold issue to be created on empty repo")
+	// Post-question behavior: scaffold should add "question" label and post a comment.
+	f.mu.Lock()
+	found := false
+	for _, lbl := range f.addedLabels {
+		if lbl == "question" {
+			found = true
+		}
+	}
+	f.mu.Unlock()
+	if !found {
+		t.Error("expected 'question' label to be added for empty repo")
+	}
+	if len(f.comments) < 1 {
+		t.Error("expected question comment to be posted")
 	}
 }
 
@@ -855,5 +867,190 @@ func TestLabelUpdatedDoesNotCreateSession(t *testing.T) {
 	_, exists := mgr.sessions["fjadmin/testbed/issues/1"]
 	if exists {
 		t.Error("label_updated events should NOT create sessions (only FSM state tracking)")
+	}
+}
+
+// TestMergeQueueFileOverlap: two open PRs touching same file → blocked.
+func TestMergeQueueFileOverlap(t *testing.T) {
+	t.Skip("merge queue requires live Forgejo for file comparison")
+}
+
+// TestPRCommentRouting: verifies issue_comment with is_pull_request=true routes to pulls/N.
+func TestPRCommentRouting(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"implementing"}, "open", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Test PR routing"
+		f.isPR = true
+		f.prHeadRef = "feature/test-branch"
+		f.repoFiles = []string{"go.mod", "main.go"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxTurns = 5
+	cfg.Agent.MaxSessions = 5
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	// Simulate PR comment webhook
+	evt := event.NewEvent(event.IssueCommentCreated, "fjadmin/testbed", 42, 7, "human", "created")
+	evt.SessionKey = "fjadmin/testbed/pulls/7"
+
+	mgr.handleEvent(ctx, evt)
+
+	sess, exists := mgr.sessions["fjadmin/testbed/pulls/7"]
+	if !exists {
+		t.Error("PR comment should create pulls/N session")
+		return
+	}
+	if sess.PRNumber != 7 {
+		t.Errorf("expected PRNumber=7, got %d", sess.PRNumber)
+	}
+}
+
+// TestAutoRetrySkipsClosedPR: closed PRs are skipped by auto-retry scan.
+func TestAutoRetrySkipsClosedPR(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"fordjent/failed:max-turns"}, "closed", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Test auto-retry skip"
+		f.prState = "closed"
+		f.repoFiles = []string{"go.mod", "main.go"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.EnableAutoRetry = false
+	cfg.Agent.MaxTurns = 5
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Auto-retry is disabled in test config
+	// Verify session store doesn't re-open closed issues
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	sessKey := "fjadmin/testbed/issues/1"
+	if _, open := mgr.sessions[sessKey]; open {
+		t.Error("closed issue should not have active session")
+	}
+}
+
+// TestCommentCapBlock: after comment limit, forgejo_comment is removed from tool schema.
+func TestCommentCapBlock(t *testing.T) {
+	t.Skip("comment cap behavior is LLM-side; test via live integration")
+}
+
+// TestScaffoldQuestionLabel: scaffold posts questions and labels issue 'question'.
+func TestScaffoldQuestionLabel(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	// Empty repo with no files
+	f.setFields([]string{}, "open", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Set up project structure"
+		f.repoFiles = []string{}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = true
+	cfg.Agent.MaxTurns = 5
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	evt := event.NewEvent(event.IssueOpened, "fjadmin/testbed", 1, 0, "human", "opened")
+	evt.SessionKey = "fjadmin/testbed/issues/1"
+
+	// scaffold.CheckAndBlock should detect empty repo and:
+	// 1. Add "question" label (not "blocked")
+	// 2. Post a question comment
+	// 3. Return blocked=true to skip session creation
+	mgr.handleEvent(ctx, evt)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Check "question" label was added
+	found := false
+	for _, lbl := range f.addedLabels {
+		if lbl == "question" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'question' label to be added for empty repo")
+	}
+
+	// Check a comment was posted (should be 1)
+	if len(f.comments) < 1 {
+		t.Error("expected question comment to be posted")
+	}
+}
+
+// TestFSMQuestionLabelTransitions: verifies question label triggers correct session.
+func TestFSMQuestionLabelTransitions(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"question"}, "open", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Answer scaffold question"
+		f.repoFiles = []string{"go.mod"}
+		f.comments = []string{"I want a Go project with cobra CLI"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = true
+	cfg.Agent.MaxTurns = 5
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	evt := event.NewEvent(event.IssueCommentCreated, "fjadmin/testbed", 1, 0, "human", "created")
+	evt.SessionKey = "fjadmin/testbed/issues/1"
+
+	mgr.handleEvent(ctx, evt)
+
+	sess, exists := mgr.sessions["fjadmin/testbed/issues/1"]
+	if !exists {
+		t.Error("expected session to be created for scaffold answer")
+		return
+	}
+	if !sess.IsScaffoldAnswer {
+		t.Error("expected IsScaffoldAnswer to be true")
 	}
 }

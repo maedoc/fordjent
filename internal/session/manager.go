@@ -41,6 +41,7 @@ type Session struct {
 	Cancel           context.CancelFunc
 	Sender           string // original webhook sender (e.g. fordjent-bot)
 	IsPMFollowUp     bool   // true if this is a PM re-activation follow-up session
+	IsScaffoldAnswer bool   // true if this session should answer scaffold questions
 	TriggeringIssue  int    // the sub-issue that triggered the PM re-activation
 
 	claimedReady bool // set when this session claimed a ready→in_progress transition
@@ -839,6 +840,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		Cancel:          cancel,
 		Sender:          evt.Sender,
 		IsPMFollowUp:    evt.Type == event.PMReactivate,
+		IsScaffoldAnswer: hasQuestionLabel(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber),
 		TriggeringIssue: evt.TriggeringIssue,
 		events:          make(chan *event.Event, 64),
 	}
@@ -881,6 +883,14 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 	// PM follow-up sessions always use the PM role
 	if sess.IsPMFollowUp {
 		role = "pm"
+	}
+
+	// Scaffold answer sessions: the human replied to the "question" label.
+	// Use implementer role to create project files.
+	if sess.IsScaffoldAnswer {
+		role = "implementer"
+		slog.Info("scaffold answer session starting", "session_key", sess.Key,
+			"repo", sess.Repository, "issue", sess.IssueNumber)
 	}
 
 	// All PRs get a reviewer session to inspect and merge code.
@@ -1621,6 +1631,23 @@ func (m *Manager) unblockSubIssues(ctx context.Context, repo string, parentNum i
 	if unblocked > 0 {
 		slog.Info("unblocked sub-issues after plan approval", "parent", parentNum, "count", unblocked, "repo", repo)
 	}
+}
+
+// hasQuestionLabel checks if an issue has the "question" label.
+func hasQuestionLabel(ctx context.Context, client *forgejo.Client, repo string, issueNumber int) bool {
+	if client == nil || issueNumber == 0 {
+		return false
+	}
+	iss, err := client.GetIssue(ctx, repo, issueNumber)
+	if err != nil {
+		return false
+	}
+	for _, l := range iss.Labels {
+		if l.Name == "question" {
+			return true
+		}
+	}
+	return false
 }
 
 func detectRoleFromTitle(title string) string {

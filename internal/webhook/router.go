@@ -59,6 +59,7 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/activity", r.handleActivity)
 	r.mux.HandleFunc("/trace/", r.handleTrace) // /trace/{owner}/{repo}/{issues|pulls}/{N}
 	r.mux.HandleFunc("/acp/v1/stream", r.handleStream)
+	r.mux.HandleFunc("/dashboard", r.handleDashboard)
 	r.mux.Handle("/admin", webui.Handler(cfg))
 	r.mux.Handle("/admin/", webui.Handler(cfg))
 
@@ -993,6 +994,237 @@ func (r *Router) isAgentEvent(payload map[string]interface{}) bool {
 	}
 
 	return false
+}
+
+// handleTrace
+
+// handleDashboard serves a rich HTML status dashboard.
+func (r *Router) handleDashboard(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	workDir := r.cfg.Agent.WorkDir
+	if workDir == "" {
+		http.Error(w, "WorkDir not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	costDBPath := filepath.Join(workDir, "costs.db")
+	lifecycleDBPath := filepath.Join(workDir, "lifecycle.db")
+
+	// Gather data
+	activeSessions := queryActiveSessions(lifecycleDBPath)
+	costSummary, _ := queryCostDB(costDBPath)
+	lifecycleSummary, _ := queryLifecycleDB(lifecycleDBPath)
+	byModel, _ := queryCostDBPerModel(costDBPath, time.Time{})
+	metricsSnap := metrics.Snapshot()
+
+	// Render HTML
+	fmt.Fprint(w, `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Fordjent Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1em;background:#0d1117;color:#c9d1d9}
+.cards{display:flex;flex-wrap:wrap;gap:.75em;margin-bottom:1em}
+.card{flex:1 1 200px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1em;text-align:center}
+.card .value{font-size:2em;font-weight:700;color:#58a6ff}.card .label{font-size:.8em;color:#8b949e;margin-top:.3em}
+.card .stat{font-size:.85em;color:#7ee787}.card .stat.warn{color:#d29922}.card .stat.err{color:#f85149}
+table{width:100%;border-collapse:collapse;margin-bottom:1.5em}
+th,td{padding:6px 10px;text-align:left;border-bottom:1px solid #21262d;font-size:.9em}
+th{background:#161b22;color:#8b949e;position:sticky;top:0}
+.section{margin-bottom:2em}.section h2{color:#f0f6fc;border-bottom:1px solid #30363d;padding-bottom:.3em;font-size:1.1em}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.8em;font-weight:600}
+.tag-green{background:#238636;color:#fff}.tag-amber{background:#9e6a03;color:#fff}.tag-red{background:#da3633;color:#fff}
+.role-pm{color:#818cf8}.role-dev{color:#4ade80}.role-qa{color:#fbbf24}
+a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+</style></head><body>
+<h1>Fordjent Dashboard</h1>`)
+
+	// Summary cards
+	fmt.Fprint(w, `<div class="cards">`)
+
+	activeCount := len(activeSessions)
+	activeClass := ""
+	if activeCount > 5 {
+		activeClass = "warn"
+	}
+	fmt.Fprintf(w, `<div class="card"><div class="value">%d</div><div class="label">Active Sessions</div><div class="stat %s">in_progress</div></div>`, activeCount, activeClass)
+
+	totalSessions := int64(0)
+	if cs, ok := costSummary["total_sessions"]; ok {
+		if v, ok := cs.(int64); ok {
+			totalSessions = v
+		}
+	}
+	fmt.Fprintf(w, `<div class="card"><div class="value">%d</div><div class="label">Total Sessions</div></div>`, totalSessions)
+
+	failedCount := int64(0)
+	if ls, ok := lifecycleSummary["failed_sessions"]; ok {
+		if v, ok := ls.(int64); ok {
+			failedCount = v
+		}
+	}
+	failedClass := ""
+	if failedCount > 0 {
+		failedClass = "err"
+	}
+	fmt.Fprintf(w, `<div class="card"><div class="value">%d</div><div class="label">Failed</div><div class="stat %s">needs attention</div></div>`, failedCount, failedClass)
+
+	eventsTotal := int64(0)
+	if m, ok := metricsSnap["fordjent_events_total"]; ok {
+		if n, ok := m.(int64); ok {
+			eventsTotal = n
+		}
+	}
+	fmt.Fprintf(w, `<div class="card"><div class="value">%d</div><div class="label">Webhook Events</div></div>`, eventsTotal)
+
+	fmt.Fprint(w, `</div>`)
+
+	// Active sessions table
+	if len(activeSessions) > 0 {
+		fmt.Fprint(w, `<div class="section"><h2>Active Sessions</h2><table><tr><th>Session</th><th>Repo</th><th>Issue</th><th>State</th><th>Since</th></tr>`)
+		for _, s := range activeSessions {
+			roleClass := ""
+			if strings.Contains(s["session_key"].(string), "/pulls/") {
+				roleClass = "role-qa"
+			} else {
+				roleClass = "role-dev"
+			}
+			traceURL := fmt.Sprintf("/trace/%s", s["session_key"])
+			fmt.Fprintf(w, `<tr><td><a href="%s" class="%s">%s</a></td><td>%s</td><td>%s</td><td><span class="tag tag-green">%s</span></td><td>%s</td></tr>`,
+				html.EscapeString(traceURL), roleClass, html.EscapeString(fmt.Sprint(s["session_key"])),
+				html.EscapeString(fmt.Sprint(s["repo"])), html.EscapeString(fmt.Sprint(s["issue_number"])),
+				html.EscapeString(fmt.Sprint(s["to_state"])), html.EscapeString(fmt.Sprint(s["occurred_at"])))
+		}
+		fmt.Fprint(w, `</table></div>`)
+	} else {
+		fmt.Fprint(w, `<div class="section"><h2>Active Sessions</h2><p style="color:#8b949e">No active sessions.</p></div>`)
+	}
+
+	// Model usage
+	if len(byModel) > 0 {
+		fmt.Fprint(w, `<div class="section"><h2>Model Usage</h2><table><tr><th>Provider</th><th>Model</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr>`)
+		for _, m := range byModel {
+			fmt.Fprintf(w, `<tr><td>%s</td><td>%s</td><td>%v</td><td>%v</td><td>$%.4f</td></tr>`,
+				html.EscapeString(fmt.Sprint(m["provider"])),
+				html.EscapeString(fmt.Sprint(m["model"])),
+				m["calls"], m["total_tokens"], m["cost_usd"])
+		}
+		fmt.Fprint(w, `</table></div>`)
+	}
+
+	// Recent failures
+	recentFailures := queryRecentFailures(lifecycleDBPath, 20)
+	if len(recentFailures) > 0 {
+		fmt.Fprint(w, `<div class="section"><h2>Recent Failures</h2><table><tr><th>Session</th><th>Repo</th><th>Issue</th><th>Reason</th><th>Time</th></tr>`)
+		for _, f := range recentFailures {
+			sessionKey := fmt.Sprint(f["session_key"])
+			traceURL := fmt.Sprintf("/trace/%s", sessionKey)
+			fmt.Fprintf(w, `<tr><td><a href="%s">%s</a></td><td>%s</td><td>%s</td><td><span class="tag tag-red">%s</span></td><td>%s</td></tr>`,
+				html.EscapeString(traceURL), html.EscapeString(sessionKey),
+				html.EscapeString(fmt.Sprint(f["repo"])), html.EscapeString(fmt.Sprint(f["issue_number"])),
+				html.EscapeString(fmt.Sprint(f["to_state"])), html.EscapeString(fmt.Sprint(f["occurred_at"])))
+		}
+		fmt.Fprint(w, `</table></div>`)
+	}
+
+	// Links
+	fmt.Fprint(w, `<div class="section"><h2>Explore</h2>`)
+	fmt.Fprint(w, `<p><a href="/status">/status</a> — JSON API &middot; <a href="/activity">/activity</a> — Feed &middot; <a href="/metrics">/metrics</a> — Prometheus &middot; <a href="/trace/">/trace/</a> — Session traces</p>`)
+	fmt.Fprint(w, `</div>`)
+
+	fmt.Fprint(w, `<p style="color:#8b949e;margin-top:2em;font-size:.85em">Fordjent agent &middot; `)
+	fmt.Fprintf(w, `%s</p></body></html>`, time.Now().UTC().Format(time.RFC3339))
+}
+
+// queryActiveSessions returns sessions currently in the 'working' state.
+func queryActiveSessions(dbPath string) []map[string]interface{} {
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT session_key, to_state, MAX(occurred_at) as occurred_at
+		FROM session_transitions
+		WHERE to_state = 'working'
+		GROUP BY session_key
+		ORDER BY occurred_at DESC
+		LIMIT 50
+	`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var key, toState, occurred string
+		if err := rows.Scan(&key, &toState, &occurred); err != nil {
+			continue
+		}
+		// Parse repo/issue from session key (format: owner/repo/issues/N)
+		parts := strings.Split(key, "/")
+		repoStr := ""
+		issueStr := ""
+		if len(parts) >= 4 {
+			repoStr = parts[0] + "/" + parts[1]
+			issueStr = parts[3]
+		}
+		out = append(out, map[string]interface{}{
+			"session_key": key, "repo": repoStr, "issue_number": issueStr,
+			"to_state": toState, "occurred_at": occurred,
+		})
+	}
+	return out
+}
+
+// queryRecentFailures returns recent failed sessions.
+func queryRecentFailures(dbPath string, limit int) []map[string]interface{} {
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT session_key, to_state, reason, MAX(occurred_at) as occurred_at
+		FROM session_transitions
+		WHERE to_state IN ('failed_max_turns', 'failed_error', 'failed', 'blocked')
+		GROUP BY session_key
+		ORDER BY occurred_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var key, toState, reason, occurred string
+		if err := rows.Scan(&key, &toState, &reason, &occurred); err != nil {
+			continue
+		}
+		parts := strings.Split(key, "/")
+		repoStr := ""
+		issueStr := ""
+		if len(parts) >= 4 {
+			repoStr = parts[0] + "/" + parts[1]
+			issueStr = parts[3]
+		}
+		out = append(out, map[string]interface{}{
+			"session_key": key, "repo": repoStr, "issue_number": issueStr,
+			"to_state": toState, "reason": reason, "occurred_at": occurred,
+		})
+	}
+	return out
 }
 
 // handleTrace serves a session's memory trace as HTML.
