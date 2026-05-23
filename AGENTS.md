@@ -1560,3 +1560,109 @@ After milestones + time tracking, the agent comment noise is approximately 95% r
 - **Implementer summary comments** (e.g. "PR #N created with the Factorial implementation") — 1-2 per session, capped at 2
 - **Merge queue block comments** — 1 per session when files overlap
 - **Lifecycle pings** — none (all lifecycle comments removed)
+
+---
+
+## testbed2 Demo Setup (May 23, 2026)
+
+### What Was Done
+Set up a comprehensive testbed2 repo on the cloud Forgejo to demonstrate all Fordjent features end-to-end.
+
+### Setup
+- Repo: `fjadmin/testbed2` on `https://forgejo.wdmn.fr`
+- Webhook #15: `forgejo → https://fordjent.wdmn.fr/acp/v1/events` (active)
+- Seeded files: go.mod, .gitignore, README.md
+- 3 role users created: djent-pm, djent-dev, djent-qa (with tokens)
+- Labels: FSM (planning, implementing, ready, blocked, done), role (role:pm, role:implementer, etc.), Fordjent failure labels
+- Config: role_tokens + role_users added, fordjent-yolo topic, implementer switched to devstral model
+
+### Issue Chain
+1. **#1 [pm] Plan and implement gogit CLI** — PM decomposed into 5 sub-issues (#2-#6)
+   - Milestone "gogit CLI" created
+2. **#2 [implementer] git init** — Implementer created PR #7 (init.go + init_test.go + main.go)
+3. **PR #7** — Reviewer (djent-qa) merged → code landed on main
+4. **Scheduler** — Detected PR merge, unblocked #2-#6
+5. **#8 [implementer] All gogit commands** — Agent wrote all 6 command files (add.go, branch.go, commit.go, init.go, log.go, main.go) + tests
+   - Model: devstral-2-123b (switched from qwen3.6 after analysis-loop issue)
+   - PR #9 created, code pushed to main
+6. **Time tracking** — djent-dev: 340s logged on issue #8
+
+### Key Findings
+
+#### 1. Qwen model stuck in analysis loops
+**Problem**: With `scaleway-qwen` (qwen3.6-35b-a3b) as implementer, the agent made 828 git calls and 0 write_file calls across 167 turns. It never wrote code.
+
+**Fix**: Switched implementer role_provider from `scaleway-qwen` → `scaleway-devstral`. Devstral model immediately started using `write_file`.
+
+**Config**:
+```yaml
+role_providers:
+  implementer: "scaleway-devstral"  # was: scaleway-qwen
+```
+
+**Recommendation**: Keep devstral for implementer, qwen for review/analysis roles where tool selection is less critical.
+
+#### 2. Role users must be created on cloud
+**Problem**: `bootstrap-local.sh` creates role users locally but not on cloud. Cloud Forgejo had no djent-pm/djent-dev/djent-qa users.
+
+**Fix**: Created users via admin API:
+```bash
+curl -X POST /api/v1/admin/users -d '{"username":"djent-dev","email":"...","password":"...","must_change_password":false}'
+# Then create tokens for each user (auth as the user)
+curl -u "djent-dev:pass" -X POST /api/v1/users/djent-dev/tokens -d '{"name":"fordjent-role","scopes":[...]}'
+```
+
+**Config needed**:
+```yaml
+forgejo:
+  role_tokens:
+    pm: "4dfa22af..."
+    implementer: "a60db86e..."
+    reviewer: "aa097843..."
+  role_users:
+    pm: "djent-pm"
+    implementer: "djent-dev"
+    reviewer: "djent-qa"
+```
+
+#### 3. PM must include [implementer] tag in sub-issues
+**Problem**: PM created sub-issues without `[implementer]` prefix. Role detection assigned `djent-pm` to implementation issues, limiting tools to PM set (no write_file/git).
+
+**Fix**: Updated issue titles to include `[implementer]` tag via API. PM system prompt should enforce this.
+
+#### 4. Git clone + push requires `user:token@host` format
+**Problem**: `git push https://TOKEN@host/...` fails with "could not read Password".
+
+**Fix**: Use `https://USERNAME:TOKEN@host/repo.git` format:
+```bash
+git push "https://fjadmin:${ADMIN_TOKEN}@forgejo.wdmn.fr/fjadmin/testbed2.git" main
+```
+
+#### 5. Turn budgets need tuning
+**Problem**: `max_turns_implementer: 50` was too low for multi-file implementations. Agents hit max turns before writing code.
+
+**Fix**: Bumped to `max_turns_implementer: 100`, `max_turns: 100`.
+
+#### 6. Forgejo merge API returns 405
+**Problem**: `POST /api/v1/repos/{repo}/pulls/{N}/merge` returns 405 "Please try again later" even when mergeable=true.
+
+**Workaround**: Code was pushed directly to main by the agent (bypassing PR merge). This is acceptable for yolo mode.
+
+### What Works End-to-End
+- ✅ PM decomposition → sub-issues created
+- ✅ Milestone creation
+- ✅ Scheduler dependency tracking (Depends on: #N)
+- ✅ Auto-retry after max-turns failure
+- ✅ Time tracking (djent-dev: 340s)
+- ✅ Role-based user identities (djent-dev creates PRs, djent-qa merges)
+- ✅ Role-specific tool restrictions (PM can't write code)
+- ✅ Auto-assignment to role users
+- ✅ Scaffold detection (seeded repo passes)
+- ✅ Webhook delivery (system-level hook covers all repos)
+
+### Remaining Issues
+- 405 on API merge — needs investigation (Forgejo v9 compat?)
+- PM doesn't include [implementer] tag — prompt enhancement needed
+- Qwen model unsuitable for implementer (828 git calls, 0 write_file)
+- Auto-merge not happening despite fordjent-yolo topic (policy issue?)
+- Some sessions still hit max-turns (needs further tuning)
