@@ -959,33 +959,43 @@ After all trials, an aggregate report is written:
 
 ## Running the Eval
 
+The eval harness is implemented in `internal/eval/`. Key commands:
+
 ```bash
-# Prerequisites: forgejo installed, WAFER_API_KEY set
+# Fast smoke test (~5 min, single bugfix trial)
+EVAL_WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalSmoke -timeout 15m
 
-# Fast smoke test (5 min)
-WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalSmoke -timeout 15m
+# Full greenfield benchmark (~30 min, 5 trials)
+EVAL_WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalBenchGreenfield -timeout 60m
 
-# Full greenfield benchmark (45 min)
-WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalBenchGreenfield -timeout 60m
+# Full bugfix benchmark (~25 min, 5 trials)
+EVAL_WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalBenchBugfix -timeout 45m
 
-# Full bugfix benchmark (25 min)
-WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalBenchBugfix -timeout 45m
-
-# All benchmarks (70 min)
+# All benchmarks (~70 min)
 EVAL_WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -timeout 120m
 
-# Skip setup (reuse running instance)
-EVAL_SKIP_SETUP=true go test ./internal/eval/... -v -run TestEvalSmoke
-
-# Skip teardown (keep instance running for inspection)
-EVAL_SKIP_TEARDOWN=true go test ./internal/eval/... -v -run TestEvalSmoke
+# Skip benchmarks (short mode — unit tests only)
+go test ./internal/eval/... -v -short
 
 # Update baseline after confirmed improvement
 go test ./internal/eval/... -v -run TestEvalBenchBugfix -update-baseline
 
-# Short mode (skip benchmarks, only unit tests)
-go test ./internal/eval/... -v -short
+# Use existing Forgejo+Fordjent (no setup/teardown)
+EVAL_SKIP_SETUP=true EVAL_SKIP_TEARDOWN=true \
+  FORGEJO_TOKEN=xxx FORGEJO_ADMIN_TOKEN=xxx \
+  go test ./internal/eval/... -v -run TestEvalSmoke
 ```
+
+Environment variables:
+- `EVAL_WAFER_API_KEY` — Wafer API key for LLM provider
+- `EVAL_SCALEWAY_API_KEY` — (optional) Scaleway AI key
+- `EVAL_FORGEJO_PORT` — Forgejo port (default 3000)
+- `EVAL_FORDJENT_PORT` — Fordjent port (default 8080)
+- `EVAL_SKIP_SETUP` — Skip service startup, connect to existing
+- `EVAL_SKIP_TEARDOWN` — Keep services running after test
+- `FORGEJO_TOKEN`/`FORGEJO_ADMIN_TOKEN` — Required when EVAL_SKIP_SETUP=true
+
+OpenSpec change: `openspec/changes/eval-harness/`
 
 ## What Not To Test
 

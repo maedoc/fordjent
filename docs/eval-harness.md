@@ -542,6 +542,20 @@ go test ./internal/eval/... -v -timeout 60m
 go run ./cmd/fordjent-eval compare output/2026-05-26-*.json
 ```
 
+## Implementation Status
+
+The eval harness is implemented in `internal/eval/`. See `docs/eval-harness-local.md` for the implementation spec and `openspec/changes/eval-harness/` for the OpenSpec change.
+
+Quick start:
+
+```bash
+# Fast smoke test (~5 min)
+EVAL_WAFER_API_KEY=wfr_... go test ./internal/eval/... -v -run TestEvalSmoke -timeout 15m
+
+# Short mode (skip benchmarks)
+go test ./internal/eval/... -v -short
+```
+
 ## What This Harness Will Tell Us
 
 ### Clear Signals (detectable at N=5)
