@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Go 1.22+, Forgejo (Gitea v9), SQLite, sandbox-exec (macOS)
+  Fordjent is a Go agent harness that connects to Forgejo via webhooks
+  and uses LLM providers (Wafer, Scaleway) to process issues.
+  Runs natively on macOS with sandbox-exec profiles.
+  Testing: Go standard library + httptest, no external test frameworks.
+  Config: YAML (fordjent.local.yaml), environment variables
+  Key packages: internal/eval/ (new), internal/forgejo/, internal/session/,
+  internal/webhook/, internal/lifecycle/, internal/metrics/
+  Forgejo API: REST v1, admin + bot tokens
+  Existing local setup: scripts/bootstrap-local.sh, docker-compose.local.yaml
+  Eval docs already written: docs/eval-harness.md (design), docs/eval-harness-local.md (implementation)
+  Conventions: conventional commits, Go-style error handling, slog for logging
+
+rules:
+  proposal:
+    - Keep proposals focused on WHY, not HOW
+    - Every capability must map to a specs/ directory
+  design:
+    - Reference existing code by package path
+    - Include data flow diagrams where relevant
+    - Specify new interfaces before implementations
+  specs:
+    - Use SHALL/MUST/MAY language for requirements
+    - Each spec covers one capability
+    - Include acceptance criteria
+  tasks:
+    - Break tasks into chunks of max 2 hours
+    - Each task references the spec it implements
+    - Order tasks by dependency
