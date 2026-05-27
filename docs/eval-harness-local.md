@@ -156,22 +156,33 @@ The tricky part is detecting when Fordjent has finished processing.
 
 func (h *Harness) WaitForCompletion(repo string, issueNum int, timeout time.Duration) (*TrialResult, error) {
     deadline := time.Now().Add(timeout)
-    sessionKey := fmt.Sprintf("%s/issues/%d", repo, issueNum)
+    sessionStarted := false  // guard against false positives when Fordjent crashes
 
     for time.Now().Before(deadline) {
-        // 1. Check /status for lifecycle state
-        status := h.FetchStatus()
-        activeCount := status.Lifecycle.ActiveSessions
-        failedCount := status.Lifecycle.FailedSessions
+        // 1. Check issue state in Forgejo (authoritative)
+        if issueNum > 0 {
+            issue := h.GetIssue(repo, issueNum)
+            if issue.State == "closed" {
+                return h.collectResult(repo, issueNum), nil
+            }
+        }
 
-        // 2. Check issue state in Forgejo
-        issue := h.GetIssue(repo, issueNum)
-        if issue.State == "closed" {
+        // 2. Check /status for active sessions
+        status := h.FetchStatus()
+        if status.Lifecycle.ActiveSessions > 0 {
+            sessionStarted = true
+        }
+
+        // 3. No active sessions after we saw one start → done
+        if sessionStarted && status.Lifecycle.ActiveSessions == 0 {
             return h.collectResult(repo, issueNum), nil
         }
 
-        // 3. Check if any PRs exist and are merged
-        prs := h.GetPrList(repo)
+        // 4. Poll interval
+        time.Sleep(5 * time.Second)
+    }
+    // Timeout
+    return nil, fmt.Errorf("timeout after %v", timeout)
         for _, pr := range prs {
             if pr.Merged {
                 return h.collectResult(repo, issueNum), nil
@@ -509,9 +520,12 @@ func (h *Harness) CollectMetrics() (*MetricsSnapshot, error) {
 }
 
 func (h *Harness) CollectTrace(repo, sessionType string, issueNum int) (*TraceData, error) {
-    // GET http://127.0.0.1:8080/trace/{owner}/{repo}/{sessionType}/{num}
-    // Parse memory.jsonl entries
-    // Extract: turn count, tool call distribution, duration
+    // Parse Fordjent logs for per-turn data
+    // Log file: h.LocalDir + "/logs/fordjent-stdout.log"
+    // Each turn emits: {"msg":"turn complete", "session_key":..., "turn":N,
+    //   "latency_ms":..., "tokens_in":..., "tokens_out":..., "tool_calls":N,
+    //   "tools_used":{"bash":M, "write_file":K, ...}}
+    // Parse with ParseMemoryFile() which handles both JSON log lines
 }
 
 func (h *Harness) CountSystemRoleErrors() (int, error) {

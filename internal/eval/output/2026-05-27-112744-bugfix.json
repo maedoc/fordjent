@@ -1,0 +1,287 @@
+[
+  {
+    "TrialNum": 1,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 555025732417,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 176381,
+      "InputTokens": 155361,
+      "OutputTokens": 21020,
+      "TotalTurns": 22,
+      "TotalLLMCalls": 22,
+      "ToolCallsTotal": 23,
+      "CostUSD": 0,
+      "WallTime": 555029132875,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "qwen3.6-27b": {
+          "Calls": 22,
+          "InputTokens": 155361,
+          "OutputTokens": 21020
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": {
+      "_errors": 0
+    },
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  },
+  {
+    "TrialNum": 2,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 600010670208,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 261749,
+      "InputTokens": 239582,
+      "OutputTokens": 22167,
+      "TotalTurns": 33,
+      "TotalLLMCalls": 33,
+      "ToolCallsTotal": 40,
+      "CostUSD": 0,
+      "WallTime": 600015670166,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "qwen3.6-27b": {
+          "Calls": 33,
+          "InputTokens": 239582,
+          "OutputTokens": 22167
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": {
+      "_errors": 0
+    },
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  },
+  {
+    "TrialNum": 3,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 600007874042,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 159925,
+      "InputTokens": 139673,
+      "OutputTokens": 20252,
+      "TotalTurns": 18,
+      "TotalLLMCalls": 18,
+      "ToolCallsTotal": 24,
+      "CostUSD": 0,
+      "WallTime": 600011001208,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "qwen3.6-27b": {
+          "Calls": 18,
+          "InputTokens": 139673,
+          "OutputTokens": 20252
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": {
+      "_errors": 0
+    },
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  },
+  {
+    "TrialNum": 4,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 600007626958,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 261312,
+      "InputTokens": 245851,
+      "OutputTokens": 15461,
+      "TotalTurns": 34,
+      "TotalLLMCalls": 34,
+      "ToolCallsTotal": 41,
+      "CostUSD": 0,
+      "WallTime": 600023654875,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "qwen3.6-27b": {
+          "Calls": 34,
+          "InputTokens": 245851,
+          "OutputTokens": 15461
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": {
+      "_errors": 0
+    },
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  },
+  {
+    "TrialNum": 5,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 600010279750,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 160997,
+      "InputTokens": 148095,
+      "OutputTokens": 12902,
+      "TotalTurns": 21,
+      "TotalLLMCalls": 21,
+      "ToolCallsTotal": 24,
+      "CostUSD": 0,
+      "WallTime": 600018807500,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "qwen3.6-27b": {
+          "Calls": 21,
+          "InputTokens": 148095,
+          "OutputTokens": 12902
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": {
+      "_errors": 0
+    },
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  }
+]

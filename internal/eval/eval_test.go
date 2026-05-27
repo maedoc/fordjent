@@ -142,7 +142,7 @@ func TestEvalBenchBugfix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping benchmark in short mode")
 	}
-	runBenchmark(t, &BugfixScenario, 5)
+	runBenchmark(t, &BugfixScenario, 10)
 }
 
 func runBenchmark(t *testing.T, scenario *Scenario, trials int) {
