@@ -40,15 +40,20 @@ type Harness struct {
 	forgejoBin   string
 }
 
+
 // HarnessConfig holds configuration for creating a new Harness.
 type HarnessConfig struct {
 	ForgejoPort    int
 	FordjentPort   int
 	WaferAPIKey    string
 	ScalewayAPIKey string
+	ProviderURL    string // Override LLM provider URL
+	ProviderModel  string // Override LLM model name
+	ProviderAPIKey string // Override LLM API key
 	SkipSetup      bool
 	SkipTearDown   bool
 }
+
 
 // DefaultHarnessConfig returns a config with sensible defaults,
 // reading from environment variables.
@@ -58,16 +63,21 @@ func DefaultHarnessConfig() HarnessConfig {
 		FordjentPort:   getEnvInt("EVAL_FORDJENT_PORT", 8080),
 		WaferAPIKey:    os.Getenv("EVAL_WAFER_API_KEY"),
 		ScalewayAPIKey: os.Getenv("EVAL_SCALEWAY_API_KEY"),
+		ProviderURL:    getEnvDefault("EVAL_PROVIDER_URL", ""),
+		ProviderModel:  getEnvDefault("EVAL_PROVIDER_MODEL", ""),
+		ProviderAPIKey: getEnvDefault("EVAL_PROVIDER_API_KEY", ""),
 		SkipSetup:      os.Getenv("EVAL_SKIP_SETUP") == "true",
 		SkipTearDown:   os.Getenv("EVAL_SKIP_TEARDOWN") == "true",
 	}
 }
+
 
 // NewHarness creates a new Harness, starts services, and sets up the
 // Forgejo instance with admin user and tokens.
 func NewHarness(t *testing.T) *Harness {
 	return NewHarnessWithConfig(t, DefaultHarnessConfig())
 }
+
 
 // NewHarnessWithConfig creates a Harness with the given configuration.
 func NewHarnessWithConfig(t *testing.T, cfg HarnessConfig) *Harness {
@@ -119,6 +129,7 @@ func NewHarnessWithConfig(t *testing.T, cfg HarnessConfig) *Harness {
 	return h
 }
 
+
 // TearDown stops services and cleans up the workdir.
 func (h *Harness) TearDown() {
 	if h.skipTearDown {
@@ -154,12 +165,15 @@ func (h *Harness) TearDown() {
 	}
 }
 
+
 func (h *Harness) startForgejo(cfg HarnessConfig) {
 	t := h.t
 
 	// Generate app.ini
 	appIni := filepath.Join(h.LocalDir, "app.ini")
+	sandboxProfile := filepath.Join(h.LocalDir, "forgejo.sb")
 	h.writeForgejoConfig(appIni, cfg)
+	h.writeForgejoSandboxProfile(sandboxProfile)
 
 	// Start Forgejo
 	args := []string{
@@ -194,6 +208,7 @@ func (h *Harness) startForgejo(cfg HarnessConfig) {
 	}
 	t.Log("Forgejo is ready")
 }
+
 
 func (h *Harness) createAdmin(cfg HarnessConfig) {
 	t := h.t
@@ -257,6 +272,7 @@ func (h *Harness) createAdmin(cfg HarnessConfig) {
 	h.startForgejoAfterRestart(cfg)
 }
 
+
 func (h *Harness) startForgejoAfterRestart(cfg HarnessConfig) {
 	t := h.t
 	appIni := filepath.Join(h.LocalDir, "app.ini")
@@ -288,6 +304,7 @@ func (h *Harness) startForgejoAfterRestart(cfg HarnessConfig) {
 	}
 	t.Logf("Forgejo restarted (pid %d)", h.ForgejoPID)
 }
+
 
 func (h *Harness) startFordjent(cfg HarnessConfig) {
 	t := h.t
@@ -347,6 +364,7 @@ func (h *Harness) startFordjent(cfg HarnessConfig) {
 	t.Log("Fordjent is healthy")
 }
 
+
 // writeForgejoConfig generates the app.ini for the Forgejo instance.
 func (h *Harness) writeForgejoConfig(path string, cfg HarnessConfig) {
 	content := fmt.Sprintf(`APP_NAME = Forgejo Eval
@@ -405,14 +423,70 @@ ENABLED = false
 	}
 }
 
+
 // writeFordjentConfig generates the fordjent.yaml for the eval instance.
 func (h *Harness) writeFordjentConfig(path string, cfg HarnessConfig) {
-	apiKey := cfg.WaferAPIKey
+	apiKey := cfg.ProviderAPIKey
+	if apiKey == "" {
+		apiKey = cfg.WaferAPIKey
+	}
 	if apiKey == "" {
 		apiKey = os.Getenv("WAFER_API_KEY")
 	}
 	if apiKey == "" {
 		apiKey = "placeholder"
+	}
+
+	// Determine provider config
+	var providerSection string
+	var roleProviders string
+	if cfg.ProviderURL != "" {
+		// Custom provider override
+		model := cfg.ProviderModel
+		if model == "" {
+			model = "default"
+		}
+		providerSection = fmt.Sprintf(`providers:
+  - name: "eval-provider"
+    api_base: "%s"
+    api_key: "%s"
+    model: "%s"
+    max_tokens: 32768
+    request_timeout: "120s"
+    max_retries: 5
+    retry_base_delay: "3s"
+    retry_max_delay: "60s"`, cfg.ProviderURL, apiKey, model)
+		roleProviders = `    pm: "eval-provider"
+    reviewer: "eval-provider"
+    implementer: "eval-provider"
+    tester: "eval-provider"
+    devops: "eval-provider"
+  fallback_provider: "eval-provider"`
+	} else {
+		// Default Wafer providers
+		providerSection = fmt.Sprintf(`providers:
+  - name: "wafer-qwen"
+    api_base: "https://pass.wafer.ai/v1"
+    api_key: "%s"
+    model: "Qwen3.5-397B-A17B"
+    max_tokens: 32768
+    request_timeout: "90s"
+    max_retries: 5
+    retry_base_delay: "3s"
+    retry_max_delay: "60s"
+  - name: "wafer-glm"
+    api_base: "https://pass.wafer.ai/v1"
+    api_key: "%s"
+    model: "GLM-5.1"
+    max_tokens: 32768
+    request_timeout: "120s"
+    max_retries: 5`, apiKey, apiKey)
+		roleProviders = `    pm: "wafer-qwen"
+    reviewer: "wafer-glm"
+    implementer: "wafer-qwen"
+    tester: "wafer-qwen"
+    devops: "wafer-qwen"
+  fallback_provider: "wafer-qwen"`
 	}
 
 	content := fmt.Sprintf(`server:
@@ -436,12 +510,7 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   role_providers:
-    pm: "wafer-qwen"
-    reviewer: "wafer-glm"
-    implementer: "wafer-qwen"
-    tester: "wafer-qwen"
-    devops: "wafer-qwen"
-  fallback_provider: "wafer-qwen"
+%s
   commit_prefix: "[eval]"
   context_window: 131072
   compaction_threshold: 0.85
@@ -457,23 +526,7 @@ agent:
 sandbox:
   enabled: false
 
-providers:
-  - name: "wafer-qwen"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "%s"
-    model: "Qwen3.5-397B-A17B"
-    max_tokens: 32768
-    request_timeout: "90s"
-    max_retries: 5
-    retry_base_delay: "3s"
-    retry_max_delay: "60s"
-  - name: "wafer-glm"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "%s"
-    model: "GLM-5.1"
-    max_tokens: 32768
-    request_timeout: "120s"
-    max_retries: 5
+%s
 
 events:
   - "issues"
@@ -495,14 +548,33 @@ database:
   path: ""
 
 log_level: "info"
-`, cfg.FordjentPort, h.WebhookSecret, h.ForgejoURL, h.ForgejoToken, h.AdminToken, h.LocalDir, apiKey, apiKey)
+`, cfg.FordjentPort, h.WebhookSecret, h.ForgejoURL, h.ForgejoToken, h.AdminToken, h.LocalDir, roleProviders, providerSection)
 
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		h.t.Fatalf("failed to write fordjent config: %v", err)
 	}
 }
 
-// writeFordjentSandboxProfile writes a minimal sandbox-exec profile for Fordjent.
+func (h *Harness) writeForgejoSandboxProfile(path string) {
+	content := fmt.Sprintf(`(version 1)
+(allow default)
+(allow network-inbound (local tcp))
+(allow network-bind (local tcp))
+(allow network-outbound)
+(allow file-read* (subpath "/opt/homebrew"))
+(allow file-read* (subpath "/usr"))
+(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (literal "/etc"))
+(allow file-write* (subpath "%s"))
+`, h.LocalDir)
+
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		h.t.Fatalf("failed to write forgejo sandbox profile: %v", err)
+	}
+}
+
 func (h *Harness) writeFordjentSandboxProfile(path string) {
 	content := fmt.Sprintf(`(version 1)
 (allow default)
@@ -527,6 +599,7 @@ func (h *Harness) writeFordjentSandboxProfile(path string) {
 	}
 }
 
+
 // waitForURL polls a URL until it returns 200 or timeout.
 func (h *Harness) waitForURL(url string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -544,6 +617,7 @@ func (h *Harness) waitForURL(url string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for %s", url)
 }
 
+
 // FetchStatus retrieves the Fordjent /status endpoint.
 func (h *Harness) FetchStatus() (*StatusResponse, error) {
 	resp, err := http.Get(h.FordjentURL + "/status")
@@ -558,6 +632,7 @@ func (h *Harness) FetchStatus() (*StatusResponse, error) {
 	}
 	return &status, nil
 }
+
 
 // waitForIdle waits for Fordjent to have no active sessions.
 func (h *Harness) waitForIdle(timeout time.Duration) error {
@@ -576,6 +651,7 @@ func (h *Harness) waitForIdle(timeout time.Duration) error {
 	}
 	return fmt.Errorf("timeout waiting for Fordjent to become idle")
 }
+
 
 // Helper functions
 
@@ -601,6 +677,7 @@ func findForgejo(t *testing.T) string {
 	return ""
 }
 
+
 func randomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -609,6 +686,7 @@ func randomHex(n int) string {
 	}
 	return hex.EncodeToString(b)
 }
+
 
 func extractToken(output string) string {
 	// Extract a 40-char hex token from CLI output
@@ -630,6 +708,7 @@ func extractToken(output string) string {
 	return ""
 }
 
+
 func isHex(s string) bool {
 	for _, c := range s {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
@@ -638,6 +717,7 @@ func isHex(s string) bool {
 	}
 	return true
 }
+
 
 func killProcess(pid int) error {
 	// Try SIGTERM first, then SIGKILL
@@ -657,6 +737,7 @@ func killProcess(pid int) error {
 	return nil
 }
 
+
 func getEnvInt(key string, defaultVal int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := fmt.Sscanf(v, "%d", &defaultVal); err != nil || n != 1 {
@@ -665,6 +746,15 @@ func getEnvInt(key string, defaultVal int) int {
 	}
 	return defaultVal
 }
+
+
+func getEnvDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
 
 func (h *Harness) doForgejoRequest(method, path string, body interface{}) (string, error) {
 	var bodyReader io.Reader
@@ -695,6 +785,7 @@ func (h *Harness) doForgejoRequest(method, path string, body interface{}) (strin
 	}
 	return string(respBody), nil
 }
+
 
 // WaitForCondition polls until a condition is met or timeout.
 func (h *Harness) WaitForCondition(condition func() bool, interval, timeout time.Duration, msg string) error {

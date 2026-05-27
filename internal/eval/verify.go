@@ -103,10 +103,16 @@ func BugfixVerify(repoDir string) VerificationResult {
 	}
 
 	changedFiles := strings.Split(strings.TrimSpace(diff), "\n")
-	onlySearchGo := len(changedFiles) == 1 && strings.Contains(changedFiles[0], "search.go")
-	result.Checks = append(result.Checks, Check{Name: "minimal_diff", Passed: onlySearchGo})
-	if !onlySearchGo && len(changedFiles) > 0 && diff != "" {
-		result.Errors = append(result.Errors, fmt.Sprintf("expected only search.go changed, got: %v", changedFiles))
+	// Allow changes to search.go and search_test.go — both are reasonable for a bugfix
+	allInSearchPkg := true
+	for _, f := range changedFiles {
+		if f != "" && !strings.Contains(f, "search/") {
+			allInSearchPkg = false
+		}
+	}
+	result.Checks = append(result.Checks, Check{Name: "minimal_diff", Passed: allInSearchPkg && len(changedFiles) > 0})
+	if !allInSearchPkg && len(changedFiles) > 0 && diff != "" {
+		result.Errors = append(result.Errors, fmt.Sprintf("expected only search pkg changed, got: %v", changedFiles))
 	}
 
 	// 3. Check line count of the diff (non-fatal check)

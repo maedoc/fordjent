@@ -352,9 +352,10 @@ func cloneRepo(forgejoURL, repo, token, dir string) error {
 
 	repoURL := fmt.Sprintf("%s/%s.git", forgejoURL, repo)
 	if token != "" {
-		// Insert token into URL: http://user:token@host/repo.git
-		repoURL = fmt.Sprintf("%s://%s:%s@%s/%s.git",
-			"http", "fjadmin", token, strings.TrimPrefix(forgejoURL, "http://"), repo)
+		// Forgejo accepts token in URL: http://token@host/owner/repo.git
+		// Strip scheme, reassemble with token
+		host := strings.TrimPrefix(forgejoURL, "http://")
+		repoURL = fmt.Sprintf("http://%s@%s/%s.git", token, host, repo)
 	}
 
 	cmd := exec.Command("git", "clone", repoURL, dir)

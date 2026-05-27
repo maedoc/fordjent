@@ -158,7 +158,7 @@ func (h *Harness) CreateIssue(repo, title, body string) (int, error) {
 	}
 
 	issueNum := int(extractFloat64(issue["number"]))
-	t.Logf("Created issue #%d: %s", issueNum, title)
+	h.t.Logf("Created issue #%d: %s (raw response number=%v)", issueNum, title, issue["number"])
 	return issueNum, nil
 }
 
