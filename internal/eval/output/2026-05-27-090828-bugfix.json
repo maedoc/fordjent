@@ -1,0 +1,57 @@
+[
+  {
+    "TrialNum": 0,
+    "Scenario": "",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 30007674875,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "ToolCallsTotal": 0,
+      "CostUSD": 0,
+      "WallTime": 30007674958,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 0,
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": null,
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  }
+]

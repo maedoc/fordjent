@@ -1,0 +1,177 @@
+[
+  {
+    "TrialNum": 1,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 110006358083,
+    "Verification": {
+      "Name": "",
+      "Passed": false,
+      "Checks": null,
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 57138,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "CostUSD": 0,
+      "WallTime": 110007471458,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 7,
+          "InputTokens": 52063,
+          "OutputTokens": 5075
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0
+  },
+  {
+    "TrialNum": 2,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 30097770208,
+    "Verification": {
+      "Name": "",
+      "Passed": false,
+      "Checks": null,
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "CostUSD": 0,
+      "WallTime": 30099742500,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 0,
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0
+  },
+  {
+    "TrialNum": 3,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 30019389834,
+    "Verification": {
+      "Name": "",
+      "Passed": false,
+      "Checks": null,
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "CostUSD": 0,
+      "WallTime": 30022860292,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 0,
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0
+  },
+  {
+    "TrialNum": 4,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 30018352333,
+    "Verification": {
+      "Name": "",
+      "Passed": false,
+      "Checks": null,
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "CostUSD": 0,
+      "WallTime": 30021467916,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 0,
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0
+  },
+  {
+    "TrialNum": 5,
+    "Scenario": "bugfix",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 30011556417,
+    "Verification": {
+      "Name": "",
+      "Passed": false,
+      "Checks": null,
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "CostUSD": 0,
+      "WallTime": 30019510917,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {
+        "Qwen3.6-35B-A3B-IQ4_XS-4.15bpw.gguf": {
+          "Calls": 0,
+          "InputTokens": 0,
+          "OutputTokens": 0
+        }
+      }
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0
+  }
+]
