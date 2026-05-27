@@ -57,6 +57,13 @@ func (h *Harness) CreateRepo(name string) error {
 
 	t.Logf("Created repo: %s", name)
 
+	// Set fordjent-yolo topic to enable auto-merge for eval repos.
+	// Without this, the no-auto-merge policy blocks forgejo_merge_pr,
+	// PRs never merge, issues never close, and the harness times out.
+	if err := h.SetRepoTopics(name, []string{"fordjent-yolo"}); err != nil {
+		t.Logf("Warning: could not set fordjent-yolo topic: %v", err)
+	}
+
 	// Wait for repo to be fully initialized
 	time.Sleep(2 * time.Second)
 
@@ -269,6 +276,14 @@ func (h *Harness) CloseAllIssues(repo string) error {
 // DeleteRepo deletes the entire repository.
 func (h *Harness) DeleteRepo(repo string) error {
 	_, err := h.doForgejoRequest("DELETE", fmt.Sprintf("/repos/%s", repo), nil)
+	return err
+}
+
+// SetRepoTopics sets the topics for a repository.
+// PUT /repos/{owner}/{repo}/topics with {"topics": ["..."]}
+func (h *Harness) SetRepoTopics(repo string, topics []string) error {
+	_, err := h.doForgejoRequest("PUT", fmt.Sprintf("/repos/%s/topics", repo),
+		map[string]interface{}{"topics": topics})
 	return err
 }
 

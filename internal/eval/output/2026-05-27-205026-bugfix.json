@@ -1,0 +1,51 @@
+[
+  {
+    "TrialNum": 0,
+    "Scenario": "",
+    "Success": true,
+    "ProviderFailure": false,
+    "AgentFailure": false,
+    "VerifyFailure": false,
+    "WallTime": 20029162042,
+    "Verification": {
+      "Name": "bugfix",
+      "Passed": true,
+      "Checks": [
+        {
+          "Name": "tests_pass",
+          "Passed": true
+        },
+        {
+          "Name": "minimal_diff",
+          "Passed": true
+        },
+        {
+          "Name": "small_change",
+          "Passed": true
+        }
+      ],
+      "Errors": null
+    },
+    "Metrics": {
+      "TotalTokens": 0,
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "TotalTurns": 0,
+      "TotalLLMCalls": 0,
+      "ToolCallsTotal": 0,
+      "CostUSD": 0,
+      "WallTime": 20029162208,
+      "SystemRoleErrors": 0,
+      "FalseErrorLabels": 0,
+      "ByModel": {}
+    },
+    "SystemRoleErrors": 0,
+    "FalseErrorLabels": 0,
+    "TurnCount": 0,
+    "ToolCallsTotal": 0,
+    "ToolCallsByType": null,
+    "LLMCalls": 0,
+    "JudgeScore": 0,
+    "JudgeFeedback": ""
+  }
+]
