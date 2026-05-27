@@ -79,6 +79,21 @@ func TestEvalSmoke(t *testing.T) {
 	verification := BugfixScenario.Verify(cloneDir)
 	result.Verification = verification
 
+	// Analyze session memory
+	sessionDir, err := h.FindLatestSession(repo)
+	if err == nil {
+		memContent, err := h.ReadMemoryFile(sessionDir)
+		if err == nil {
+			turns, toolCalls, toolErrors := ParseMemoryFile(memContent)
+			result.TurnCount = turns
+			result.ToolCallsTotal = len(toolCalls)
+			result.ToolCallsByType = toolCalls
+			t.Logf("Session: turns=%d, tool_calls=%d, tool_errors=%d, by_type=%v", turns, len(toolCalls), toolErrors, toolCalls)
+		}
+	} else {
+		t.Logf("Warning: could not find session dir: %v", err)
+	}
+
 	t.Logf("Smoke test result: success=%v checks=%d errors=%v",
 		verification.Passed, len(verification.Checks), verification.Errors)
 
@@ -201,6 +216,23 @@ func runBenchmark(t *testing.T, scenario *Scenario, trials int) {
 			trialResult.Success = trialResult.Verification.Passed
 		}
 
+		// Analyze session memory for turn counts and tool calls
+		sessionDir, err := h.FindLatestSession(fullRepo)
+		if err == nil {
+			memContent, err := h.ReadMemoryFile(sessionDir)
+			if err == nil {
+				turns, toolCalls, toolErrors := ParseMemoryFile(memContent)
+				trialResult.TurnCount = turns
+				trialResult.ToolCallsTotal = len(toolCalls)
+				trialResult.ToolCallsByType = toolCalls
+				trialResult.ToolCallsByType["_errors"] = toolErrors
+				t.Logf("Trial %d: turns=%d, tool_calls=%d, tool_errors=%d, by_type=%v",
+					i+1, turns, len(toolCalls), toolErrors, toolCalls)
+			}
+		} else {
+			t.Logf("Warning: could not find session dir for %s: %v", fullRepo, err)
+		}
+
 		// Detect provider failures
 		if strings.Contains(fmt.Sprintf("%v", err), "context deadline") ||
 			strings.Contains(fmt.Sprintf("%v", err), "503") {
@@ -286,6 +318,7 @@ func (h *Harness) WaitForCompletion(repo string, issueNum int, timeout time.Dura
 	result := &TrialResult{}
 	startTime := time.Now()
 	deadline := startTime.Add(timeout)
+	sessionStarted := false
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -300,11 +333,13 @@ func (h *Harness) WaitForCompletion(repo string, issueNum int, timeout time.Dura
 			}
 
 			// Check issue state
-			state, err := h.GetIssueState(repo, issueNum)
-			if err == nil && state == "closed" {
-				result.Success = true
-				result.WallTime = time.Since(startTime)
-				return result, nil
+			if issueNum > 0 {
+				state, err := h.GetIssueState(repo, issueNum)
+				if err == nil && state == "closed" {
+					result.Success = true
+					result.WallTime = time.Since(startTime)
+					return result, nil
+				}
 			}
 
 			// Check lifecycle state via /status
@@ -313,13 +348,21 @@ func (h *Harness) WaitForCompletion(repo string, issueNum int, timeout time.Dura
 				lc, ok := status.Lifecycle["active_sessions"]
 				if ok {
 					active, _ := lc.(float64)
-					if active == 0 && time.Since(startTime) > 30*time.Second {
-						// No active sessions and some time has passed — likely done
+					if active > 0 {
+						sessionStarted = true
+					}
+					if active == 0 && sessionStarted && time.Since(startTime) > 10*time.Second {
+						// No active sessions after session was started — work is done
 						result.Success = true
 						result.WallTime = time.Since(startTime)
 						return result, nil
 					}
 				}
+			}
+
+			// Fallback: check if there are any comments on the issue (agent posted)
+			if issueNum > 0 && time.Since(startTime) > 30*time.Second {
+				h.t.Logf("Checking for agent activity on issue #%d...", issueNum)
 			}
 		}
 	}
