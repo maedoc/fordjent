@@ -157,8 +157,8 @@ func (h *Harness) CreateIssue(repo, title, body string) (int, error) {
 		return 0, fmt.Errorf("parse issue response: %w", err)
 	}
 
-	issueNum := int(extractFloat64(issue["number"]))
-	h.t.Logf("Created issue #%d: %s (raw response number=%v)", issueNum, title, issue["number"])
+	issueNum := extractIssueNum(issue)
+	h.t.Logf("Created issue #%d: %s (raw id=%v, number=%v)", issueNum, title, issue["id"], issue["number"])
 	return issueNum, nil
 }
 
@@ -234,15 +234,33 @@ func (h *Harness) CloseAllIssues(repo string) error {
 		return fmt.Errorf("list issues: %w", err)
 	}
 
+	// Forgejo may return a paginated response {"data": [...]} or a plain array
 	var issues []map[string]interface{}
-	if err := json.Unmarshal([]byte(respBody), &issues); err != nil {
-		return fmt.Errorf("parse issues: %w", err)
+	var pageResp map[string]interface{}
+	if err := json.Unmarshal([]byte(respBody), &pageResp); err == nil {
+		// Paginated response — extract data array
+		if data, ok := pageResp["data"].([]interface{}); ok {
+			for _, item := range data {
+				if m, ok := item.(map[string]interface{}); ok {
+					issues = append(issues, m)
+				}
+			}
+		} else {
+			// Not paginated — try direct array
+			if err2 := json.Unmarshal([]byte(respBody), &issues); err2 != nil {
+				return fmt.Errorf("parse issues: %w", err2)
+			}
+		}
+	} else if err2 := json.Unmarshal([]byte(respBody), &issues); err2 != nil {
+		return fmt.Errorf("parse issues: %w", err2)
 	}
 
 	for _, issue := range issues {
-		num := int(extractFloat64(issue["number"]))
-		if err := h.CloseIssue(repo, num); err != nil {
-			h.t.Logf("warning: failed to close issue #%d: %v", num, err)
+		num := extractIssueNum(issue)
+		if num > 0 {
+			if err := h.CloseIssue(repo, num); err != nil {
+				h.t.Logf("warning: failed to close issue #%d: %v", num, err)
+			}
 		}
 	}
 	return nil
@@ -252,4 +270,18 @@ func (h *Harness) CloseAllIssues(repo string) error {
 func (h *Harness) DeleteRepo(repo string) error {
 	_, err := h.doForgejoRequest("DELETE", fmt.Sprintf("/repos/%s", repo), nil)
 	return err
+}
+
+// extractIssueNum extracts an issue number from a Forgejo API response.
+// Forgejo may use "number" (1-based) or "id" (internal) depending on the API version.
+func extractIssueNum(issue map[string]interface{}) int {
+	// Try "number" first (user-facing number, 1-based)
+	if n := int(extractFloat64(issue["number"])); n > 0 {
+		return n
+	}
+	// Fall back to "id" (internal ID)
+	if n := int(extractFloat64(issue["id"])); n > 0 {
+		return n
+	}
+	return 0
 }

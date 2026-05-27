@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -326,7 +327,10 @@ func (h *Harness) WaitForCompletion(repo string, issueNum int, timeout time.Dura
 
 // writeReport writes per-trial results to a JSON file.
 func writeReport(t *testing.T, scenarioName string, results []TrialResult) {
-	outputDir := "internal/eval/output"
+	// Use absolute path relative to the project root
+	_, thisFile, _, _ := runtime.Caller(0)
+	projectRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	outputDir := filepath.Join(projectRoot, "internal", "eval", "output")
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		t.Logf("Warning: could not create output dir: %v", err)
 		return

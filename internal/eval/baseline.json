@@ -1,5 +1,19 @@
 {
-  "commit": "none",
-  "timestamp": "2026-05-26T00:00:00Z",
-  "scenarios": {}
+  "commit": "b6815e8",
+  "timestamp": "2026-05-27T08:37:40Z",
+  "model": "qwen3.6-27b (llama-cpp, local)",
+  "scenarios": {
+    "bugfix": {
+      "trials": 5,
+      "pass_rate": "5/5",
+      "metrics": {
+        "total_tokens": 0,
+        "total_turns": 0,
+        "wall_time_s": 0,
+        "system_role_errors": 0,
+        "false_error_labels": 0
+      }
+    }
+  },
+  "notes": "Qwen3.6-27B via local llama-cpp server (http://100.107.183.102:8181/v1). 5/5 bugfix trials passed. Metrics collection not yet wired (fordjent /status endpoint not reachable from test harness). All 5 trials completed successfully with verification checks passing."
 }

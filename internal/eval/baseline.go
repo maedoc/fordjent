@@ -179,14 +179,9 @@ func ComputeMedianMetrics(results []TrialResult) MedianMetrics {
 	}
 }
 
-// UpdateBaselineFlag checks if the -update-baseline flag was passed.
+// UpdateBaselineFlag checks if the UPDATE_BASELINE env var is set.
 func UpdateBaselineFlag() bool {
-	for _, arg := range os.Args {
-		if arg == "-update-baseline" {
-			return true
-		}
-	}
-	return false
+	return os.Getenv("UPDATE_BASELINE") != ""
 }
 
 // defaultBaselinePath returns the path to the committed baseline.json.
