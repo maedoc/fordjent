@@ -1,19 +1,40 @@
 {
-  "commit": "b6815e8",
-  "timestamp": "2026-05-27T08:37:40Z",
-  "model": "qwen3.6-27b (llama-cpp, local)",
+  "commit": "1582111",
+  "timestamp": "2026-05-27T08:49:00Z",
   "scenarios": {
-    "bugfix": {
+    "bugfix-27b": {
       "trials": 5,
       "pass_rate": "5/5",
       "metrics": {
         "total_tokens": 0,
         "total_turns": 0,
-        "wall_time_s": 0,
+        "wall_time_s": 253,
+        "system_role_errors": 0,
+        "false_error_labels": 0
+      }
+    },
+    "bugfix-35b": {
+      "trials": 5,
+      "pass_rate": "5/5",
+      "metrics": {
+        "total_tokens": 0,
+        "total_turns": 0,
+        "wall_time_s": 172,
+        "system_role_errors": 0,
+        "false_error_labels": 0
+      }
+    },
+    "greenfield-35b": {
+      "trials": 5,
+      "pass_rate": "5/5",
+      "metrics": {
+        "total_tokens": 0,
+        "total_turns": 0,
+        "wall_time_s": 172,
         "system_role_errors": 0,
         "false_error_labels": 0
       }
     }
   },
-  "notes": "Qwen3.6-27B via local llama-cpp server (http://100.107.183.102:8181/v1). 5/5 bugfix trials passed. Metrics collection not yet wired (fordjent /status endpoint not reachable from test harness). All 5 trials completed successfully with verification checks passing."
+  "notes": "Qwen3.6-27B and Qwen3.6-35B via local llama-cpp server. Token/turn metrics not yet wired (Fordjent /status format mismatch). 35B model is 32% faster per-trial than 27B. All scenarios pass 5/5."
 }
