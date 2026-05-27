@@ -60,7 +60,8 @@ func (h *Harness) CreateRepo(name string) error {
 	// Set fordjent-yolo topic to enable auto-merge for eval repos.
 	// Without this, the no-auto-merge policy blocks forgejo_merge_pr,
 	// PRs never merge, issues never close, and the harness times out.
-	if err := h.SetRepoTopics(name, []string{"fordjent-yolo"}); err != nil {
+	fullRepo := h.AdminUser + "/" + name
+	if err := h.SetRepoTopics(fullRepo, []string{"fordjent-yolo"}); err != nil {
 		t.Logf("Warning: could not set fordjent-yolo topic: %v", err)
 	}
 
