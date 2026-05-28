@@ -184,6 +184,11 @@ UPDATE_BASELINE=1 go test ./internal/eval/... -v -run TestEvalSmoke
 go test ./internal/eval/... -v -short -run TestEvalBenchBugfix
 ```
 
+> **Auto-merge**: The harness automatically sets the `fordjent-yolo` repo topic
+> on eval repos to enable autonomous PR merging. Without this, Fordjent's
+> default `no-auto-merge` policy blocks `forgejo_merge_pr` calls, causing
+> cascading reviewer sessions and eventual timeout.
+
 ## Verification Logic
 
 The `BugfixVerify` function:
@@ -280,3 +285,42 @@ Reports are written to `internal/eval/output/YYYY-MM-DD-HHMMSS-{scenario}.json`:
   }
 ]
 ```
+
+## Troubleshooting
+
+### Stale processes from EVAL_SKIP_TEARDOWN
+
+After `EVAL_SKIP_TEARDOWN=true`, Forgejo and Fordjent stay running on ports
+3000 and 8080. Running a new test without killing them first causes:
+
+- **Symptom**: `Created issue #0: ... (raw id=<nil>, number=<nil>)`
+- **Cause**: New Forgejo can't bind port 3000 → API calls go to old instance
+- **Fix**: `pkill -f forgejo; pkill -f fordjent; sleep 2`
+
+### Slow model timeouts
+
+Model speed varies by quantization and hardware. Slower quants (MTP FP8 KV
+cache, IQ4_XS) can take 9+ minutes per trial vs 3-4 minutes for Q4_K_XL.
+Set `-timeout` generously:
+
+```bash
+go test ./internal/eval/... -v -run TestEvalBenchBugfix -timeout 180m
+```
+
+Individual trial timeouts are configured per scenario via the `Timeout` field
+in the `Scenario` struct.
+
+### Qwen exploration loops
+
+Qwen models (qwen3.6-35b, qwen2.5-coder) may spend many turns reading files
+without writing code. Higher turn counts are normal. Use Devstral for
+action-first implementer behavior.
+
+### Model comparison guidance
+
+| Model | Quant | Speed | Quality | Best use |
+|-------|-------|-------|---------|----------|
+| 35B | Q4_K_XL | 63-79 tok/s | 7/10 strict | Good baseline |
+| 27B | Q4_K_XL | 12-20 tok/s | 5/5 strict | Best quality (fewer extraneous edits) |
+| 27B | IQ4_XS | 20 tok/s | 2/5 strict | Avoid (poor instruction-following) |
+| 27B | MTP FP8 KV | ~tok/s vary | TBD | May be slower per turn; check quant quality |

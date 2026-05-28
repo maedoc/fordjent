@@ -13,6 +13,16 @@ binary search). 10 trials for the 35B Q4_K_XL, 5 trials for others.
 | 35B | Q4_K_XL | 7/10 (70%) | 10/10 | 20.4 | 35.2 | 125.7 | 117s | 63 tok/s |
 | 35B | IQ4_XS | 4/5 (80%) | 5/5 | 20.8 | 29.8 | 131.2 | 82s | 74 tok/s |
 | 27B | IQ4_XS | 2/5 (40%) | 4/5 | 19.0 | 33.6 | 108.0 | 472s | 20 tok/s |
+| 27B | MTP FP8 KV | TBD* | TBD* | TBD* | TBD* | TBD* | ~500s/trn† | TBD |
+
+*MTP FP8 KV cache variant (27B Q4_K_XL with Multi-Token Prediction + FP8 KV
+cache). Smoke test passed (241s, 3/3 checks). Full 10-trial benchmark timed
+out due to slower per-turn latency (35-119s reviewer turns vs 8-11s for 35B
+Q4_K_XL). Requires longer per-trial timeout or yolo topic fix (committed) for
+complete results. The model uses the same gguf filename — speed difference
+comes from different server flags, not the quant itself.*
+
+†Estimated per-trial wall time from the timed-out run: 9+ minutes.
 
 **Server**: All models served via llama.cpp at `http://100.107.183.102:8181/v1`.  
 Throughput varies by GPU load and quantization. The 35B Q4_K_XL ran at 63 tok/s  
@@ -98,3 +108,18 @@ post-action checks catch extraneous file edits).
 
 Either model paired with a `post_action_check` that rejects changes to files
 outside `pkg/search/` would achieve near-100% strict pass rate.
+
+### Infrastructure Notes
+
+- **Cascading sessions**: All models spawn 2-3 reviewer sessions per trial
+  (`pulls/2`, `pulls/3`) from label-update webhooks. This is normal — the
+  harness detects completion via `active_sessions=0`. Faster models complete
+  all sessions within the timeout; slower models may need a longer timeout.
+
+- **Auto-merge**: The harness auto-sets `fordjent-yolo` topic on eval repos to
+  bypass Fordjent's `no-auto-merge` policy. Without this, `forgejo_merge_pr`
+  calls are blocked, causing indefinite session cascades.
+
+- **Port conflicts**: `EVAL_SKIP_TEARDOWN=true` leaves Forgejo/Fordjent running.
+  Always `pkill -f forgejo; pkill -f fordjent` before re-running to avoid
+  silent `number=<nil>` failures.

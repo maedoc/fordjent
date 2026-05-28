@@ -211,6 +211,12 @@ Completion detection strategy (in priority order):
 5. Lifecycle state = "failed_error" → failure (but record metrics)
 6. Timeout (15 min default) → hard failure
 
+**Cascading sessions are normal**: Label-update webhooks (from `fordjent/failed:*`
+or `blocked` labels) can spawn additional reviewer sessions (`pulls/2`, `pulls/3`).
+All models produce these; they're handled by the `active_sessions=0` detection gate.
+Faster models complete them within the timeout; slower models may need a longer
+`-timeout` flag (see Known Issues below).
+
 ### 4. Reset Between Trials
 
 ```go
@@ -1010,6 +1016,65 @@ Environment variables:
 - `FORGEJO_TOKEN`/`FORGEJO_ADMIN_TOKEN` — Required when EVAL_SKIP_SETUP=true
 
 OpenSpec change: `openspec/changes/eval-harness/`
+
+## Known Issues & Troubleshooting
+
+### `fordjent-yolo` topic required for auto-merge
+
+Fordjent's default policy is `no-auto-merge`. Without the `fordjent-yolo` repo
+topic, `forgejo_merge_pr` calls are blocked, PRs never merge, and review sessions
+cascade until timeout. The harness now automatically sets `fordjent-yolo` on
+every eval repo via `SetRepoTopics()` immediately after `CreateRepo()`.
+
+If you're running evals on manually-created repos, add the topic:
+```bash
+curl -X PUT "http://localhost:3000/api/v1/repos/{owner}/{repo}/topics" \
+  -H "Authorization: token $FORGEJO_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"topics": ["fordjent-yolo"]}'
+```
+
+### EVAL_SKIP_TEARDOWN port conflict
+
+After a run with `EVAL_SKIP_TEARDOWN=true`, Forgejo (PID ~27879) and Fordjent
+remain running on ports 3000 and 8080. Running a new test without killing them
+causes silent failures: new Forgejo can't bind → API calls go to the old
+instance → issue `number` returns `<nil>` → `extractIssueNum` returns 0 →
+`WaitForCompletion` never finds the issue.
+
+**Symptom**: `Created issue #0: ... (raw id=<nil>, number=<nil>)`
+
+**Fix**: Always kill stale processes before re-running:
+```bash
+pkill -f forgejo; pkill -f fordjent; sleep 2
+```
+
+### Slow models may exceed per-trial timeout
+
+Model speed varies dramatically with quantization and hardware:
+
+| Model | Quant | Turn latency | Trial time |
+|-------|-------|-------------|------------|
+| 35B | Q4_K_XL | 8-11s | ~3-4 min |
+| 27B | Q4_K_XL | ~20s | ~5-7 min |
+| 27B | MTP FP8 KV cache | 35-119s | 9+ min |
+
+Slower quants (MTP FP8 KV cache, IQ4_XS) can exceed the per-trial timeout,
+causing `timeout after 10m` errors. Set `-timeout` generously:
+```bash
+go test ./internal/eval/... -v -run TestEvalBenchBugfix -timeout 180m
+```
+
+The 180m flag covers all 10 trials; individual trial timeouts are configured
+per scenario via the `Timeout` field.
+
+### Qwen exploration loops
+
+Qwen-family models (qwen3.6-35b, qwen2.5-coder) often spend many turns reading
+files and listing branches without writing code or making changes. This is normal
+behavior — sessions still complete, but with higher turn counts. If you need
+minimal-cost implementations, use Devstral-based models for the implementer role.
+Qwen is still suitable for review/analysis roles.
 
 ## What Not To Test
 
