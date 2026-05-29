@@ -26,6 +26,7 @@ const (
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
 	Push                     Type = "push"
 	PMReactivate             Type = "pm.reactivate"
+	SpecPRMerged             Type = "spec.pr_merged"
 )
 
 // Event is the normalized internal representation of a Forgejo webhook event.
