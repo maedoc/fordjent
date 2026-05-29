@@ -73,6 +73,8 @@ func (f *interactionForgejo) handler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && strings.Contains(path, "/git/trees/"):
 		f.handleGitTrees(w, r)
+	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && strings.Contains(path, "/files"):
+		f.handlePRFiles(w, r)
 	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && !strings.Contains(path, "/files"):
 		f.handleGetPR(w, r)
 	case r.Method == http.MethodGet && strings.Contains(path, "/issues/") &&
@@ -1052,5 +1054,72 @@ func TestFSMQuestionLabelTransitions(t *testing.T) {
 	}
 	if !sess.IsScaffoldAnswer {
 		t.Error("expected IsScaffoldAnswer to be true")
+	}
+}
+
+func (f *interactionForgejo) handlePRFiles(w http.ResponseWriter, r *http.Request) {
+	// Return spec PR files for testing
+	files := []map[string]interface{}{
+		{
+			"filename":  "openspec/changes/test-feature/proposal.md",
+			"status":    "added",
+			"additions": 10,
+			"deletions": 0,
+		},
+		{
+			"filename":  "openspec/changes/test-feature/design.md",
+			"status":    "added",
+			"additions": 20,
+			"deletions": 0,
+		},
+	}
+	_ = json.NewEncoder(w).Encode(files)
+}
+
+func TestSpecLifecycleLabels_TransitionOnSpecPRMerge(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+	f.prHeadRef = "spec/test-feature"
+	f.prMerged = false // will test merged=true scenario
+	f.issueLabels = []string{"spec-proposed"}
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.RequireRoleTag = false
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Drain(context.Background())
+
+	evt := event.NewEvent(event.PullRequestMerged, "test/repo", 42, 7, "fjadmin", "merged")
+	evt.Payload = map[string]interface{}{
+		"pull_request": map[string]interface{}{
+			"merged": true,
+			"head": map[string]interface{}{
+				"ref": "spec/test-feature",
+			},
+		},
+	}
+
+	// Process the event
+	mgr.handleEvent(context.Background(), evt)
+
+	// Wait briefly for goroutine to process
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify spec-approved label was added
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	found := false
+	for _, l := range f.addedLabels {
+		if l == "spec-approved" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected spec-approved label to be added, got addedLabels:", f.addedLabels)
 	}
 }

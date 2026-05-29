@@ -51,6 +51,6 @@
 ## 8. Testing and Hardening
 
 - [x] 8.1 Unit tests for all new tools (`openspec_get_tasks`, `openspec_read_spec`, `openspec_mark_task`) — use temp repos with pre-seeded `openspec/` directories.
-- [ ] 8.2 Unit tests for spec lifecycle handlers — `handleSpecPRMerged` with mocked Forgejo API.
+- [x] 8.2 Unit tests for spec lifecycle handlers — `handleSpecPRMerged` with mocked Forgejo API.
 - [x] 8.3 Run full `go test ./...` — all 16+ packages pass.
 - [x] 8.4 PHASE 5 (initial baseline eval) revisit if needed — coordinate with eval-harness spec.
