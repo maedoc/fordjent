@@ -373,9 +373,10 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 
 // writeFileTool writes content to a file in the repository.
 type writeFileTool struct {
-	repoDir      string
-	commitPrefix string
-	dryRun       bool
+	repoDir         string
+	commitPrefix    string
+	dryRun          bool
+	allowedPrefixes []string // if non-empty, paths must start with one of these prefixes relative to repo root
 }
 
 func NewWriteFileTool(info SessionInfo, cfg AgentConfig) *writeFileTool {
@@ -384,6 +385,12 @@ func NewWriteFileTool(info SessionInfo, cfg AgentConfig) *writeFileTool {
 		commitPrefix: cfg.CommitPrefix(),
 		dryRun:       cfg.DryRun(),
 	}
+}
+
+// SetAllowedPrefixes restricts write_file to paths starting with the given prefixes.
+// Each prefix is relative to the repo root (e.g., "openspec/changes/").
+func (t *writeFileTool) SetAllowedPrefixes(prefixes []string) {
+	t.allowedPrefixes = prefixes
 }
 
 func (t *writeFileTool) Name() string { return "write_file" }
@@ -447,6 +454,21 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 			"repo_root", t.repoDir,
 		)
 		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
+	}
+
+	// Path prefix restriction for PM role (spec writing only)
+	if len(t.allowedPrefixes) > 0 {
+		relPath := filepath.ToSlash(filepath.Clean(params.Path))
+		allowed := false
+		for _, prefix := range t.allowedPrefixes {
+			if strings.HasPrefix(relPath, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", fmt.Errorf("write_file restricted to spec paths (openspec/changes/ or openspec/specs/)")
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {

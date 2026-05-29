@@ -665,6 +665,62 @@ Your job:
 6. This session targets the current issue which IS the scaffold definition. You are NOT creating a separate scaffold issue — you are implementing the scaffold files.
 Do NOT push to main. Create a branch for the scaffold (e.g., feature/project-scaffold).`
 		}
+
+		// OpenSpec spec creation section — added for PM role to create structured specs
+		modeInstructions += `
+
+## OpenSpec Spec Creation
+When creating a spec for a feature:
+1. Use forgejo_get_issue, read_file, and bash to explore the codebase and understand current state.
+2. Call openspec_propose with the change name and description to get artifact instructions.
+3. Use write_file (restricted to openspec/ paths) to create:
+   - openspec/changes/<name>/proposal.md (WHY: problem, solution, impact)
+   - openspec/changes/<name>/design.md (HOW: architecture) — OPTIONAL, skip for simple changes
+   - openspec/changes/<name>/specs/<capability>/spec.md (requirements with SHALL/MUST, scenarios with WHEN/THEN)
+   - openspec/changes/<name>/tasks.md (implementation checklist with - [ ] checkboxes)
+4. For complex changes, write design.md explaining architecture decisions, data flow, and risks.
+5. For file-disjoint tasks, add [parallel] tag: "- [ ] Implement OAuth [parallel]"
+6. Add verification criteria to each spec (a ## Verification section with checkboxes).
+7. After writing all files, use the git tool:
+   - git checkout -b spec/<name>
+   - git add openspec/
+   - git commit -m "spec: <name> proposal"
+   - git push origin spec/<name>
+8. If repo has 'fordjent-yolo' topic: commit directly to main. Skip PR.
+9. If no yolo: call forgejo_create_pr(base=main, head=spec/<name>).
+   Add spec-proposed label to the PR.
+   Post comment: "Spec PR #N ready for review."
+10. Sub-issues should use Depends on: #<parent> for coordination.
+    - [parallel] tasks get no Depends on: between them.
+    - ROLE TAGS ARE MANDATORY: [implementer], [tester], [devops], [reviewer] in each sub-issue title.`
+
+		// Spec PR review cycle — how to handle feedback on spec PRs
+		modeInstructions += `
+
+## Spec PR Review Mode
+When responding to review comments on a spec PR:
+1. Read the human's feedback carefully.
+2. Update the spec files using write_file (restricted to openspec/ paths).
+3. Commit and push to the same spec branch.
+4. Post a comment: "Updated per feedback: <summary>"
+5. Do NOT create a new PR — update the existing one.
+6. If human feedback is unclear, ask for clarification before making changes.`
+
+		// Spec archive flow — what to do when all implementation is complete
+		modeInstructions += `
+
+## Spec Archive (Completion)
+When all implementation tasks are complete (milestone 100%):
+1. Call openspec_get_tasks to verify all tasks are done.
+2. If all done, call openspec_archive_change(<name>).
+   This archives the change and syncs delta specs.
+3. Use git to commit the archive:
+   git add openspec/changes/archive/ openspec/specs/
+   git commit -m "archive: <name> completed"
+   git push
+4. If no yolo: create a PR for the archive commit.
+5. Label parent issue spec-complete.
+6. Post completion summary with token/time metrics.`
 	case "reviewer":
 		modeInstructions += `
 
@@ -698,6 +754,19 @@ You are in Code Review mode. You do NOT write code or push commits. Your job is:
 - If the code is correct and there are no conflicts, call forgejo_merge_pr immediately.
 - If issues are found, post a comment describing them and remove the 'automerge' label.`
 		}
+
+		// Spec-driven review instructions
+		modeInstructions += `
+
+## Spec-Driven Review
+If this PR is spec-driven (check PR body for 'Spec:' references, or call openspec_get_tasks):
+1. Call openspec_read_spec <capability> to get the requirements.
+2. Check each SHALL/MUST requirement against the implementation.
+3. Run the verification criteria from the spec's ## Verification section.
+4. If requirements are not met: request changes with specific spec references.
+5. If implementation diverges from spec (intentional improvement): flag as divergence, not failure.
+6. Limit review rounds to 3. After 3 rounds with unresolved issues, add 'needs-human-review' label and stop.
+7. If all requirements met and verification passes: approve/merge.`
 	case "devops":
 		modeInstructions += `
 
@@ -743,7 +812,17 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 - DO NOT read the same file more than twice.
 - DO NOT use git status/log/diff more than once per turn.
 - DO NOT explore the repo structure more than needed.
-- DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.`
+- DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.
+
+## Spec-Driven Implementation
+If this issue references a spec change (check issue body for 'Spec:' references or milestone context):
+1. FIRST call openspec_get_tasks to see the task list and find your assigned task.
+2. THEN call openspec_read_spec <capability> to read the requirements.
+3. Implement following the spec's SHALL/MUST requirements.
+4. Check the spec's ## Verification section. Run those checks before creating a PR.
+5. After creating a PR, call openspec_mark_task to mark your task complete.
+6. If you cannot satisfy a spec requirement, report via forgejo_ping_parent with reason "spec_conflict".
+7. If no spec reference is found, proceed with normal implementation (issue body is the spec).`
 	}
 
 	stateInstructions := issueStateInstructions(fsmState)
@@ -1257,10 +1336,19 @@ func buildRoleRegistry(
 		registry.Register(tool.NewCreateMilestoneTool(forgejoAdapter))
 		registry.Register(tool.NewSetMilestoneTool(forgejoAdapter))
 		registry.Register(tool.NewListMilestonesTool(forgejoAdapter))
-		// PM cannot write code, create PRs, or merge
+		// PM can write spec files under openspec/ paths
+		pmWFT := tool.NewWriteFileTool(sessionInfo, agentCfg)
+		pmWFT.SetAllowedPrefixes([]string{"openspec/changes/", "openspec/specs/"})
+		registry.Register(pmWFT)
+		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
+		registry.Register(tool.NewOpenSpecProposeTool())
+		registry.Register(tool.NewOpenSpecArchiveChangeTool(sessionInfo, agentCfg))
+		// PM cannot create code PRs or merge — spec PRs are created via forgejo_create_pr
 	case "reviewer":
-		registry.Register(tool.NewMergePRTool(forgejoAdapter, true))
-		// Reviewer can read, search, comment, and merge — but not write code or create PRs
+		registry.Register(tool.NewMergePRTool(forgejoAdapter, true, sessionInfo.RepoDir()))
+		registry.Register(tool.NewOpenSpecReadSpecTool(sessionInfo))
+		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
+		// Reviewer can read specs, comment, and merge — but not write code
 	case "devops", "tester", "implementer":
 		fallthrough
 	default:
@@ -1275,7 +1363,10 @@ func buildRoleRegistry(
 		}
 		registry.Register(gitT)
 		registry.Register(tool.NewCreatePRTool(forgejoAdapter, mq, sess.RepoDir))
-		registry.Register(tool.NewMergePRTool(forgejoAdapter, false))
+		registry.Register(tool.NewMergePRTool(forgejoAdapter, false, sessionInfo.RepoDir()))
+		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
+		registry.Register(tool.NewOpenSpecReadSpecTool(sessionInfo))
+		registry.Register(tool.NewOpenSpecMarkTaskTool(sessionInfo, agentCfg))
 		// Admin tools for implementer role
 		registry.Register(tool.NewDeleteBranchTool(forgejoAdapter))
 		registry.Register(tool.NewCreateHookTool(forgejoAdapter))

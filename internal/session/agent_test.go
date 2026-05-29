@@ -267,8 +267,8 @@ func TestBuildRoleRegistry_PM(t *testing.T) {
 
 	registry := buildRoleRegistry(adapter, nil, sess, sessionInfo, agentCfg, "pm", cfg, nil, nil, policy.Policy{})
 
-	pmAllowed := []string{"forgejo_comment", "forgejo_create_issue", "bash", "read_file"}
-	pmForbidden := []string{"write_file", "git", "forgejo_create_pr", "forgejo_merge_pr", "forgejo_delete_branch"}
+	pmAllowed := []string{"forgejo_comment", "forgejo_create_issue", "bash", "read_file", "write_file", "openspec_get_tasks", "openspec_propose", "openspec_archive_change"}
+	pmForbidden := []string{"git", "forgejo_create_pr", "forgejo_merge_pr", "forgejo_delete_branch"}
 
 	for _, name := range pmAllowed {
 		if _, ok := registry.Get(name); !ok {

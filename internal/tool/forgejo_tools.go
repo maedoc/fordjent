@@ -923,11 +923,12 @@ func (t *forgejoAddReactionTool) Execute(ctx context.Context, args json.RawMessa
 
 type forgejoMergePRTool struct {
 	adapter             *ForgejoAdapter
-	bypassHumanApproval bool // set true for reviewer/devops roles that can merge without external human
+	bypassHumanApproval bool   // set true for reviewer/devops roles that can merge without external human
+	repoDir             string // repo root for spec-driven checks
 }
 
-func NewMergePRTool(adapter *ForgejoAdapter, bypassHumanApproval bool) *forgejoMergePRTool {
-	return &forgejoMergePRTool{adapter: adapter, bypassHumanApproval: bypassHumanApproval}
+func NewMergePRTool(adapter *ForgejoAdapter, bypassHumanApproval bool, repoDir string) *forgejoMergePRTool {
+	return &forgejoMergePRTool{adapter: adapter, bypassHumanApproval: bypassHumanApproval, repoDir: repoDir}
 }
 
 func (t *forgejoMergePRTool) Name() string        { return "forgejo_merge_pr" }
@@ -987,6 +988,14 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	if !pr.Mergeable {
 		return "", fmt.Errorf("PR #%d is not mergeable yet — check status requirements", params.PRNumber)
+	}
+
+	// Spec-driven check: if the PR body references a spec, log it
+	if t.repoDir != "" {
+		specInfo := t.checkSpecRef(ctx, params.Repository, params.PRNumber)
+		if specInfo != "" {
+			slog.Info("merge_pr: spec-driven PR detected", "pr", params.PRNumber, "spec", specInfo)
+		}
 	}
 
 	// Human review gate: at least one non-bot APPROVED review required
@@ -1076,6 +1085,20 @@ func (t *forgejoMergePRTool) Execute(ctx context.Context, args json.RawMessage) 
 		break // other errors are not retryable
 	}
 	return "", fmt.Errorf("merge PR #%d after 3 attempts: %w", params.PRNumber, lastErr)
+}
+
+// checkSpecRef detects if a PR references an OpenSpec spec and returns the change name.
+func (t *forgejoMergePRTool) checkSpecRef(ctx context.Context, repo string, prNumber int) string {
+	pr, err := t.adapter.Client().GetPR(ctx, repo, prNumber)
+	if err != nil || pr == nil {
+		return ""
+	}
+	// Check PR body for spec references
+	ref := extractSpecChangeRef(pr.Body)
+	if ref != "" {
+		return ref
+	}
+	return ""
 }
 
 // --- forgejo_ping_parent ---
