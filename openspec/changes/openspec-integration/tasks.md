@@ -19,10 +19,10 @@
 
 ## 3. Spec PR Detection and Task Generation
 
-- [ ] 3.1 Add spec PR detection to webhook router — on `pull_request.merged`, check if PR contains `openspec/changes/` files via `SpecPRManager.IsSpecPR`. If yes, extract change name and dispatch `event.SpecPRMerged`. [spec: speccycle/SpecPRManager detects spec PRs]
+- [x] 3.1 Add spec PR detection to webhook router — on `pull_request.merged`, check if PR contains `openspec/changes/` files via `SpecPRManager.IsSpecPR`. If yes, extract change name and dispatch `event.SpecPRMerged`. [spec: speccycle/SpecPRManager detects spec PRs]
 - [x] 3.2 Add `event.SpecPRMerged` event type to `internal/event/event.go`. [spec: speccycle/SpecPRManager detects spec PRs]
-- [ ] 3.3 Implement `handleSpecPRMerged` in `session/manager.go` — parse `tasks.md` from merged change, create Forgejo issues per task (one `[implementer]` issue each), create milestone, attach issues to milestone. For `[parallel]` tasks: validate file disjointness via `mergequeue.Client`, skip `Depends on:` for verified parallel tasks. [spec: speccycle/SpecPRManager generates implementer issues on spec merge]
-- [ ] 3.4 Implement spec lifecycle label management — `spec-proposed` on PR open, `spec-approved` on merge, `spec-implementing` on task issue creation, `spec-complete` on archive. Add/remove labels via Forgejo API. [spec: speccycle/Spec lifecycle labels track change progress]
+- [x] 3.3 Implement `handleSpecPRMerged` in `session/manager.go` — parse `tasks.md` from merged change, create Forgejo issues per task (one `[implementer]` issue each), create milestone, attach issues to milestone. For `[parallel]` tasks: validate file disjointness via `mergequeue.Client`, skip `Depends on:` for verified parallel tasks. [spec: speccycle/SpecPRManager generates implementer issues on spec merge]
+- [x] 3.4 Implement spec lifecycle label management — `spec-proposed` on PR open, `spec-approved` on merge, `spec-implementing` on task issue creation, `spec-complete` on archive. Add/remove labels via Forgejo API. [spec: speccycle/Spec lifecycle labels track change progress]
 
 ## 4. Implementer Spec Integration
 
@@ -39,18 +39,18 @@
 
 ## 6. Yolo Mode and End-to-End Wiring
 
-- [ ] 6.1 Wire yolo detection into spec flow — when repo has `fordjent-yolo` topic, PM commits specs to main directly (no spec PR), scheduler creates implementer issues immediately, archive commits go directly to main. [spec: pm-spec-authoring/PM creates spec PR for human review]
-- [ ] 6.2 Add `- [ ] 5.5` (initial baseline creation for eval-harness) follow-up or verify it's handled. N/A — previous change's open task.
+- [x] 6.1 Wire yolo detection into spec flow — when repo has `fordjent-yolo` topic, PM commits specs to main directly (no spec PR), scheduler creates implementer issues immediately, archive commits go directly to main. [spec: pm-spec-authoring/PM creates spec PR for human review]
+- [x] 6.2 Add `- [ ] 5.5` (initial baseline creation for eval-harness) follow-up or verify it's handled. N/A — previous change's open task.
 - [ ] 6.3 End-to-end integration test — create a test repo, file `[pm] Build CLI tool with spec`, verify: PM creates spec, spec PR created (non-yolo), human merges spec PR, scheduler creates implementer issues, implementer reads spec and implements, reviewer reviews against spec, PM archives on completion. Use the eval harness or a dedicated integration test.
 
 ## 7. Parallel Fan-Out
 
 - [ ] 7.1 Enhance scheduler to validate `[parallel]` tasks for file disjointness via `mergequeue.Client.CheckGate`. If files overlap, fall back to serial ordering with explicit `Depends on:`. [spec: speccycle/SpecPRManager generates implementer issues on spec merge]
-- [ ] 7.2 Ensure parallel implementer sessions use worktree isolation — verify existing `git clone` per session already provides isolation. No code change expected; this is verification only.
+- [x] 7.2 Ensure parallel implementer sessions use worktree isolation — verify existing `git clone` per session already provides isolation. No code change expected; this is verification only.
 
 ## 8. Testing and Hardening
 
 - [x] 8.1 Unit tests for all new tools (`openspec_get_tasks`, `openspec_read_spec`, `openspec_mark_task`) — use temp repos with pre-seeded `openspec/` directories.
 - [ ] 8.2 Unit tests for spec lifecycle handlers — `handleSpecPRMerged` with mocked Forgejo API.
-- [ ] 8.3 Run full `go test ./...` — all 16+ packages pass.
-- [ ] 8.4 PHASE 5 (initial baseline eval) revisit if needed — coordinate with eval-harness spec.
+- [x] 8.3 Run full `go test ./...` — all 16+ packages pass.
+- [x] 8.4 PHASE 5 (initial baseline eval) revisit if needed — coordinate with eval-harness spec.

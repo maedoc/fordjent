@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/forgejo"
 )
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -792,24 +794,24 @@ func TestExtractChangeName(t *testing.T) {
 
 // mockPRFilesClient implements PRFilesLister for testing.
 type mockPRFilesClient struct {
-	files []PRFile
+	files []forgejo.PRFile
 	err   error
 }
 
-func (m *mockPRFilesClient) GetPRFiles(_ context.Context, _ string, _ int) ([]PRFile, error) {
+func (m *mockPRFilesClient) GetPRFiles(_ context.Context, _ string, _ int) ([]forgejo.PRFile, error) {
 	return m.files, m.err
 }
 
 func TestSpecPRManager_IsSpecPR(t *testing.T) {
 	tests := []struct {
 		label       string
-		files       []PRFile
+		files       []forgejo.PRFile
 		wantIsSpec  bool
 		wantName    string
 	}{
 		{
 			label: "spec proposal",
-			files: []PRFile{
+			files: []forgejo.PRFile{
 				{Filename: "cmd/main.go", Status: "modified"},
 				{Filename: "openspec/changes/user-auth/proposal.md", Status: "added"},
 			},
@@ -818,7 +820,7 @@ func TestSpecPRManager_IsSpecPR(t *testing.T) {
 		},
 		{
 			label: "multiple spec files same change",
-			files: []PRFile{
+			files: []forgejo.PRFile{
 				{Filename: "openspec/changes/user-auth/proposal.md", Status: "added"},
 				{Filename: "openspec/changes/user-auth/design.md", Status: "added"},
 				{Filename: "openspec/changes/user-auth/tasks.md", Status: "added"},
@@ -828,7 +830,7 @@ func TestSpecPRManager_IsSpecPR(t *testing.T) {
 		},
 		{
 			label: "no spec files",
-			files: []PRFile{
+			files: []forgejo.PRFile{
 				{Filename: "cmd/main.go", Status: "modified"},
 			},
 			wantIsSpec: false,
@@ -836,7 +838,7 @@ func TestSpecPRManager_IsSpecPR(t *testing.T) {
 		},
 		{
 			label: "empty PR",
-			files: []PRFile{},
+			files: []forgejo.PRFile{},
 			wantIsSpec: false,
 			wantName:   "",
 		},

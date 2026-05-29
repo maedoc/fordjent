@@ -7,7 +7,6 @@
 package speccycle
 
 import (
-	"context"
 	"time"
 )
 
@@ -36,7 +35,6 @@ type SpecPRInfo struct {
 // SpecManager handles file-level OpenSpec operations:
 // create, list, read, parse tasks, mark tasks complete, archive.
 type SpecManager struct {
-	// repoDir is the root of the application repository.
 	repoDir string
 }
 
@@ -71,31 +69,4 @@ func (sm *SpecManager) ArchiveChange(name string) error {
 	return archiveChange(sm.repoDir, name)
 }
 
-// PRFilesLister is the interface for listing files in a pull request.
-// This matches forgejo.Client.GetPRFiles signature for easy mocking.
-type PRFilesLister interface {
-	GetPRFiles(ctx context.Context, repo string, number int) ([]PRFile, error)
-}
-
-// PRFile represents a file in a pull request diff (matches forgejo.PRFile shape).
-type PRFile struct {
-	Filename  string `json:"filename"`
-	Status    string `json:"status"`
-	Additions int    `json:"additions"`
-	Deletions int    `json:"deletions"`
-}
-
-// SpecPRManager detects spec PRs via the Forgejo PR files API.
-type SpecPRManager struct {
-	filesClient PRFilesLister
-}
-
-// NewSpecPRManager creates a new SpecPRManager backed by a Forgejo client.
-func NewSpecPRManager(filesClient PRFilesLister) *SpecPRManager {
-	return &SpecPRManager{filesClient: filesClient}
-}
-
-// IsSpecPR checks whether a PR contains openspec/changes/ files.
-func (spm *SpecPRManager) IsSpecPR(ctx context.Context, repo string, prNumber int) (*SpecPRInfo, error) {
-	return isSpecPR(ctx, spm.filesClient, repo, prNumber)
-}
+// PRFilesLister interface — see prmanager.go for SpecPRManager.

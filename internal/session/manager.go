@@ -15,6 +15,7 @@ import (
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/sandbox"
+	"github.com/fordjent/fordjent/internal/speccycle"
 	"github.com/fordjent/fordjent/internal/scheduler"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
@@ -90,6 +91,7 @@ type Manager struct {
 	lc              *lifecycle.Lifecycle
 	mqClient        *mergequeue.Client
 	scheduler       *scheduler.Scheduler
+	specPRManager   *speccycle.SpecPRManager
 	costTracker     *cost.Tracker
 	sandboxReporter *SandboxReporter
 	labelBoot       sync.Map // repo → bool, tracks which repos have had labels ensured
@@ -193,6 +195,10 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	m.mqClient = mergequeue.NewClient(forgejoAdapter)
 	m.scheduler = scheduler.New(forgejoAdapter)
 	m.scheduler.SetForgejoClient(adminClient)
+
+	// Wire spec PR manager for detecting spec PR merges
+	m.specPRManager = speccycle.NewSpecPRManager(adminClient)
+
 
 	// Wire auto-registrar if enabled
 	if cfg.AutoRegister.Enabled {
@@ -358,8 +364,12 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		cancel()
 	}
 
-	// If a PR was merged, notify the scheduler to unblock dependent issues
+	// If a PR was merged, process dependent unblock + spec PR detection
 	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
+		// Check if this is a spec PR and generate implementer issues if so
+		go m.handleSpecPRMerged(ctx, evt)
+
+		// Notify scheduler to unblock dependent issues
 		go func() {
 			schedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -523,6 +533,12 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			}
 			return
 		}
+	}
+
+	// Spec lifecycle labels: if this is a PR with spec-proposed label and it's now merged,
+	// transition from spec-proposed to spec-approved.
+	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
+		go m.handleSpecLifecycleLabels(ctx, evt)
 	}
 
 	// FSM state detection: derive issue state from labels and react.
@@ -1771,4 +1787,187 @@ func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) bo
 	m.handleEvent(ctx, openedEvt)
 
 	return true
+}
+
+// handleSpecPRMerged checks if a merged PR is a spec PR and generates
+// implementer issues from the tasks.md file.
+func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
+	schedCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	info, err := m.specPRManager.IsSpecPR(schedCtx, evt.Repository, evt.PRNumber)
+	if err != nil {
+		slog.Warn("spec PR: failed to check PR files",
+			"error", err, "repo", evt.Repository, "pr", evt.PRNumber)
+		return
+	}
+	if !info.IsSpecPR {
+		return // not a spec PR
+	}
+
+	slog.Info("spec PR merged: generating implementer issues",
+		"change", info.ChangeName, "repo", evt.Repository, "pr", evt.PRNumber)
+
+	// Find the repo directory for this session
+	workDir := m.cfg.Agent.WorkDir
+	if workDir == "" {
+		slog.Warn("spec PR: no workdir configured, cannot find repo")
+		return
+	}
+
+	// Repo dir is workDir/<owner>/<repo>/issues/<N>/repo/
+	// We need to find the repo dir by scanning known session work dirs.
+	// Alternative: construct the path from the event's session key pattern.
+	repoDir := filepath.Join(workDir, evt.Repository, "repo")
+
+	// Parse tasks from the merged spec
+	sm := speccycle.NewSpecManager(repoDir)
+	tasks, err := sm.ParseTasks(info.ChangeName)
+	if err != nil {
+		slog.Warn("spec PR: failed to parse tasks",
+			"error", err, "change", info.ChangeName)
+		return
+	}
+	if len(tasks) == 0 {
+		slog.Info("spec PR: no tasks found in tasks.md, skipping issue generation",
+			"change", info.ChangeName)
+		return
+	}
+
+	// Create a milestone for the change
+	milestoneTitle := fmt.Sprintf("#%d: %s", evt.PRNumber, info.ChangeName)
+	ms, err := m.forgejoClient.CreateMilestone(schedCtx, evt.Repository, milestoneTitle, info.ChangeName)
+	if err != nil {
+		slog.Warn("spec PR: failed to create milestone",
+			"error", err, "change", info.ChangeName)
+		// Non-fatal: continue without milestone
+	}
+
+	// Group tasks: parallel tasks and serial tasks
+	var parallelTasks []speccycle.Task
+	var serialTasks []speccycle.Task
+	var lastSerialIssueNum int
+
+	for _, task := range tasks {
+		if task.Done {
+			continue // skip already-completed tasks
+		}
+		if task.Parallel {
+			parallelTasks = append(parallelTasks, task)
+		} else {
+			serialTasks = append(serialTasks, task)
+		}
+	}
+
+	// Create issues for serial tasks (each depends on the previous)
+	for _, task := range serialTasks {
+		issueBody := fmt.Sprintf(
+			"Spec: %s/%s\nTask: %d - %s\nDepends on: #%d",
+			info.ChangeName, task.Description,
+			task.Index, task.Description,
+			evt.PRNumber,
+		)
+		if lastSerialIssueNum > 0 {
+			issueBody += fmt.Sprintf(", #%d", lastSerialIssueNum)
+		}
+
+		issueNum, err := m.createSpecIssue(schedCtx, evt.Repository, info.ChangeName, task, issueBody, ms)
+		if err != nil {
+			slog.Warn("spec PR: failed to create issue",
+				"error", err, "task", task.Index)
+			continue
+		}
+		lastSerialIssueNum = issueNum
+	}
+
+	// Create issues for parallel tasks (no inter-dependency, but may merge-queue validate)
+	for _, task := range parallelTasks {
+		issueBody := fmt.Sprintf(
+			"Spec: %s/%s\nTask: %d - %s\n[parallel]\nDepends on: #%d",
+			info.ChangeName, task.Description,
+			task.Index, task.Description,
+			evt.PRNumber,
+		)
+
+		// If there are serial tasks, parallel tasks also depend on the last serial task
+		if lastSerialIssueNum > 0 {
+			issueBody += fmt.Sprintf(", #%d", lastSerialIssueNum)
+		}
+
+		_, err := m.createSpecIssue(schedCtx, evt.Repository, info.ChangeName, task, issueBody, ms)
+		if err != nil {
+			slog.Warn("spec PR: failed to create parallel issue",
+				"error", err, "task", task.Index)
+			continue
+		}
+	}
+
+	// Post summary comment on the PR
+	summary := fmt.Sprintf(
+		"✅ Spec **%s** approved and merged. Created %d implementer issue(s) from tasks.md.\n\n",
+		info.ChangeName, len(serialTasks)+len(parallelTasks),
+	)
+	for _, t := range serialTasks {
+		summary += fmt.Sprintf("- [ ] %s\n", t.Description)
+	}
+	for _, t := range parallelTasks {
+		summary += fmt.Sprintf("- [ ] %s [parallel]\n", t.Description)
+	}
+	summary += "\n<!-- ford -->"
+	_ = m.forgejoClient.PostIssueComment(schedCtx, evt.Repository, evt.PRNumber, summary)
+
+	slog.Info("spec PR: implementer issues created",
+		"change", info.ChangeName,
+		"serial", len(serialTasks),
+		"parallel", len(parallelTasks),
+	)
+}
+
+// createSpecIssue creates a single implementer issue for a spec task.
+// Returns the issue number.
+func (m *Manager) createSpecIssue(ctx context.Context, repo, changeName string, task speccycle.Task, body string, ms *forgejo.Milestone) (int, error) {
+	title := fmt.Sprintf("[implementer] %s: %s", changeName, task.Description)
+
+	issue, err := m.forgejoClient.CreateIssue(ctx, repo, title, body)
+	if err != nil {
+		return 0, fmt.Errorf("create issue for task %d: %w", task.Index, err)
+	}
+
+	// Attach to milestone if created
+	if ms != nil {
+		_ = m.forgejoClient.SetIssueMilestone(ctx, repo, issue.Number, ms.ID)
+	}
+
+	return issue.Number, nil
+}
+
+// handleSpecLifecycleLabels transitions spec lifecycle labels when a spec PR is merged.
+// spec-proposed → spec-approved on merge.
+func (m *Manager) handleSpecLifecycleLabels(ctx context.Context, evt *event.Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Check if the PR has the spec-proposed label
+	pr, err := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+	if err != nil {
+		slog.Warn("spec labels: failed to get PR",
+			"error", err, "repo", evt.Repository, "pr", evt.PRNumber)
+		return
+	}
+
+	// Check the PR head branch name — spec PRs use spec/<name> branch
+	// This is more reliable than label detection since Forgejo's PR API
+	// doesn't always return labels on the PullRequest model.
+	if !strings.HasPrefix(pr.Head.Ref, "spec/") {
+		slog.Debug("spec labels: PR is not on a spec/ branch",
+			"branch", pr.Head.Ref, "repo", evt.Repository, "pr", evt.PRNumber)
+		return // not a spec PR
+	}
+
+	// Remove spec-proposed, add spec-approved
+	_ = m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.PRNumber, "spec-proposed")
+	_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.PRNumber, []string{"spec-approved"})
+
+	slog.Info("spec labels: transitioned spec-proposed → spec-approved",
+		"repo", evt.Repository, "pr", evt.PRNumber)
 }
