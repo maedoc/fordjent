@@ -1792,7 +1792,7 @@ func (m *Manager) handleRoleAssignment(ctx context.Context, evt *event.Event) bo
 // handleSpecPRMerged checks if a merged PR is a spec PR and generates
 // implementer issues from the tasks.md file.
 func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
-	schedCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	schedCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	info, err := m.specPRManager.IsSpecPR(schedCtx, evt.Repository, evt.PRNumber)
@@ -1808,21 +1808,17 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 	slog.Info("spec PR merged: generating implementer issues",
 		"change", info.ChangeName, "repo", evt.Repository, "pr", evt.PRNumber)
 
-	// Find the repo directory for this session
-	workDir := m.cfg.Agent.WorkDir
-	if workDir == "" {
-		slog.Warn("spec PR: no workdir configured, cannot find repo")
+	// Read tasks.md from the merged repo via Forgejo API (no clone needed).
+	tasksPath := fmt.Sprintf("openspec/changes/%s/tasks.md", info.ChangeName)
+	file, err := m.forgejoClient.GetFile(schedCtx, evt.Repository, "main", tasksPath)
+	if err != nil {
+		slog.Warn("spec PR: failed to read tasks.md from repo",
+			"error", err, "change", info.ChangeName, "path", tasksPath)
 		return
 	}
 
-	// Repo dir is workDir/<owner>/<repo>/issues/<N>/repo/
-	// We need to find the repo dir by scanning known session work dirs.
-	// Alternative: construct the path from the event's session key pattern.
-	repoDir := filepath.Join(workDir, evt.Repository, "repo")
-
-	// Parse tasks from the merged spec
-	sm := speccycle.NewSpecManager(repoDir)
-	tasks, err := sm.ParseTasks(info.ChangeName)
+	content := file.DecodedContent()
+	tasks, err := speccycle.ParseTasksContent(content)
 	if err != nil {
 		slog.Warn("spec PR: failed to parse tasks",
 			"error", err, "change", info.ChangeName)
@@ -1944,11 +1940,11 @@ func (m *Manager) createSpecIssue(ctx context.Context, repo, changeName string, 
 // handleSpecLifecycleLabels transitions spec lifecycle labels when a spec PR is merged.
 // spec-proposed → spec-approved on merge.
 func (m *Manager) handleSpecLifecycleLabels(ctx context.Context, evt *event.Event) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	labelCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Check if the PR has the spec-proposed label
-	pr, err := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+	pr, err := m.forgejoClient.GetPR(labelCtx, evt.Repository, evt.PRNumber)
 	if err != nil {
 		slog.Warn("spec labels: failed to get PR",
 			"error", err, "repo", evt.Repository, "pr", evt.PRNumber)

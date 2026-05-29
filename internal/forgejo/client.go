@@ -1000,6 +1000,18 @@ type FileContent struct {
 	SHA      string `json:"sha"`
 }
 
+// DecodedContent returns the file content decoded from base64.
+func (fc *FileContent) DecodedContent() string {
+	if fc.Encoding != "base64" {
+		return fc.Content
+	}
+	decoded, err := base64.StdEncoding.DecodeString(fc.Content)
+	if err != nil {
+		return ""
+	}
+	return string(decoded)
+}
+
 // ListDir lists files in a repository directory.
 func (c *Client) ListDir(ctx context.Context, repo, ref, dirPath string) ([]FileContent, error) {
 	if ref == "" {

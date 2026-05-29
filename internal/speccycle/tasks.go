@@ -11,20 +11,18 @@ import (
 // taskLineRegex matches checkbox lines: "- [ ]" or "- [x]" with optional [parallel] tag.
 var taskLineRegex = regexp.MustCompile(`^\s*-\s*\[([ xX])\]\s*(.*?)(\s*\[parallel\])?\s*$`)
 
-func parseTasks(repoDir, name string) ([]Task, error) {
-	path := tasksPath(repoDir, name)
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("open tasks %s: %w", path, err)
-	}
-	defer f.Close()
+// ParseTasksContent parses tasks from a markdown content string.
+// This is the API-friendly version — no filesystem required.
+func ParseTasksContent(content string) ([]Task, error) {
+	return parseTasksContent(content)
+}
+
+// parseTasksContent is the shared implementation for parsing tasks from a string.
+func parseTasksContent(content string) ([]Task, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	lineNum := 0
 
 	var tasks []Task
-	scanner := bufio.NewScanner(f)
-	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
@@ -50,10 +48,35 @@ func parseTasks(repoDir, name string) ([]Task, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return tasks, fmt.Errorf("scan tasks %s: %w", path, err)
+		return tasks, fmt.Errorf("scan tasks content: %w", err)
 	}
 
 	return tasks, nil
+}
+
+// parseTasks reads and parses tasks.md from a change directory.
+func parseTasks(repoDir, name string) ([]Task, error) {
+	path := tasksPath(repoDir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open tasks %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var buf strings.Builder
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		buf.WriteString(scanner.Text())
+		buf.WriteString("\n")
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read tasks %s: %w", path, err)
+	}
+
+	return parseTasksContent(buf.String())
 }
 
 func markTaskComplete(repoDir, name string, index int) error {
