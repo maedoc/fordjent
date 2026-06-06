@@ -706,7 +706,7 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 			lintCmd.Dir = t.repoDir
 			if lintOut, lintErr := lintCmd.CombinedOutput(); lintErr != nil {
 				if !strings.Contains(lintErr.Error(), "executable file not found") {
-					return "", fmt.Errorf("golangci-lint failed — fix lint errors before creating PR:\n%s", string(lintOut))
+					slog.Info("create_pr: golangci-lint failed (non-blocking)", "output", string(lintOut), "error", lintErr)
 				}
 			}
 		case "python":

@@ -33,6 +33,8 @@ In non-yolo mode, the PM SHALL create a pull request from the spec branch to `ma
 - **AND** the PM posts a comment on the parent issue: "Spec PR #N ready for review"
 - **AND** the parent issue is not labeled `blocked` (human review gate replaces blocking)
 
+> **Event routing note**: The `event.SpecPRMerged` type exists but is **never emitted**. The webhook router emits `event.PullRequestMerged` for all merged PRs, and `handleSpecPRMerged` acts as a sidecar — it checks `SpecPRManager.IsSpecPR()` and returns early for non-spec PRs. This sidesteps the need for a separate event dispatch path.
+
 #### Scenario: Yolo mode skips spec PR
 - **WHEN** the repo has the `fordjent-yolo` topic
 - **AND** the PM has written spec files

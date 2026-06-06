@@ -26,6 +26,9 @@ func NewSpecPRManager(filesClient PRFilesLister) *SpecPRManager {
 }
 
 // IsSpecPR checks whether a PR contains openspec/changes/ files.
+// When a PR contains files from multiple changes, only one change name is returned
+// (arbitrary, map iteration order). The PM convention is one change per PR,
+// so multi-change PRs are not supported.
 func (spm *SpecPRManager) IsSpecPR(ctx context.Context, repo string, prNumber int) (*SpecPRInfo, error) {
 	return isSpecPR(ctx, spm.filesClient, repo, prNumber)
 }

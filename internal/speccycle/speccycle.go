@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func createChange(repoDir, name string) error {
@@ -55,8 +57,13 @@ func listChanges(repoDir string) ([]Change, error) {
 		if err != nil {
 			continue
 		}
+
+		// Read schema from .openspec.yaml if present
+		schema := readChangeSchema(filepath.Join(changesDir, entry.Name()))
+
 		changes = append(changes, Change{
 			Name:         entry.Name(),
+			Schema:       schema,
 			LastModified: info.ModTime(),
 		})
 	}
@@ -87,4 +94,21 @@ func archiveDir(repoDir string) string {
 func archivePathFor(repoDir, name string) string {
 	date := time.Now().UTC().Format("2006-01-02")
 	return filepath.Join(archiveDir(repoDir), fmt.Sprintf("%s-%s", date, name))
+}
+
+// readChangeSchema reads the schema field from a change's .openspec.yaml.
+// Returns empty string if the file is missing or unparseable.
+func readChangeSchema(changeDir string) string {
+	path := filepath.Join(changeDir, ".openspec.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "" // missing or unreadable
+	}
+	var doc struct {
+		Schema string `yaml:"schema"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "" // unparseable
+	}
+	return doc.Schema
 }

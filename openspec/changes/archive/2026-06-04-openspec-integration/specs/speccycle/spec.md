@@ -122,10 +122,12 @@ When a spec PR is merged, `SpecPRManager` SHALL parse `tasks.md` from the merged
 - **AND** all issues are attached to the correct milestone
 
 #### Scenario: Parallel tasks conflict at file level
-- **WHEN** two `[parallel]` tasks would touch the same file
-- **AND** the merge queue reports file overlap
-- **THEN** the scheduler falls back to serial ordering
-- **AND** the second task gets `Depends on: #<first-task-issue>`
+- **WHEN** two `[parallel]` tasks mention the same directory or file path in their descriptions (e.g., both reference `pkg/auth/`)
+- **AND** the scheduler's lightweight heuristic detects the overlap
+- **THEN** the conflicting task is downgraded from parallel to serial
+- **AND** the downgraded task gets `Depends on: #<first-task-issue>`
+
+> **Implementation note**: `mergequeue.Client.CheckGate()` requires branches to compare against base, but implementer branches don't exist at issue-creation time. Instead, `validateParallelTasks()` extracts path-like tokens from task descriptions and checks for overlapping prefixes. Full file-disjointness protection is still enforced by the merge queue at PR creation time.
 
 #### Scenario: Spec PR merged with no tasks.md
 - **WHEN** a spec PR is merged but `tasks.md` is empty or missing
@@ -137,10 +139,12 @@ When a spec PR is merged, `SpecPRManager` SHALL parse `tasks.md` from the merged
 The system SHALL use Forgejo labels to track change lifecycle: `spec-proposed` (spec PR open), `spec-approved` (spec merged to main), `spec-implementing` (implementation in progress), `spec-complete` (all tasks done and archived). Labels SHALL be applied automatically by the scheduler and PM agent.
 
 #### Scenario: Full lifecycle label transitions
-- **WHEN** a spec PR is opened → `spec-proposed` label added
-- **AND** the spec PR is merged → `spec-proposed` removed, `spec-approved` added
-- **AND** implementer issues are created → `spec-implementing` added
-- **AND** all tasks complete and change archived → `spec-implementing` removed, `spec-complete` added
+- **WHEN** a spec PR is opened → `spec-proposed` label added (by PM via `forgejo_create_pr`)
+- **AND** the spec PR is merged → `spec-proposed` removed, `spec-approved` added (automated via `handleSpecLifecycleLabels`)
+- **AND** implementer issues are created → `spec-implementing` should be added
+- **AND** all tasks complete and change archived → `spec-implementing` removed, `spec-complete` should be added
+
+> **Implementation note**: `spec-proposed` → `spec-approved` is automated. `spec-implementing` and `spec-complete` are **prompt-level only** — the PM is instructed to add these labels but there is no automated hook enforcing these transitions.
 
 #### Scenario: Spec PR closed without merge
 - **WHEN** a spec PR is closed without merging

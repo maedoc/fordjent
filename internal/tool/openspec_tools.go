@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -15,10 +16,12 @@ import (
 
 // ─── openspec_propose ────────────────────────────────────────────────
 
-type openSpecProposeTool struct{}
+type openSpecProposeTool struct {
+	sessionInfo SessionInfo
+}
 
-func NewOpenSpecProposeTool() *openSpecProposeTool {
-	return &openSpecProposeTool{}
+func NewOpenSpecProposeTool(info SessionInfo) *openSpecProposeTool {
+	return &openSpecProposeTool{sessionInfo: info}
 }
 
 func (t *openSpecProposeTool) Name() string { return "openspec_propose" }
@@ -63,6 +66,16 @@ func (t *openSpecProposeTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	if strings.Contains(params.ChangeName, "/") || strings.Contains(params.ChangeName, "\\") {
 		return "", fmt.Errorf("change_name must not contain path separators")
+	}
+
+	// Auto-create the change directory so the PM can immediately write files.
+	repoDir := t.sessionInfo.RepoDir()
+	if repoDir == "" {
+		return "", fmt.Errorf("repo directory not available")
+	}
+	sm := speccycle.NewSpecManager(repoDir)
+	if err := sm.CreateChange(params.ChangeName); err != nil {
+		return "", fmt.Errorf("create change %q: %w", params.ChangeName, err)
 	}
 
 	var sb strings.Builder
@@ -247,6 +260,73 @@ func (t *openSpecReadSpecTool) Execute(ctx context.Context, args json.RawMessage
 	return content, nil
 }
 
+// ─── openspec_read_change ─────────────────────────────────────────────
+
+type openSpecReadChangeTool struct {
+	sessionInfo SessionInfo
+}
+
+func NewOpenSpecReadChangeTool(info SessionInfo) *openSpecReadChangeTool {
+	return &openSpecReadChangeTool{sessionInfo: info}
+}
+
+func (t *openSpecReadChangeTool) Name() string { return "openspec_read_change" }
+
+func (t *openSpecReadChangeTool) Description() string {
+	return "Read a file within an OpenSpec change directory (proposal.md, design.md, specs, tasks.md). Use this to read spec artifacts that you or others have written."
+}
+
+func (t *openSpecReadChangeTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"change_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Name of the OpenSpec change (e.g., 'user-auth')",
+			},
+			"file_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Relative path within the change directory (e.g., 'proposal.md', 'design.md', 'specs/auth-core/spec.md')",
+			},
+		},
+		"required": []string{"repository", "change_name", "file_path"},
+	}
+}
+
+func (t *openSpecReadChangeTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		ChangeName string `json:"change_name"`
+		FilePath   string `json:"file_path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	if params.ChangeName == "" {
+		return "", fmt.Errorf("change_name is required")
+	}
+	if params.FilePath == "" {
+		return "", fmt.Errorf("file_path is required")
+	}
+
+	repoDir := t.sessionInfo.RepoDir()
+	if repoDir == "" {
+		return "", fmt.Errorf("repo directory not available")
+	}
+
+	content, err := speccycle.ReadChangeFile(repoDir, params.ChangeName, params.FilePath)
+	if err != nil {
+		return "", fmt.Errorf("read change file: %w", err)
+	}
+
+	return content, nil
+}
+
 // ─── openspec_mark_task ──────────────────────────────────────────────
 
 type openSpecMarkTaskTool struct {
@@ -312,6 +392,13 @@ func (t *openSpecMarkTaskTool) Execute(ctx context.Context, args json.RawMessage
 		return "", fmt.Errorf("repo directory not available")
 	}
 
+	// Save original content for rollback if commit fails
+	tasksFile := filepath.Join(repoDir, "openspec", "changes", params.ChangeName, "tasks.md")
+	var originalContent []byte
+	if data, err := os.ReadFile(tasksFile); err == nil {
+		originalContent = data
+	}
+
 	// Mark the task as complete in tasks.md
 	sm := speccycle.NewSpecManager(repoDir)
 	if err := sm.MarkTaskComplete(params.ChangeName, params.TaskIndex); err != nil {
@@ -323,11 +410,13 @@ func (t *openSpecMarkTaskTool) Execute(ctx context.Context, args json.RawMessage
 
 	if err := t.gitAdd(ctx, repoDir, tasksRelPath); err != nil {
 		slog.Warn("openspec_mark_task: git add failed", "error", err)
-		return fmt.Sprintf("Task %d marked complete in tasks.md, but git commit+push failed: %s", params.TaskIndex, err), nil
+		t.rollbackTasksFile(tasksFile, originalContent)
+		return fmt.Sprintf("Task %d marked complete in tasks.md, but git add failed: %s", params.TaskIndex, err), nil
 	}
 
 	if err := t.gitCommit(ctx, repoDir, fmt.Sprintf("task: mark task %d complete for %s", params.TaskIndex, params.ChangeName)); err != nil {
 		slog.Warn("openspec_mark_task: git commit failed", "error", err)
+		t.rollbackTasksFile(tasksFile, originalContent)
 		return fmt.Sprintf("Task %d marked complete in tasks.md, but git commit failed: %s", params.TaskIndex, err), nil
 	}
 
@@ -364,6 +453,18 @@ func (t *openSpecMarkTaskTool) gitPush(ctx context.Context, repoDir string) erro
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// rollbackTasksFile restores the original tasks.md content after a commit failure.
+func (t *openSpecMarkTaskTool) rollbackTasksFile(tasksFile string, originalContent []byte) {
+	if len(originalContent) == 0 {
+		return
+	}
+	if err := os.WriteFile(tasksFile, originalContent, 0644); err != nil {
+		slog.Warn("openspec_mark_task: rollback failed, could not restore original tasks.md", "error", err)
+		return
+	}
+	slog.Warn("openspec_mark_task: rolled back tasks.md after commit failure")
 }
 
 // ─── openspec_archive_change ─────────────────────────────────────────
@@ -446,7 +547,7 @@ func (t *openSpecArchiveChangeTool) Execute(ctx context.Context, args json.RawMe
 }
 
 func (t *openSpecArchiveChangeTool) gitAddAll(ctx context.Context, repoDir string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "add", "-A")
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "add", "openspec/")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
@@ -475,7 +576,7 @@ func (t *openSpecArchiveChangeTool) gitPush(ctx context.Context, repoDir string)
 // extractSpecChangeRef extracts an OpenSpec change name from an issue or PR body.
 // Looks for patterns like "Spec: openspec/changes/<name>/..." or "Change: <name>"
 // stored in the body by the scheduler when creating implementer issues.
-var specChangeRefRegex = regexp.MustCompile(`(?:Spec|spec|Change|change)\s*:\s*(?:openspec/changes/)?([a-zA-Z0-9_-]+)`)
+var specChangeRefRegex = regexp.MustCompile(`(?:^|\n)Spec:\s*(?:openspec/changes/)?([a-z][a-z0-9-]+)`)
 
 func extractSpecChangeRef(body string) string {
 	matches := specChangeRefRegex.FindStringSubmatch(body)

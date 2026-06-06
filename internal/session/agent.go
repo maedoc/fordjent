@@ -326,6 +326,7 @@ Update the issue comment with your reflection, then continue working.`,
 
 		// Execute tool calls
 		var firstToolErr error
+		var lastToolName, lastToolOutput string
 		consecutiveBlocks := 0
 		for _, tc := range result.Response.ToolCalls {
 			// Analysis mode: block implementation tools
@@ -425,7 +426,7 @@ Update the issue comment with your reflection, then continue working.`,
 			}
 
 			res, terr := a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
-			a.executor.RecordToolCall(tc.Function.Name)
+			a.executor.RecordToolCall(tc.Function.Name, res)
 			if terr != nil {
 				if firstToolErr == nil {
 					firstToolErr = terr
@@ -448,6 +449,9 @@ Update the issue comment with your reflection, then continue working.`,
 			if a.cfg.Memory.Enabled {
 				a.mem.RecordToolCall(ctx, evt, tc.Function.Name, tc.Function.Arguments, res)
 			}
+
+			lastToolName = tc.Function.Name
+			lastToolOutput = res
 
 			messages = append(messages, provider.Message{
 				Role:       "tool",
@@ -487,7 +491,7 @@ Update the issue comment with your reflection, then continue working.`,
 		}
 
 		// Apply steering messages (turn budget warnings, inactivity detection)
-		messages = a.executor.ApplySteering(messages)
+		messages = a.executor.ApplySteering(messages, lastToolName, lastToolOutput)
 
 		// Record turn progress in lifecycle DB for diagnostics (after tool execution)
 		if a.lc != nil {
@@ -766,7 +770,11 @@ If this PR is spec-driven (check PR body for 'Spec:' references, or call openspe
 4. If requirements are not met: request changes with specific spec references.
 5. If implementation diverges from spec (intentional improvement): flag as divergence, not failure.
 6. Limit review rounds to 3. After 3 rounds with unresolved issues, add 'needs-human-review' label and stop.
-7. If all requirements met and verification passes: approve/merge.`
+7. If all requirements met and verification passes: approve/merge.
+
+**Merge Policy Check**: Before calling forgejo_merge_pr, check the repo's merge policy:
+- If the repo has a no-auto-merge policy (fordjent-yolo topic not present): do NOT merge, post review as comment.
+- If the repo requires human review: do NOT merge unless the PR has an 'approved' label from a human reviewer.`
 	case "devops":
 		modeInstructions += `
 
@@ -813,6 +821,9 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 - DO NOT use git status/log/diff more than once per turn.
 - DO NOT explore the repo structure more than needed.
 - DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.
+- DO NOT think step-by-step or plan before acting — read the file once, make your change, test, commit.
+- IMPORTANT: write_file REPLACES the entire file. You MUST include all existing unchanged lines plus your changes. If you only write the new lines, the old content is deleted.
+- ALWAYS run go test (or language-appropriate test) BEFORE creating a PR.
 
 ## Spec-Driven Implementation
 If this issue references a spec change (check issue body for 'Spec:' references or milestone context):
@@ -1341,13 +1352,14 @@ func buildRoleRegistry(
 		pmWFT.SetAllowedPrefixes([]string{"openspec/changes/", "openspec/specs/"})
 		registry.Register(pmWFT)
 		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
-		registry.Register(tool.NewOpenSpecProposeTool())
+		registry.Register(tool.NewOpenSpecProposeTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecArchiveChangeTool(sessionInfo, agentCfg))
 		// PM cannot create code PRs or merge — spec PRs are created via forgejo_create_pr
 	case "reviewer":
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, true, sessionInfo.RepoDir()))
 		registry.Register(tool.NewOpenSpecReadSpecTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
+		registry.Register(tool.NewOpenSpecReadChangeTool(sessionInfo))
 		// Reviewer can read specs, comment, and merge — but not write code
 	case "devops", "tester", "implementer":
 		fallthrough
@@ -1367,6 +1379,7 @@ func buildRoleRegistry(
 		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecReadSpecTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecMarkTaskTool(sessionInfo, agentCfg))
+		registry.Register(tool.NewOpenSpecReadChangeTool(sessionInfo))
 		// Admin tools for implementer role
 		registry.Register(tool.NewDeleteBranchTool(forgejoAdapter))
 		registry.Register(tool.NewCreateHookTool(forgejoAdapter))

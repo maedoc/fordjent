@@ -79,6 +79,9 @@ func parseTasks(repoDir, name string) ([]Task, error) {
 	return parseTasksContent(buf.String())
 }
 
+// NOTE: MarkTaskComplete is not safe for concurrent writes to the same tasks.md.
+// In practice, this is mitigated by branch isolation — each agent works on its own
+// branch with its own working copy. This is an accepted limitation.
 func markTaskComplete(repoDir, name string, index int) error {
 	if index < 1 {
 		return fmt.Errorf("task index must be >= 1, got %d", index)
@@ -100,7 +103,7 @@ func markTaskComplete(repoDir, name string, index int) error {
 			taskNum++
 			if taskNum == index {
 				// Replace - [ ] with - [x]
-				replaced := taskLineRegex.ReplaceAllString(line, "- [x] $2$3")
+				replaced := strings.Replace(line, "- [ ]", "- [x]", 1)
 				lines = append(lines, replaced)
 				continue
 			}

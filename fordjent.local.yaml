@@ -1,36 +1,41 @@
 server:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8080
-
 webhook:
-  secret: "REDACTED"
-
+  secret: local-webhook-secret-12345
 forgejo:
-  url: "http://forgejo-local:3000"
-  token: "${FORGEJO_TOKEN}"
-  admin_token: "${FORGEJO_ADMIN_TOKEN}"
+  url: http://forgejo-local:3000
+  token: ${FORGEJO_TOKEN}
+  admin_token: ${FORGEJO_ADMIN_TOKEN}
   rate_limit: 60
-
+  role_tokens:
+    pm: ${ROLE_TOKEN_PM}
+    implementer: ${ROLE_TOKEN_IMPLEMENTER}
+    devops: ${ROLE_TOKEN_DEVOPS}
+    reviewer: ${ROLE_TOKEN_REVIEWER}
+    tester: ${ROLE_TOKEN_TESTER}
+  role_users:
+    pm: djent-pm
+    implementer: djent-dev
+    devops: djent-dev
+    reviewer: djent-qa
+    tester: djent-qa
 agent:
   max_sessions: 25
-  idle_timeout: "4h"
-  workdir: "/var/lib/fordjent/work"
+  idle_timeout: 4h
+  workdir: /var/lib/fordjent/work
   max_turns: 75
   max_turns_pm: 15
   max_turns_implementer: 50
   max_turns_reviewer: 20
-  # Role-specific LLM providers.
-  # IMPORTANT: implementer should use a model with strong tool-calling action bias.
-  # qwen models (qwen3.6, qwen2.5) tend to loop on exploration — prefer GLM or devstral for implementer.
-  # PM and reviewer can use either model — they only need read/comment tools.
   role_providers:
-    pm: "wafer-glm"
-    reviewer: "wafer-glm"
-    implementer: "wafer-glm"  # Changed from wafer-qwen — see model guidance above
-    tester: "wafer-qwen"
-    devops: "wafer-qwen"
-  fallback_provider: "wafer-qwen"
-  commit_prefix: "[agent-automation]"
+    pm: local-gpu
+    reviewer: local-gpu
+    implementer: local-gpu
+    tester: local-gpu
+    devops: local-gpu
+  fallback_provider: local-gpu
+  commit_prefix: '[agent-automation]'
   context_window: 131072
   compaction_threshold: 0.85
   compaction_keep_turns: 8
@@ -42,79 +47,80 @@ agent:
   enable_auto_collaborator: true
   enable_auto_retry: true
   max_session_retries: 2
-  auto_retry_delay: "5m"
+  auto_retry_delay: 5m
   require_role_tag: true
-  session_timeout: "60m"
-  git_name: "Fordjent Dev Agent"
-  git_email: "fordjent-dev@forgejo.local"
-
+  session_timeout: 60m
+  git_name: Fordjent Dev Agent
+  git_email: fordjent-dev@forgejo.local
 budget:
   enabled: true
-  max_session_cost: 2.00
-  max_monthly_cost: 50.00
-
+  max_session_cost: 2.0
+  max_monthly_cost: 50.0
 sandbox:
-  enabled: true
+  enabled: false
   backend: bwrap
   tmpfs_size_mb: 64
   keep_profiles_on_failure: true
   violation_comment_threshold: 3
   allowed_write_dirs: []
-
 providers:
-  - name: "wafer-qwen"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "${WAFER_API_KEY}"
-    model: "Qwen3.5-397B-A17B"
-    max_tokens: 32768
-    request_timeout: "90s"
-    max_retries: 5
-    retry_base_delay: "3s"
-    retry_max_delay: "60s"
-    max_concurrent_llm_calls: 3
-    cost_per_1m_input_tokens: 0
-    cost_per_1m_output_tokens: 0
-  - name: "wafer-glm"
-    api_base: "https://pass.wafer.ai/v1"
-    api_key: "${WAFER_API_KEY}"
-    model: "GLM-5.1"
-    max_tokens: 32768
-    request_timeout: "120s"
-    max_retries: 5
-    retry_base_delay: "3s"
-    retry_max_delay: "60s"
-    max_concurrent_llm_calls: 3
-    cost_per_1m_input_tokens: 0
-    cost_per_1m_output_tokens: 0
-
+- name: local-gpu
+  api_base: http://172.18.0.1:8181/v1
+  model: gemma-4-12b-it-UD-Q5_K_XL.gguf
+  max_tokens: 16384
+  request_timeout: 60s
+  max_retries: 3
+  retry_base_delay: 2s
+  retry_max_delay: 30s
+  cost_per_1m_input_tokens: 0
+  cost_per_1m_output_tokens: 0
+- name: wafer-qwen
+  api_base: https://pass.wafer.ai/v1
+  api_key: ${WAFER_API_KEY}
+  model: Qwen3.5-397B-A17B
+  max_tokens: 32768
+  request_timeout: 90s
+  max_retries: 5
+  retry_base_delay: 3s
+  retry_max_delay: 60s
+  max_concurrent_llm_calls: 3
+  cost_per_1m_input_tokens: 0
+  cost_per_1m_output_tokens: 0
+- name: wafer-glm
+  api_base: https://pass.wafer.ai/v1
+  api_key: ${WAFER_API_KEY}
+  model: GLM-5.1
+  max_tokens: 32768
+  request_timeout: 120s
+  max_retries: 5
+  retry_base_delay: 3s
+  retry_max_delay: 60s
+  max_concurrent_llm_calls: 3
+  cost_per_1m_input_tokens: 0
+  cost_per_1m_output_tokens: 0
 events:
-  - "issues"
-  - "issue_comment"
-  - "pull_request"
-  - "pull_request_review_comment"
-
-session_key_template: "{{.Repository}}/issues/{{.IssueNumber}}"
-
+- issues
+- issue_comment
+- pull_request
+- pull_request_review_comment
+session_key_template: '{{.Repository}}/issues/{{.IssueNumber}}'
 security:
-  protected_branches: ["main", "master"]
+  protected_branches:
+  - main
+  - master
   require_pr_for_workflows: true
   filter_agent_events: true
-
 memory:
   enabled: true
-  compaction_cron: "0 2 * * *"
-  compaction_path: "docs/issues"
-
+  compaction_cron: 0 2 * * *
+  compaction_path: docs/issues
 database:
-  path: ""
-
+  path: ''
 scanner:
   enabled: true
-  interval: "5m"
-  repo: "fjadmin/testbed"
-
+  interval: 5m
+  repo: fjadmin/spec-testbed
 auto_register:
   enabled: true
-  webhook_url: ""  # local deployment doesn't need auto webhook creation
-
-log_level: "info"
+  webhook_url: ''
+log_level: info

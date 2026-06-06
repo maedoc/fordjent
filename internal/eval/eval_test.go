@@ -429,3 +429,10 @@ func countProviderFailures(results []TrialResult) int {
 	}
 	return count
 }
+
+func TestEvalSpecLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping spec-lifecycle eval in short mode")
+	}
+	runBenchmark(t, &SpecLifecycleScenario, 1)
+}

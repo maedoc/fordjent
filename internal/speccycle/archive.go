@@ -139,6 +139,14 @@ func ReadChangeFile(repoDir, name, filePath string) (string, error) {
 
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Push sessions and other non-code sessions may not have the repo
+			// cloned with openspec/changes directories. Return a helpful message
+			// instead of an error that breaks the tool loop.
+			return fmt.Sprintf("Change %q or file %q not found in this checkout. "+
+				"This session may not have the spec directory available. "+
+				"Use openspec_read_spec to read merged specs instead.", name, filePath), nil
+		}
 		return "", fmt.Errorf("read %s: %w", fullPath, err)
 	}
 	return string(data), nil

@@ -48,6 +48,8 @@ If the reviewer finds that the implementation deviates from the spec in a way th
 ### Requirement: Review round cap prevents infinite review loops
 The system SHALL limit spec-driven PRs to a maximum of 3 review rounds (implement → review → fix → re-review → fix → re-review). After the third round, the reviewer SHALL escalate to a human with a summary of remaining issues.
 
+> **Implementation note**: The review round cap is **prompt-level enforcement only**. The reviewer's system prompt instructs it to track rounds and escalate after 3. There is no hard counter stored in session metadata — the reviewer derives the round count from PR comment history or session state. If the LLM ignores the instruction, nothing blocks round 4.
+
 #### Scenario: Third review round reached
 - **WHEN** a PR has been through 3 review-fix-review cycles
 - **AND** issues remain

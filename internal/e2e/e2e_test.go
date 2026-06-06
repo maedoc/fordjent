@@ -127,3 +127,58 @@ func TestMetricsEndpoint(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
+
+func TestPullRequestMergedWebhook(t *testing.T) {
+	cfg := testE2EConfig(t)
+	bus := event.NewBus()
+	router := testRouter(t, cfg, bus)
+
+	payload := map[string]interface{}{
+		"action": "closed",
+		"repository": map[string]interface{}{"full_name": "duke/test-repo"},
+		"pull_request": map[string]interface{}{
+			"number":  float64(42),
+			"title":   "Spec: user-auth",
+			"merged":  true,
+			"state":   "closed",
+			"head":    map[string]interface{}{"ref": "spec/user-auth", "sha": "abc123"},
+			"user":    map[string]interface{}{"login": "duke"},
+		},
+		"sender": map[string]interface{}{"login": "duke"},
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+
+	req := httptest.NewRequest(http.MethodPost, "/acp/v1/events", strings.NewReader(string(payloadBytes)))
+	req.Header.Set("X-Forgejo-Event", "pull_request")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+computeHMAC(cfg.Webhook.Secret, payloadBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		body, _ := io.ReadAll(w.Body)
+		t.Fatalf("expected 200, got %d: %s", w.Code, string(body))
+	}
+
+	select {
+	case evt := <-sub:
+		if evt.Type != "pull_request.merged" {
+			t.Errorf("expected event type pull_request.merged, got %s", evt.Type)
+		}
+		if evt.PRNumber != 42 {
+			t.Errorf("expected PR #42, got %d", evt.PRNumber)
+		}
+		if evt.Repository != "duke/test-repo" {
+			t.Errorf("expected repo duke/test-repo, got %s", evt.Repository)
+		}
+		if evt.SessionKey != "duke/test-repo/pulls/42" {
+			t.Errorf("expected session key duke/test-repo/pulls/42, got %s", evt.SessionKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event on bus")
+	}
+}

@@ -413,6 +413,34 @@ func TestMarkTaskComplete_OutOfRange(t *testing.T) {
 	}
 }
 
+func TestMarkTaskComplete_DollarSignInDescription(t *testing.T) {
+	repoDir := t.TempDir()
+	sm := NewSpecManager(repoDir)
+
+	if err := sm.CreateChange("dollar-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	tasksContent := "- [ ] Fix $2 pricing bug\n"
+	tasksPath := filepath.Join(repoDir, "openspec", "changes", "dollar-test", "tasks.md")
+	writeFile(tasksPath, tasksContent, t)
+
+	if err := sm.MarkTaskComplete("dollar-test", 1); err != nil {
+		t.Fatalf("MarkTaskComplete failed: %v", err)
+	}
+
+	data, err := os.ReadFile(tasksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	expected := "- [x] Fix $2 pricing bug\n"
+	if content != expected {
+		t.Errorf("dollar sign not preserved:\nexpected: %q\ngot:      %q", expected, content)
+	}
+}
+
 func TestMarkTaskComplete_IndexZero(t *testing.T) {
 	repoDir := t.TempDir()
 	sm := NewSpecManager(repoDir)
@@ -632,6 +660,19 @@ func TestReadChangeFile(t *testing.T) {
 	}
 }
 
+func TestReadChangeFile_ChangeNotExist(t *testing.T) {
+	// Simulates push-session scenario where openspec/changes/ dir doesn't exist
+	repoDir := t.TempDir()
+
+	content, err := ReadChangeFile(repoDir, "nonexistent-change", "proposal.md")
+	if err != nil {
+		t.Fatalf("expected helpful message for missing change, got error: %v", err)
+	}
+	if !strings.Contains(content, "not found") {
+		t.Fatalf("expected 'not found' hint, got: %s", content)
+	}
+}
+
 func TestReadChangeFile_EscapesDir(t *testing.T) {
 	repoDir := t.TempDir()
 	sm := NewSpecManager(repoDir)
@@ -657,9 +698,12 @@ func TestReadChangeFile_NotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ReadChangeFile(repoDir, "my-feature", "nonexistent.md")
-	if err == nil {
-		t.Fatal("expected error for nonexistent file, got nil")
+	content, err := ReadChangeFile(repoDir, "my-feature", "nonexistent.md")
+	if err != nil {
+		t.Fatalf("expected helpful message for nonexistent file, got error: %v", err)
+	}
+	if !strings.Contains(content, "not found") {
+		t.Fatalf("expected 'not found' hint in response, got: %s", content)
 	}
 }
 
@@ -876,6 +920,55 @@ func TestSpecPRManager_Error(t *testing.T) {
 	}
 	if info.IsSpecPR {
 		t.Error("expected IsSpecPR=false on error")
+	}
+}
+
+// ── ListChanges Schema ────────────────────────────────────────────────────
+
+func TestListChanges_WithSchema(t *testing.T) {
+	repoDir := t.TempDir()
+	sm := NewSpecManager(repoDir)
+
+	if err := sm.CreateChange("my-feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .openspec.yaml with schema
+	openSpecYAML := "schema: spec-driven\n"
+	yamlPath := filepath.Join(repoDir, "openspec", "changes", "my-feature", ".openspec.yaml")
+	writeFile(yamlPath, openSpecYAML, t)
+
+	changes, err := sm.ListChanges()
+	if err != nil {
+		t.Fatalf("ListChanges failed: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+	if changes[0].Schema != "spec-driven" {
+		t.Errorf("expected Schema 'spec-driven', got %q", changes[0].Schema)
+	}
+}
+
+func TestListChanges_WithoutSchema(t *testing.T) {
+	repoDir := t.TempDir()
+	sm := NewSpecManager(repoDir)
+
+	if err := sm.CreateChange("my-feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No .openspec.yaml created
+
+	changes, err := sm.ListChanges()
+	if err != nil {
+		t.Fatalf("ListChanges failed: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+	if changes[0].Schema != "" {
+		t.Errorf("expected empty Schema, got %q", changes[0].Schema)
 	}
 }
 

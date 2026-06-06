@@ -96,15 +96,16 @@ func (u User) String() string { return u.Login }
 
 // PullRequest represents a Forgejo pull request with branch info.
 type PullRequest struct {
-	Number       int    `json:"number"`
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	State        string `json:"state"`
-	Mergeable    bool   `json:"mergeable"`
-	Merged       bool   `json:"merged"` // Forgejo sends merged=true even when state=closed
-	HasConflicts bool   `json:"has_conflicts"` // NOTE: Forgejo API field may vary — treat as advisory
-	User         *User  `json:"user"`
-	Head         struct {
+	Number         int    `json:"number"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	State          string `json:"state"`
+	Mergeable      bool   `json:"mergeable"`
+	Merged         bool   `json:"merged"` // Forgejo sends merged=true even when state=closed
+	HasConflicts   bool   `json:"has_conflicts"` // NOTE: Forgejo API field may vary — treat as advisory
+	MergeCommitSHA string `json:"merge_commit_sha"`
+	User           *User  `json:"user"`
+	Head           struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"head"`

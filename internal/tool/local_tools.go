@@ -396,7 +396,7 @@ func (t *writeFileTool) SetAllowedPrefixes(prefixes []string) {
 func (t *writeFileTool) Name() string { return "write_file" }
 
 func (t *writeFileTool) Description() string {
-	return "Write content to a file in the repository. Creates parent directories if needed."
+	return "REPLACE a file with new content. The ENTIRE file must be included — any content not in this call will be DELETED. Always include all existing unchanged lines plus your changes. Creates parent directories if needed."
 }
 
 func (t *writeFileTool) Parameters() map[string]interface{} {
@@ -572,7 +572,12 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	parts := strings.Fields(cmdStr)
+	var parts []string
+	if isCommit {
+		parts = parseGitCommit(cmdStr)
+	} else {
+		parts = strings.Fields(cmdStr)
+	}
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
@@ -712,4 +717,56 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	}
 
 	return string(out), nil
+}
+
+// parseGitCommit parses a git commit command string into proper args.
+// It handles -m "message with spaces" correctly by keeping the message as a single arg.
+func parseGitCommit(cmdStr string) []string {
+	// Strip leading "git " if present
+	cmdStr = strings.TrimSpace(cmdStr)
+	if strings.HasPrefix(strings.ToLower(cmdStr), "git ") {
+		cmdStr = cmdStr[4:]
+	}
+	if strings.HasPrefix(strings.ToLower(cmdStr), "commit ") {
+		cmdStr = cmdStr[7:]
+	}
+
+	// Find -m flag and extract the message as a single string
+	var args []string
+	args = append(args, "commit")
+
+	for len(cmdStr) > 0 {
+		cmdStr = strings.TrimSpace(cmdStr)
+		if len(cmdStr) == 0 {
+			break
+		}
+		if strings.HasPrefix(cmdStr, "-m") {
+			// Everything after -m is the commit message (already newline-sanitized to spaces)
+			msg := strings.TrimPrefix(cmdStr, "-m")
+			msg = strings.TrimSpace(msg)
+			// Strip surrounding quotes if present
+			if (strings.HasPrefix(msg, "\"") && strings.HasSuffix(msg, "\"")) ||
+				(strings.HasPrefix(msg, "'") && strings.HasSuffix(msg, "'")) {
+				msg = msg[1 : len(msg)-1]
+			}
+			if msg != "" {
+				args = append(args, "-m", msg)
+			}
+			break
+		}
+		// Other flags
+		if cmdStr[0] == '-' {
+			spaceIdx := strings.IndexByte(cmdStr, ' ')
+			if spaceIdx < 0 {
+				args = append(args, cmdStr)
+				break
+			}
+			args = append(args, cmdStr[:spaceIdx])
+			cmdStr = cmdStr[spaceIdx:]
+		} else {
+			break
+		}
+	}
+
+	return args
 }

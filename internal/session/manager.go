@@ -4,28 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/fordjent/fordjent/internal/config"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/fordjent/fordjent/internal/autoreg"
-	"github.com/fordjent/fordjent/internal/policy"
+	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/cost"
 	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/lifecycle"
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
-	"github.com/fordjent/fordjent/internal/scaffold"
+	"github.com/fordjent/fordjent/internal/policy"
 	"github.com/fordjent/fordjent/internal/sandbox"
-	"github.com/fordjent/fordjent/internal/speccycle"
+	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/scheduler"
 	"github.com/fordjent/fordjent/internal/sentinel"
+	"github.com/fordjent/fordjent/internal/speccycle"
 	"github.com/fordjent/fordjent/internal/tool"
-	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
 )
 
 // Session represents an active agent session bound to a session key.
@@ -1809,8 +1811,22 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 		"change", info.ChangeName, "repo", evt.Repository, "pr", evt.PRNumber)
 
 	// Read tasks.md from the merged repo via Forgejo API (no clone needed).
+	// Use the merge commit SHA if available to avoid a race with concurrent merges.
 	tasksPath := fmt.Sprintf("openspec/changes/%s/tasks.md", info.ChangeName)
-	file, err := m.forgejoClient.GetFile(schedCtx, evt.Repository, "main", tasksPath)
+	ref := "main"
+	pr, prErr := m.forgejoClient.GetPR(schedCtx, evt.Repository, evt.PRNumber)
+	if prErr != nil {
+		slog.Debug("spec PR: failed to get PR for merge SHA, falling back to main",
+			"error", prErr, "repo", evt.Repository, "pr", evt.PRNumber)
+	} else if pr.MergeCommitSHA != "" {
+		ref = pr.MergeCommitSHA
+		slog.Debug("spec PR: reading tasks.md from merge SHA",
+			"sha", ref, "repo", evt.Repository, "pr", evt.PRNumber)
+	} else {
+		slog.Debug("spec PR: merge SHA unavailable, falling back to main",
+			"repo", evt.Repository, "pr", evt.PRNumber)
+	}
+	file, err := m.forgejoClient.GetFile(schedCtx, evt.Repository, ref, tasksPath)
 	if err != nil {
 		slog.Warn("spec PR: failed to read tasks.md from repo",
 			"error", err, "change", info.ChangeName, "path", tasksPath)
@@ -1855,7 +1871,23 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// Validate parallel tasks for file-path overlaps.
+	// mergequeue.CheckGate requires branches that don't exist at issue-creation
+	// time, so we do a lightweight heuristic: extract path-like tokens from task
+	// descriptions and downgrade overlapping tasks to serial.
+	// Detect project language for language-aware path prefix whitelisting.
+	repoLang := scaffold.DetectProjectLang(schedCtx, m.forgejoClient, evt.Repository)
+	parallelTasks, newSerial, downgradedTasks := validateParallelTasks(parallelTasks, repoLang)
+	if len(newSerial) > 0 {
+		slog.Info("spec PR: downgraded overlapping parallel tasks to serial",
+			"change", info.ChangeName,
+			"downgraded", len(newSerial),
+		)
+		serialTasks = append(serialTasks, newSerial...)
+	}
+
 	// Create issues for serial tasks (each depends on the previous)
+	var issueSucceeded, issueFailed int
 	for _, task := range serialTasks {
 		issueBody := fmt.Sprintf(
 			"Spec: %s/%s\nTask: %d - %s\nDepends on: #%d",
@@ -1866,13 +1898,19 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 		if lastSerialIssueNum > 0 {
 			issueBody += fmt.Sprintf(", #%d", lastSerialIssueNum)
 		}
+		// Add downgrade annotation for tasks that were originally parallel
+		if downgradedTasks[task.Index] {
+			issueBody += "\n*(auto-downgraded from parallel)*"
+		}
 
 		issueNum, err := m.createSpecIssue(schedCtx, evt.Repository, info.ChangeName, task, issueBody, ms)
 		if err != nil {
 			slog.Warn("spec PR: failed to create issue",
 				"error", err, "task", task.Index)
+			issueFailed++
 			continue
 		}
+		issueSucceeded++
 		lastSerialIssueNum = issueNum
 	}
 
@@ -1894,14 +1932,17 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 		if err != nil {
 			slog.Warn("spec PR: failed to create parallel issue",
 				"error", err, "task", task.Index)
+			issueFailed++
 			continue
 		}
+		issueSucceeded++
 	}
 
 	// Post summary comment on the PR
+	totalCreated := issueSucceeded + issueFailed
 	summary := fmt.Sprintf(
-		"✅ Spec **%s** approved and merged. Created %d implementer issue(s) from tasks.md.\n\n",
-		info.ChangeName, len(serialTasks)+len(parallelTasks),
+		"✅ Spec **%s** approved and merged. Created %d/%d implementer issue(s) from tasks.md.\n\n",
+		info.ChangeName, issueSucceeded, totalCreated,
 	)
 	for _, t := range serialTasks {
 		summary += fmt.Sprintf("- [ ] %s\n", t.Description)
@@ -1912,11 +1953,134 @@ func (m *Manager) handleSpecPRMerged(ctx context.Context, evt *event.Event) {
 	summary += "\n<!-- ford -->"
 	_ = m.forgejoClient.PostIssueComment(schedCtx, evt.Repository, evt.PRNumber, summary)
 
+	// Add spec-implementing label to the merged PR
+	if err := m.forgejoClient.AddIssueLabels(schedCtx, evt.Repository, evt.PRNumber, []string{"spec-implementing"}); err != nil {
+		slog.Warn("spec PR: failed to add spec-implementing label", "error", err, "repo", evt.Repository, "pr", evt.PRNumber)
+	}
+
 	slog.Info("spec PR: implementer issues created",
 		"change", info.ChangeName,
-		"serial", len(serialTasks),
-		"parallel", len(parallelTasks),
+		"succeeded", issueSucceeded,
+		"failed", issueFailed,
 	)
+}
+
+// validateParallelTasks checks task descriptions for overlapping file paths.
+// Tasks that mention the same directory or file pattern are downgraded from
+// parallel to serial to prevent merge conflicts. Full merge-queue protection
+// still applies at PR creation time when branches exist.
+// Returns: parallel tasks, downgraded serial tasks, and a set of task indices
+// that were downgraded (for annotation).
+func validateParallelTasks(tasks []speccycle.Task, lang string) (parallel []speccycle.Task, serial []speccycle.Task, downgraded map[int]bool) {
+	if len(tasks) <= 1 {
+		return tasks, nil, nil
+	}
+
+	downgraded = make(map[int]bool)
+
+	// Extract path prefixes from each task description.
+	type taskPaths struct {
+		task   speccycle.Task
+		paths  []string // e.g., ["pkg/auth", "internal/forgejo"]
+	}
+	var entries []taskPaths
+	for _, t := range tasks {
+		entries = append(entries, taskPaths{task: t, paths: extractPathPrefixes(t.Description, lang)})
+	}
+
+	// Greedy conflict resolution: start with first task as parallel, then for each
+	// subsequent task check if its paths overlap with any already-accepted parallel task.
+	accepted := []taskPaths{entries[0]}
+	for i := 1; i < len(entries); i++ {
+		conflicts := false
+		for _, acc := range accepted {
+			if pathsOverlap(entries[i].paths, acc.paths) {
+				conflicts = true
+				break
+			}
+		}
+		if conflicts {
+			serial = append(serial, entries[i].task)
+			downgraded[entries[i].task.Index] = true
+		} else {
+			accepted = append(accepted, entries[i])
+		}
+	}
+
+	for _, a := range accepted {
+		parallel = append(parallel, a.task)
+	}
+	return parallel, serial, downgraded
+}
+
+// pathLikeRe matches path-like tokens: sequences of word chars separated by slashes.
+var pathLikeRe = regexp.MustCompile(`[a-zA-Z0-9_]+(?:/[a-zA-Z0-9_.-]+)+`)
+
+// langPrefixes maps programming languages to their first-segment directory prefix whitelists.
+// Used by extractPathPrefixes to filter path-like tokens in task descriptions.
+var langPrefixes = map[string]map[string]bool{
+	"go": {
+		"cmd": true, "internal": true, "pkg": true, "api": true,
+		"web": true, "docs": true, "configs": true, "scripts": true,
+	},
+	"python": {
+		"src": true, "app": true, "tests": true, "migrations": true,
+		"scripts": true, "configs": true, "docs": true,
+	},
+	"javascript": {
+		"lib": true, "test": true, "public": true, "pages": true,
+		"components": true, "src": true, "scripts": true, "docs": true,
+	},
+	"unknown": {},
+}
+
+// extractPathPrefixes finds path-like tokens in a task description.
+// It looks for sequences like "pkg/auth/handler.go" or "internal/foo".
+// Only tokens whose first segment is in the language-specific whitelist (from langPrefixes)
+// are accepted. The lang parameter selects the whitelist ("go", "python", "javascript", "unknown").
+func extractPathPrefixes(description string, lang string) []string {
+	prefixWhitelist, ok := langPrefixes[lang]
+	if !ok {
+		prefixWhitelist = langPrefixes["unknown"]
+	}
+
+	matches := pathLikeRe.FindAllString(description, -1)
+	if matches == nil {
+		return nil
+	}
+	// Deduplicate and keep only directory prefixes (strip file names).
+	seen := make(map[string]bool)
+	var result []string
+	for _, m := range matches {
+		// Use the first two segments as the directory prefix (e.g., "pkg/auth").
+		parts := strings.Split(m, "/")
+		if len(parts) >= 2 {
+			// Skip matches whose first segment isn't in the language-specific whitelist.
+			if !prefixWhitelist[parts[0]] {
+				continue
+			}
+			prefix := parts[0] + "/" + parts[1]
+			if !seen[prefix] {
+				seen[prefix] = true
+				result = append(result, prefix)
+			}
+		}
+	}
+	return result
+}
+
+// pathsOverlap returns true if two path prefix lists share any entry.
+func pathsOverlap(a, b []string) bool {
+	set := make(map[string]bool, len(a))
+	for _, p := range a {
+		set[p] = true
+	}
+	for _, p := range b {
+		if set[p] {
+			return true
+		}
+	}
+	return false
 }
 
 // createSpecIssue creates a single implementer issue for a spec task.
@@ -1961,8 +2125,12 @@ func (m *Manager) handleSpecLifecycleLabels(ctx context.Context, evt *event.Even
 	}
 
 	// Remove spec-proposed, add spec-approved
-	_ = m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.PRNumber, "spec-proposed")
-	_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.PRNumber, []string{"spec-approved"})
+	if err := m.forgejoClient.RemoveIssueLabel(ctx, evt.Repository, evt.PRNumber, "spec-proposed"); err != nil {
+		slog.Warn("spec labels: failed to remove spec-proposed", "error", err, "repo", evt.Repository, "pr", evt.PRNumber)
+	}
+	if err := m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.PRNumber, []string{"spec-approved"}); err != nil {
+		slog.Warn("spec labels: failed to add spec-approved", "error", err, "repo", evt.Repository, "pr", evt.PRNumber)
+	}
 
 	slog.Info("spec labels: transitioned spec-proposed → spec-approved",
 		"repo", evt.Repository, "pr", evt.PRNumber)

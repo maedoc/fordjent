@@ -122,6 +122,48 @@ func BugfixVerify(repoDir string) VerificationResult {
 	return result
 }
 
+// SpecLifecycleVerify verifies that a spec-lifecycle scenario built correctly.
+// It checks that the code builds, tests pass, and the task was marked complete.
+func SpecLifecycleVerify(repoDir string) VerificationResult {
+	result := VerificationResult{
+		Name: "spec-lifecycle",
+	}
+
+	// 1. go build ./...
+	if err := runCommand(repoDir, "go", "build", "./..."); err != nil {
+		result.Errors = append(result.Errors, "go build failed: "+err.Error())
+		result.Passed = false
+		return result
+	}
+	result.Checks = append(result.Checks, Check{Name: "build", Passed: true})
+
+	// 2. go test ./...
+	if err := runCommand(repoDir, "go", "test", "./..."); err != nil {
+		result.Errors = append(result.Errors, "go test failed: "+err.Error())
+		result.Passed = false
+		return result
+	}
+	result.Checks = append(result.Checks, Check{Name: "test", Passed: true})
+
+	// 3. Check tasks.md for the task being marked complete
+	tasksPath := filepath.Join(repoDir, "openspec", "changes", "stringutil", "tasks.md")
+	data, err := os.ReadFile(tasksPath)
+	if err != nil {
+		result.Errors = append(result.Errors, "tasks.md not found")
+	} else {
+		content := string(data)
+		taskDone := strings.Contains(content, "- [x] Implement ToUpper function") ||
+			strings.Contains(content, "- [x]")
+		result.Checks = append(result.Checks, Check{Name: "task_marked_complete", Passed: taskDone})
+		if !taskDone {
+			result.Errors = append(result.Errors, "task not marked complete in tasks.md")
+		}
+	}
+
+	result.Passed = len(result.Errors) == 0
+	return result
+}
+
 // runCommand runs a command in the given directory and returns an error if it fails.
 func runCommand(dir string, args ...string) error {
 	cmd := exec.Command(args[0], args[1:]...)
