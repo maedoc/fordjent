@@ -750,6 +750,49 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// PR review fix: when a human comments on an open PR requesting changes,
+	// create a separate implementer session so the agent has write tools.
+	// The existing reviewer session (read-only) may still be running — we
+	// create a new session with key `repo/pulls/N-fix` and implementer role.
+	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 &&
+		evt.Sender != "automerge-trigger" &&
+		!strings.Contains(evt.Sender, "fordjent") &&
+		!strings.Contains(evt.Sender, "djent") {
+
+		// Check that the PR is still open
+		if m.forgejoClient != nil {
+			pr, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+			if prErr == nil && pr.State == "open" {
+				// Redirect to a new session key with -fix suffix
+				fixKey := evt.SessionKey + "-fix"
+				slog.Info("PR review fix: redirecting human comment to implementer session",
+					"original_key", evt.SessionKey,
+					"fix_key", fixKey,
+					"pr", evt.PRNumber,
+					"sender", evt.Sender)
+
+				// Create a synthetic event with the new session key
+				fixEvt := *evt
+				fixEvt.SessionKey = fixKey
+				fixSess, fixErr := m.getOrCreate(ctx, &fixEvt)
+				if fixErr != nil {
+					slog.Error("failed to create review-fix session", "error", fixErr, "key", fixKey)
+				} else {
+					fixSess.mu.Lock()
+					fixSess.IsPRReviewFix = true
+					fixSess.mu.Unlock()
+					select {
+					case fixSess.events <- &fixEvt:
+						slog.Info("queued event for review-fix session", "session_key", fixKey)
+					default:
+						slog.Warn("review-fix session event queue full", "session_key", fixKey)
+					}
+				}
+				return // Don't also send to the reviewer session
+			}
+		}
+	}
+
 	sess, err := m.getOrCreate(ctx, evt)
 	if err != nil {
 		slog.Error("failed to create session", "error", err, "session_key", evt.SessionKey)

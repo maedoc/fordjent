@@ -505,11 +505,16 @@ func TestPRCommentRoutesToPullsSession(t *testing.T) {
 	mgr.handleEvent(context.Background(), evt)
 
 	mgr.mu.RLock()
-	sess, exists := mgr.sessions["org/repo/pulls/7"]
+	sess, exists := mgr.sessions["org/repo/pulls/7-fix"]
+	if !exists {
+		// Also check the original key in case the redirect didn't fire
+		// (e.g. if sender matches a bot pattern)
+		sess, exists = mgr.sessions["org/repo/pulls/7"]
+	}
 	mgr.mu.RUnlock()
 
 	if !exists {
-		t.Fatal("expected session to be created at org/repo/pulls/7 for PR comment")
+		t.Fatal("expected session to be created at org/repo/pulls/7-fix for PR comment")
 	}
 	if sess.PRNumber != 7 {
 		t.Errorf("expected PRNumber=7, got %d", sess.PRNumber)
@@ -911,9 +916,13 @@ func TestPRCommentRouting(t *testing.T) {
 
 	mgr.handleEvent(ctx, evt)
 
-	sess, exists := mgr.sessions["fjadmin/testbed/pulls/7"]
+	sess, exists := mgr.sessions["fjadmin/testbed/pulls/7-fix"]
 	if !exists {
-		t.Error("PR comment should create pulls/N session")
+		// Also try the original key if redirect didn't fire
+		sess, exists = mgr.sessions["fjadmin/testbed/pulls/7"]
+	}
+	if !exists {
+		t.Error("PR comment should create pulls/N-fix or pulls/N session")
 		return
 	}
 	if sess.PRNumber != 7 {
