@@ -506,6 +506,7 @@ type forgejoCreatePRTool struct {
 	mq             MergeGate
 	repoDir        string
 	parentIssueNum int
+	scopePkgs      []string // if set, only test these packages (e.g. ["./pkg/math/"])
 }
 
 func NewCreatePRTool(adapter *ForgejoAdapter, mq MergeGate, repoDir string) *forgejoCreatePRTool {
@@ -514,6 +515,11 @@ func NewCreatePRTool(adapter *ForgejoAdapter, mq MergeGate, repoDir string) *for
 
 func (t *forgejoCreatePRTool) SetParentIssueNum(n int) {
 	t.parentIssueNum = n
+}
+
+// SetScopePkgs restricts the build/test gate to only these Go import paths.
+func (t *forgejoCreatePRTool) SetScopePkgs(pkgs []string) {
+	t.scopePkgs = pkgs
 }
 
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
@@ -688,14 +694,27 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 		lang := scaffold.DetectProjectLang(ctx, t.adapter.Client(), params.Repository)
 		switch lang {
 		case "go":
-			buildCmd := exec.CommandContext(ctx, "go", "build", "./...")
+			// Build: if scoped, only build the agent's packages
+			buildArgs := []string{"build"}
+			if len(t.scopePkgs) > 0 {
+				buildArgs = append(buildArgs, t.scopePkgs...)
+			} else {
+				buildArgs = append(buildArgs, "./...")
+			}
+			buildCmd := exec.CommandContext(ctx, "go", buildArgs...)
 			buildCmd.Dir = t.repoDir
 			buildOut, buildErr := buildCmd.CombinedOutput()
 			if buildErr != nil {
 				return "", fmt.Errorf("go build failed — fix compilation errors before creating PR:\n%s", string(buildOut))
 			}
 
-			testCmd := exec.CommandContext(ctx, "go", "test", "./...", "-count=1")
+			testArgs := []string{"test", "-count=1"}
+			if len(t.scopePkgs) > 0 {
+				testArgs = append(testArgs, t.scopePkgs...)
+			} else {
+				testArgs = append(testArgs, "./...")
+			}
+			testCmd := exec.CommandContext(ctx, "go", testArgs...)
 			testCmd.Dir = t.repoDir
 			testOut, testErr := testCmd.CombinedOutput()
 			if testErr != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/fordjent/fordjent/internal/provider"
@@ -13,6 +14,11 @@ import (
 // ScopedWriter is implemented by tools that support path-based write restrictions.
 type ScopedWriter interface {
 	SetAllowedPrefixes(prefixes []string)
+}
+
+// ScopedPRCreator is implemented by the PR creation tool for scoped build/test gates.
+type ScopedPRCreator interface {
+	SetScopePkgs(pkgs []string)
 }
 
 // Tool is the interface that all agent tools must implement.
@@ -136,6 +142,22 @@ func (r *Registry) SetWriteScope(prefixes []string) {
 	if t, ok := r.tools["write_file"]; ok {
 		if sw, ok := t.(ScopedWriter); ok {
 			sw.SetAllowedPrefixes(prefixes)
+		}
+	}
+}
+
+// SetPRScope restricts the PR build/test gate to the given package paths.
+// Converts "pkg/math/" to "./pkg/math" for Go import paths.
+func (r *Registry) SetPRScope(scopePrefixes []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.tools["forgejo_create_pr"]; ok {
+		if sp, ok := t.(ScopedPRCreator); ok {
+			var pkgs []string
+			for _, p := range scopePrefixes {
+				pkgs = append(pkgs, "./"+strings.TrimSuffix(p, "/"))
+			}
+			sp.SetScopePkgs(pkgs)
 		}
 	}
 }
