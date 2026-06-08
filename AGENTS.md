@@ -1844,3 +1844,64 @@ The scope restriction only works when the issue title/body contains a recognizab
 **Fix**: When `scopePkgs` is set on the PR tool, the build/test gate runs only the scoped packages (e.g., `go test ./pkg/math/`). Falls back to `./...` when no scope is detected.
 
 **Files changed**: `internal/tool/forgejo_tools.go` — `forgejoCreatePRTool` gained `scopePkgs` field and `SetScopePkgs()` method; build/test commands use scoped paths when available. `internal/tool/registry.go` — `SetPRScope()` converts scope prefixes to Go import paths.
+
+---
+
+## Real User Testing Round (June 8, 2026)
+
+### Test Design
+4 waves of increasing realism, filing issues the way a real user would (no `[implementer]` tags, no `pkg/` paths, vague descriptions):
+
+| Wave | Repo | Issue | Style |
+|------|------|-------|-------|
+| 1 | my-reading-list | "Build me a CLI tool" | Vague greenfield |
+| 2 | reading-list-app | "Sort command crashes when empty" | Bug report |
+| 3 | reading-list-app | "Add an export command" + review feedback | Feature + iteration |
+| 4 | data-cleaner | "Add drop_nan and fill_nan_mean" | Python feature |
+
+### Bugs Found and Fixed
+
+#### Bug 34 — Role gate blocks all untagged issues (Critical)
+**Problem**: Every issue without a `[implementer]` tag got `needs-role` label and was blocked. Real users don't know about tags.
+
+**Fix**: If the repo has the `fordjent-yolo` topic, untagged issues default to "implementer" instead of being blocked. The yolo topic is the explicit opt-in.
+
+#### Bug 35 — write_file copies line numbers from read_file (High)
+**Problem**: The model saw `     1\tcontent` from read_file output and copied this format into write_file content, producing files with visual line numbers embedded.
+
+**Fix**: Added `isReadFileOutput()` (regex pattern matching 3+ lines with `^\s{5}\d+\t`) and `stripLineNumbers()` to automatically detect and remove line-number prefixes from write_file content.
+
+#### Bug 36 — git commit on protected branch not blocked before execution (High)
+**Problem**: The protected branch check only ran AFTER the commit was already created on main. The agent committed on main, then the auto-push was blocked, and forgejo_create_pr failed with 422 "no changes between head and base" (main→main PR).
+
+**Fix**: Added pre-commit branch check that runs BEFORE executing the commit command. If on a protected branch, the commit is rejected with an error message telling the agent to create a feature branch first. The post-commit check remains as a safety net.
+
+#### Bug 37 — No Python runtime in Docker container (Medium)
+**Problem**: The Alpine Docker image had no Python or pytest, so all Python test commands failed with "command not found".
+
+**Fix**: Added `python3 py3-pip` to the `apk add` in the Dockerfile. The agent can install additional packages via `pip3 install --break-system-packages`.
+
+#### Bug 38 — Bug-fix prompt doesn't guide reproduction (Medium)
+**Problem**: When filing a bug report, the agent didn't try to reproduce the bug first. It ran the code with pre-seeded data (which didn't trigger the bug) and declared it working.
+
+**Fix**: Added two anti-patterns to the implementer system prompt:
+- "For BUG REPORTS: reproduce the bug FIRST. If the issue says 'crashes when X', run the code with X to confirm the crash BEFORE writing any fix."
+- "For write_file: supply ONLY the new file content. Do NOT copy the line numbers shown by read_file."
+
+### Test Results (Wave 6 Retest — All Fixes Applied)
+
+| Wave | Scenario | PR Created | Code Correct | Tests Pass |
+|------|----------|-----------|--------------|------------|
+| 6 | Bug fix (empty list crash) | ✅ PR #2 on `fix/` branch | ✅ Empty guard + "No books found" | ✅ TestSortEmpty passes |
+| 5b | Python NaN cleaning | ✅ PR #2 | ✅ drop_nan + fill_nan_mean | ✅ pytest passes |
+| 1 | Greenfield Go | ✅ PR #2 | ✅ Has all features | ✅ go test passes |
+| 3 | Feature + export | ✅ PR #3 | ✅ CSV export | ✅ go test passes |
+
+### Remaining Gaps
+
+| Gap | Impact | Difficulty |
+|-----|--------|------------|
+| PR review feedback → implementer handoff | Reviewer explores but doesn't write | Medium — need reviewer→implementer role switch |
+| Auto-merge after review | PRs sit open until manual merge | Low — automerge label works but Forgejo 405 on sequential merges |
+| Agent doesn't systematically test edge cases | May miss subtle bugs | Low — prompt guidance helps, model limitation |
+| Docker image size with Python+pandas | ~200MB extra | Low — conditional install or separate image |
