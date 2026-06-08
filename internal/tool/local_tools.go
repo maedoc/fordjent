@@ -479,7 +479,14 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	// read_file returns lines like "     1\tcontent"; the model sometimes copies
 	// this format into write_file instead of writing raw content.
 	if isReadFileOutput(params.Content) {
+		slog.Info("write_file: stripping line numbers", "path", params.Path, "preview", params.Content[:min(50, len(params.Content))])
 		params.Content = stripLineNumbers(params.Content)
+	} else {
+		// Debug: check if match count is just below threshold
+		matches := lineNumPrefix.FindAllString(params.Content, -1)
+		if len(matches) > 0 {
+			slog.Warn("write_file: line numbers partially detected", "matches", len(matches), "path", params.Path, "preview", params.Content[:min(50, len(params.Content))])
+		}
 	}
 
 	if containsNullByte(params.Path) {
@@ -648,7 +655,13 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	if isCommit {
 		parts = parseGitCommit(cmdStr)
 	} else {
-		parts = strings.Fields(cmdStr)
+		// Compound commands (&&, ||, ;) require a shell which we avoid for security.
+	// Instead, tell the agent to run them as separate git commands.
+	if strings.Contains(cmdStr, "&&") || strings.Contains(cmdStr, "||") || strings.Contains(cmdStr, ";") {
+		return "", fmt.Errorf("compound git commands with &&, ||, or ; are not supported. Please run each git command separately. For example, instead of 'add . && commit -m \"msg\"', run 'add .', then 'commit -m \"msg\"' as two separate calls.")
+	}
+
+	parts = strings.Fields(cmdStr)
 	}
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command")
