@@ -414,7 +414,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 
 			// Auto-requeue any blocked branches whose merge-gate may now be clear.
 			if m.mqClient != nil && m.lc != nil {
-				time.Sleep(2 * time.Second) // let Forgejo update file indices
+				time.Sleep(5 * time.Second) // let Forgejo update PR state after merge
 				blocked, err := m.lc.ListBlockedBranches(schedCtx, evt.Repository)
 				if err != nil {
 					slog.Warn("lifecycle: failed to list blocked branches", "error", err)
@@ -435,8 +435,6 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 					if cleared {
 						slog.Info("merge gate cleared for blocked branch, re-dispatching session", "branch", b.Branch, "issue", b.IssueNumber)
 						// Re-dispatch a new implementer session for this issue.
-						// The previous session died after being blocked; we need a fresh one
-						// to attempt PR creation again now that the gate is clear.
 						retryEvt := event.NewEvent(
 							event.IssueOpened,
 							evt.Repository,
@@ -453,7 +451,27 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 						m.handleEvent(schedCtx, retryEvt)
 						_ = m.lc.ResolveBlockedBranch(schedCtx, evt.Repository, b.Branch)
 					} else {
-						slog.Info("merge gate still blocked for branch", "branch", b.Branch, "reason", msg)
+						// Gate may still appear blocked because Forgejo hasn't updated yet.
+						// If the blocking PR was the one that just merged, force a retry anyway.
+						if strings.Contains(msg, fmt.Sprintf("#%d", evt.PRNumber)) {
+							slog.Info("merge gate still references just-merged PR, re-dispatching anyway", "merged_pr", evt.PRNumber, "branch", b.Branch, "gate_msg", msg)
+							retryEvt := event.NewEvent(
+								event.IssueOpened,
+								evt.Repository,
+								b.IssueNumber,
+								0,
+								"merge-queue-retry",
+								"opened",
+							)
+							retryEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, b.IssueNumber)
+							if m.forgejoClient != nil {
+								_ = m.forgejoClient.RemoveIssueLabel(schedCtx, evt.Repository, b.IssueNumber, "blocked")
+							}
+							m.handleEvent(schedCtx, retryEvt)
+							_ = m.lc.ResolveBlockedBranch(schedCtx, evt.Repository, b.Branch)
+						} else {
+							slog.Info("merge gate still blocked for branch", "branch", b.Branch, "reason", msg)
+						}
 					}
 				}
 			}
