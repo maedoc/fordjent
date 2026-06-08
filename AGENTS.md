@@ -1905,3 +1905,50 @@ The scope restriction only works when the issue title/body contains a recognizab
 | Auto-merge after review | PRs sit open until manual merge | Low — automerge label works but Forgejo 405 on sequential merges |
 | Agent doesn't systematically test edge cases | May miss subtle bugs | Low — prompt guidance helps, model limitation |
 | Docker image size with Python+pandas | ~200MB extra | Low — conditional install or separate image |
+
+---
+
+## Bug Fix 39 — PR Review Feedback Creates Implementer Session (June 8, 2026)
+
+**Problem**: When a human commented on an open PR requesting changes, the existing reviewer session had no write tools (write_file, git, bash). The agent could only read files and post comments — it was physically incapable of making code changes.
+
+**Root cause**: PR sessions always got the "reviewer" role, which excludes implementation tools from the registry. The role was assigned at session creation time and never changed.
+
+**Solution**: When a human (non-bot, non-agent) comments on an open PR, the system creates a SEPARATE session with key `pulls/N-fix` and implements the role. This session has:
+
+1. **Implementer role** — write_file, git, bash, forgejo_create_pr tools available
+2. **PR Review Mode prompt** — "You are responding to a review comment. Make your fixes directly on this branch."
+3. **Human feedback injection** — the reviewer's comment body is injected verbatim into the system prompt with "ACTION REQUIRED" emphasis
+4. **PR branch checkout** — automatically checks out the PR head branch so writes go to the right place
+
+The original reviewer session (automerge-triggered, read-only) continues to exist independently. It's not destroyed — it can still merge the PR after the fix is pushed.
+
+### Detection Logic (in `Manager.handleEvent`)
+```go
+if evt.Type == IssueCommentCreated && evt.PRNumber > 0 &&
+   evt.Sender != "automerge-trigger" &&
+   !strings.Contains(evt.Sender, "fordjent") &&
+   !strings.Contains(evt.Sender, "djent") {
+    // Redirect to pulls/N-fix session with implementer role
+}
+```
+
+### Validation
+- ✅ Human comment on PR #2 → new session `review-test/pulls/2-fix` created
+- ✅ Agent had write_file, git, bash tools (implementer role)
+- ✅ Agent wrote 2 files (main.go + main_test.go)
+- ✅ Agent committed and pushed to the PR branch
+- ✅ All 7 tests pass after the fix
+- ✅ Original reviewer session undisturbed
+
+### Also Fixed: Line Number Stripping Regex
+The `isReadFileOutput()` regex `^ {5}\d+\t` only matched 5-space prefixes. But `read_file` right-pads line numbers, so lines 10-99 have 4 spaces, lines 100-999 have 3 spaces. Changed to `^ +\d+\t` (variable leading spaces).
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | `IsPRReviewFix` flag on Session; redirect to `-fix` session key for human PR comments; implementer role override in `runSession` |
+| `internal/session/agent.go` | Human feedback injection in PR Review Mode prompt |
+| `internal/session/interaction_test.go` | Updated test expectations for `-fix` session key |
+| `internal/tool/local_tools.go` | Line number regex: `^ {5}` → `^ +`; threshold: 3 → 2 matches |
