@@ -52,9 +52,14 @@ func (r RetryPolicy) IsRetryable(err error, statusCode int) bool {
 		return false
 	}
 
-	// Context deadline / timeout errors are retryable
+	// Context deadline / timeout errors are retryable — but only if it's the
+	// HTTP client timeout, not the outer session context deadline.
+	// If the parent context is cancelled, don't retry (session is being shut down).
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
+	}
+	if errors.Is(err, context.Canceled) {
+		return false // session cancelled, don't retry
 	}
 
 	return false

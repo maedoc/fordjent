@@ -318,6 +318,9 @@ func (m *Manager) Run(ctx context.Context) {
 	autoRetryTicker := time.NewTicker(autoRetryDelay)
 	defer autoRetryTicker.Stop()
 
+	reconcileTicker := time.NewTicker(2 * time.Hour)
+	defer reconcileTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -346,6 +349,9 @@ func (m *Manager) Run(ctx context.Context) {
 
 		case <-autoRetryTicker.C:
 			m.runAutoRetry(ctx)
+
+		case <-reconcileTicker.C:
+			m.runSchedulerReconcile(ctx)
 		}
 	}
 }
@@ -884,10 +890,21 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 			"session_key", sess.Key,
 		)
 	default:
-		slog.Warn("session event queue full, dropping event",
+		slog.Warn("session event queue full, blocking with timeout",
 			"event_id", evt.ID,
 			"session_key", sess.Key,
 		)
+		// Instead of silently dropping the event, block with a timeout.
+		// A dropped event (human comment, PR merge, etc.) is worse than a brief delay.
+		select {
+		case sess.events <- evt:
+			slog.Info("queued event after brief wait", "event_id", evt.ID)
+		case <-time.After(5 * time.Second):
+			slog.Error("session event queue still full after 5s, dropping event",
+				"event_id", evt.ID,
+				"session_key", sess.Key,
+			)
+		}
 	}
 }
 
@@ -2290,4 +2307,37 @@ func (m *Manager) handleSpecLifecycleLabels(ctx context.Context, evt *event.Even
 
 	slog.Info("spec labels: transitioned spec-proposed → spec-approved",
 		"repo", evt.Repository, "pr", evt.PRNumber)
+}
+
+// runSchedulerReconcile periodically re-checks all blocked issues whose
+// dependencies may now be satisfied. This is a safety net for cases where
+// the event-driven unblock was missed (network errors, webhook failures,
+// restarts). Runs every 2 hours.
+func (m *Manager) runSchedulerReconcile(ctx context.Context) {
+	if m.scheduler == nil || m.forgejoClient == nil {
+		return
+	}
+
+	// Get all repos that have had activity
+	repos := make(map[string]bool)
+	m.mu.RLock()
+	for k := range m.sessions {
+		parts := strings.SplitN(k, "/", 2)
+		if len(parts) == 2 {
+			repo := parts[0] + "/" + strings.SplitN(parts[1], "/", 2)[0]
+			repos[repo] = true
+		}
+	}
+	m.mu.RUnlock()
+
+	for repo := range repos {
+		reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		unblocked, err := m.scheduler.ReconcileBlocked(reconcileCtx, repo)
+		cancel()
+		if err != nil {
+			slog.Warn("scheduler reconcile failed", "repo", repo, "error", err)
+		} else if unblocked > 0 {
+			slog.Info("scheduler reconcile unblocked issues", "repo", repo, "count", unblocked)
+		}
+	}
 }

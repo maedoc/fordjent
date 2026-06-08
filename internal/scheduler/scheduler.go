@@ -768,3 +768,58 @@ func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int)
 	}
 	return issue.PullRequest != nil && (issue.PullRequest.URL != "" || issue.PullRequest.HTMLURL != ""), nil
 }
+
+// ReconcileBlocked scans all "blocked" issues in the given repo and re-checks
+// whether their dependencies are now satisfied. This is a safety net for cases
+// where the event-driven unblock was missed (network errors, webhook delivery
+// failures, restart between events).
+func (s *Scheduler) ReconcileBlocked(ctx context.Context, repo string) (int, error) {
+	slog.Info("scheduler: running blocked-issues reconciliation", "repo", repo)
+
+	issues, err := s.listOpenIssues(ctx, repo)
+	if err != nil {
+		return 0, fmt.Errorf("list open issues: %w", err)
+	}
+
+	unblocked := 0
+	for _, issue := range issues {
+		// Skip issues that aren't blocked
+		isBlocked := false
+		for _, l := range issue.Labels {
+			if l.Name == "blocked" {
+				isBlocked = true
+				break
+			}
+		}
+		if !isBlocked {
+			continue
+		}
+
+		// Parse dependencies using the existing parser
+		deps := parseDependsOn(issue.Body)
+		if len(deps) == 0 {
+			continue
+		}
+
+		// Check if all dependencies are satisfied
+		allSatisfied := true
+		for _, depNum := range deps {
+			closed, err := s.isIssueClosed(ctx, repo, depNum)
+			if err != nil || !closed {
+				allSatisfied = false
+				break
+			}
+		}
+
+		if allSatisfied {
+			slog.Info("scheduler: reconciliation unblocking issue", "issue", issue.Number, "repo", repo)
+			if s.forgejoClient != nil {
+				_ = s.forgejoClient.RemoveIssueLabel(ctx, repo, issue.Number, "blocked")
+				_ = s.forgejoClient.AddIssueLabels(ctx, repo, issue.Number, []string{"ready"})
+			}
+			unblocked++
+		}
+	}
+
+	return unblocked, nil
+}
