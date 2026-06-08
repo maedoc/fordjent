@@ -619,6 +619,21 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	cmdLower := strings.TrimSpace(strings.ToLower(cmdStr))
 	isCommit := strings.HasPrefix(cmdLower, "commit") || strings.HasPrefix(cmdLower, "git commit")
 
+	// Pre-commit check: if this is a commit command and we're on a protected branch,
+	// block it BEFORE the commit happens. The post-commit check below is a safety net
+	// but the commit itself must be prevented to avoid polluting main.
+	if isCommit && t.agentCfg != nil && !t.agentCfg.AllowProtectedPush() {
+		branchCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = t.repoDir
+		branchOut, _ := branchCmd.CombinedOutput()
+		currentBranch := strings.TrimSpace(string(branchOut))
+		for _, pb := range t.agentCfg.ProtectedBranches() {
+			if currentBranch == pb {
+				return "", fmt.Errorf("commit on protected branch %q blocked. Create a feature branch first (e.g., git checkout -b feature/my-feature). Only scaffold sessions may commit on main.", currentBranch)
+			}
+		}
+	}
+
 	// Sanitize: replace newlines in commit messages with spaces to avoid shell
 	// treating them as argument separators
 	if isCommit {
