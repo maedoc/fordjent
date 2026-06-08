@@ -935,6 +935,7 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 			if len(a.scopePrefixes) > 0 {
 				a.tools.SetWriteScope(a.scopePrefixes)
 				a.tools.SetPRScope(a.scopePrefixes)
+				a.tools.SetBashScope(a.scopePrefixes)
 			}
 			if parentRef := extractParentRef(issue.Body); parentRef > 0 && parentRef != evt.IssueNumber {
 				parent, parentErr := a.forgejo.GetIssue(ctx, evt.Repository, parentRef)

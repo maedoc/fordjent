@@ -21,6 +21,22 @@ type ScopedPRCreator interface {
 	SetScopePkgs(pkgs []string)
 }
 
+// ScopedBasher is implemented by tools that support bash scope restrictions.
+type ScopedBasher interface {
+	SetScopePrefixes(prefixes []string)
+}
+
+// SetBashScope restricts bash file-writing commands to the given path prefixes.
+func (r *Registry) SetBashScope(prefixes []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.tools["bash"]; ok {
+		if sb, ok := t.(ScopedBasher); ok {
+			sb.SetScopePrefixes(prefixes)
+		}
+	}
+}
+
 // Tool is the interface that all agent tools must implement.
 type Tool interface {
 	// Name returns the tool's identifier (e.g., "forgejo_comment").

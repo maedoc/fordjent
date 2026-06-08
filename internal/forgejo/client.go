@@ -152,6 +152,8 @@ func (c *Client) MergePR(ctx context.Context, repo string, number int, style str
 
 	resp, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
 		"Do":                     style,
+		"merge_commit_title":     "Merge PR",
+		"merge_message":          "auto",
 		"allow_unrelated_histories": true,
 	})
 	if err != nil {

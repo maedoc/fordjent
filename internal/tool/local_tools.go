@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type bashTool struct {
 	sandboxCfg    sandbox.Config
 	violCounter   *sandbox.ViolationCounter
 	sessionKey    string
+	scopePrefixes []string // if set, block file writes outside these paths
 }
 
 const maxBashOutput = 64 * 1024
@@ -60,6 +62,11 @@ func (t *bashTool) SetSandboxConfig(cfg sandbox.Config) {
 func (t *bashTool) SetViolationCounter(counter *sandbox.ViolationCounter, sessionKey string) {
 	t.violCounter = counter
 	t.sessionKey = sessionKey
+}
+
+// SetScopePrefixes restricts bash file-writing commands to the given path prefixes.
+func (t *bashTool) SetScopePrefixes(prefixes []string) {
+	t.scopePrefixes = prefixes
 }
 
 // bashBlockedPatterns are command substrings that are always blocked for safety.
@@ -125,6 +132,32 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 				strings.Contains(cmdLower, ":"+strings.ToLower(branch)) ||
 				strings.Contains(cmdLower, "head:"+strings.ToLower(branch)) {
 				return "", fmt.Errorf("git push to protected branch %q is blocked. Use a feature branch and forgejo_create_pr instead. Only scaffold sessions may push to main.", branch)
+			}
+		}
+	}
+
+	// Scope restriction: block file-writing bash commands outside allowed prefixes
+	if len(t.scopePrefixes) > 0 {
+		// Detect file-writing patterns: > file, >> file, cat > file, cat <<EOF > file, tee file, cp src dst, mv src dst
+		writePatterns := []*regexp.Regexp{
+			regexp.MustCompile(`>(?:>]){0,1}\s*([a-zA-Z0-9_./-]+)`),
+			regexp.MustCompile(`(?:cat|tee)\s+(?:-Ae Shelter)?\s*([a-zA-Z0-9_./-]+)`),
+			regexp.MustCompile(`(?:cp|mv)\s+(?:\S+\s+)+([a-zA-Z0-9_./-]+)$`),
+		}
+		for _, pat := range writePatterns {
+			matches := pat.FindAllStringSubmatch(params.Command, -1)
+			for _, m := range matches {
+				targetPath := filepath.ToSlash(filepath.Clean(m[1]))
+				allowed := false
+				for _, prefix := range t.scopePrefixes {
+					if strings.HasPrefix(targetPath, prefix) {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					return "", fmt.Errorf("bash command writes to %s which is outside your allowed paths: %v. Use write_file instead, or stay within your assigned package.", targetPath, t.scopePrefixes)
+				}
 			}
 		}
 	}
