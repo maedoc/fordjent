@@ -2058,3 +2058,54 @@ Reproduction is auto-detected when bash/git output contains `go run`, `go test`,
 - All interaction tests pass (automerge, PR comment routing, scaffold, role assignment)
 - Agent, lifecycle, mergequeue, scheduler, provider, cost packages pass
 - Live test: PR #4 created automatically after PR #3 merged (merge-queue-retry working)
+
+---
+
+## Deep Analysis — Additional Gaps Found and Fixed (June 9, 2026)
+
+### Critical / High Severity Fixes Applied
+
+| Gap | Severity | Fix | Commit |
+|-----|----------|-----|--------|
+| Admin endpoint no auth | CRITICAL | Bearer token or basic auth required; endpoints disabled when no token set | d458ba9 |
+| Webhook dedup missing | HIGH | `sync.Map` with event ID keys, 30s TTL, cleanup goroutine | d458ba9 |
+| LLM error field ignored | HIGH | Parse `error` field from OpenAI response; propagate real message | d458ba9 |
+| PM double sessions | HIGH | `isBusy()` check before PM reactivation; skip if original still running | d458ba9 |
+| Clone URL auth format | MEDIUM | `user:token@host` instead of `token@host` | d458ba9 |
+| Event queue silent drop | MEDIUM | 5-second blocking timeout before dropping events | e691d35 |
+| Scheduler reconciliation | MEDIUM | `ReconcileBlocked()` every 2 hours; safety net for missed webhooks | e691d35 |
+| Retry deadline distinction | MEDIUM | `context.Canceled` not retryable (session shutdown); only `DeadlineExceeded` retries | e691d35 |
+
+### Remaining Gaps (Not Yet Implemented)
+
+| # | Area | Severity | Description | Suggested Fix |
+|---|------|----------|-------------|---------------|
+| 1 | Tool safety | HIGH | Bash scope bypass via `tee`, `dd`, pipes, command substitution | Replace regex with command parser; add seccomp/AppArmor profile |
+| 2 | Tool safety | HIGH | write_file path traversal via symlinks | Canonical path resolution with `filepath.EvalSymlinks` + prefix check |
+| 3 | Dependencies | HIGH | No transitive dependency tracking (A→B→C chains) | Recursive closure check in `OnPRMerged` |
+| 4 | Session lifecycle | MEDIUM | No session cleanup: stale branches + workDirs accumulate | Add cleanup of branches older than 24h; add `timed-out` label |
+| 5 | Session lifecycle | MEDIUM | Restart may double-run sessions | Add checkpoint mechanism (last-processed event sequence) |
+| 6 | Dependencies | MEDIUM | `Depends on:` parsing fragile (hyphens, markdown, `and`) | Add more regex patterns; accept `depends-on:` syntax |
+| 7 | Sandbox | MEDIUM | bwrap failure silently disabled | Add `sandbox.fail_on_missing: true` config option |
+| 8 | Provider | LOW | Cost per token defaults to 0; budget checks never fire | Warn when provider has 0 cost and budget is enabled |
+| 9 | Provider | LOW | `reasoning_content` discarded when tool_calls present | Store as separate field; include in memory |
+| 10 | Dependencies | LOW | Sub-issue creation doesn't validate parent exists | GET parent issue before creating sub-issue |
+| 11 | Config | LOW | No config version/migration tracking | Add `version` field; warn on mismatch |
+| 12 | Performance | LOW | `evictOldest()` is O(n) under global lock | Use min-heap or sorted structure |
+
+### Architectural Boundary Notes
+
+**Shell command parsing**: The bash scope check uses regex heuristics (`cat >`, `>>`, `tee`) that can be bypassed with advanced shell syntax. A proper fix requires either:
+- A full command parser (shell syntax tokenizer)
+- OS-level sandboxing (seccomp, AppArmor, bwrap with filesystem restrictions)
+- Both are significant undertakings; the current regex approach is a pragmatic middle ground
+
+**Transitive dependencies**: The scheduler only checks direct dependencies. Implementing transitive closure requires:
+- Building a dependency graph at `OnPRMerged` time
+- Iterating the graph to find all transitively dependent issues
+- Risk: circular dependencies could cause infinite loops (mitigated by visited-set tracking)
+
+**Session cleanup**: Abandoned sessions accumulate work directories and feature branches. A cleanup policy needs to balance:
+- Keeping branches long enough for merge-queue-retry (current: no deletion)
+- Not filling disk with stale data (branches on closed/merged issues are safe to delete)
+- The current approach (no cleanup) is safe but wasteful
