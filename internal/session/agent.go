@@ -572,6 +572,17 @@ func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysi
 
 	var modeInstructions string
 	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
+
+		// Extract the human's review feedback for context
+		var feedbackBody string
+		if comment, ok := evt.Payload["comment"]; ok {
+			if cm, ok := comment.(map[string]interface{}); ok {
+				if body, ok := cm["body"]; ok {
+					feedbackBody = fmt.Sprintf("%v", body)
+				}
+			}
+		}
+
 		modeInstructions = `
 ## PR Review Mode (IMPORTANT)
 You are responding to a review comment on an existing pull request.
@@ -581,6 +592,18 @@ You are responding to a review comment on an existing pull request.
 - Do NOT create a new PR — the PR already exists.
 - Post a comment confirming which issues were fixed.
 - If the PR is mergeable with no conflicts, you may call forgejo_merge_pr to merge it automatically.`
+
+		// If the human specifically requested changes, add emphasis
+		if feedbackBody != "" && a.role == "implementer" {
+			modeInstructions += fmt.Sprintf(`
+
+## Human Reviewer Feedback (ACTION REQUIRED)
+A human reviewer left the following feedback on this PR. You MUST address each point:
+
+%s
+
+Read the code, make the necessary changes, run tests, commit, and push. Then post a comment summarizing what you changed.`, feedbackBody)
+		}
 	} else if evt.PRNumber > 0 {
 		modeInstructions = `
 ## PR Context

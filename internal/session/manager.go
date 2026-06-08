@@ -45,6 +45,7 @@ type Session struct {
 	Sender           string // original webhook sender (e.g. fordjent-bot)
 	IsPMFollowUp     bool   // true if this is a PM re-activation follow-up session
 	IsScaffoldAnswer bool   // true if this session should answer scaffold questions
+	IsPRReviewFix    bool   // true if human commented on PR requesting fixes
 	TriggeringIssue  int    // the sub-issue that triggered the PM re-activation
 
 	claimedReady bool // set when this session claimed a ready→in_progress transition
@@ -790,6 +791,14 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 	if exists {
 		sess.mu.Lock()
 		sess.LastActive = time.Now()
+		// If this is a human comment on an open PR, mark it as a review fix session.
+		// This overrides the reviewer role (no write tools) to implementer (has write tools)
+		// so the agent can actually make the requested changes.
+		if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" && !strings.Contains(evt.Sender, "fordjent") && !strings.Contains(evt.Sender, "djent") {
+			sess.IsPRReviewFix = true
+			slog.Info("PR comment from human: marking session as review-fix (implementer role)",
+				"session_key", sess.Key, "pr", evt.PRNumber, "sender", evt.Sender)
+		}
 		sess.mu.Unlock()
 		return sess, nil
 	}
@@ -875,6 +884,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		Sender:          evt.Sender,
 		IsPMFollowUp:    evt.Type == event.PMReactivate,
 		IsScaffoldAnswer: hasQuestionLabel(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber),
+		IsPRReviewFix:   evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" && !strings.Contains(evt.Sender, "fordjent") && !strings.Contains(evt.Sender, "djent"),
 		TriggeringIssue: evt.TriggeringIssue,
 		events:          make(chan *event.Event, 64),
 	}
@@ -927,9 +937,13 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			"repo", sess.Repository, "issue", sess.IssueNumber)
 	}
 
-	// All PRs get a reviewer session to inspect and merge code.
-	// Bot PRs retain auto-bypass for merge approval (handled in forgejo_merge_pr tool).
-	if sess.PRNumber > 0 && (role == "" || role == "implementer") {
+	// PR review fix: when a human commented on an open PR requesting changes,
+	// the agent should be an implementer (write tools) not a reviewer (read-only).
+	// This allows the agent to actually make the requested fixes.
+	if sess.IsPRReviewFix {
+		role = "implementer"
+		slog.Info("PR review fix session: using implementer role", "session_key", sess.Key, "pr", sess.PRNumber)
+	} else if sess.PRNumber > 0 && (role == "" || role == "implementer") {
 		role = "reviewer"
 	}
 
