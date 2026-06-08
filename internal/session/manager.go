@@ -55,6 +55,13 @@ type Session struct {
 	events chan *event.Event
 }
 
+// isBusy returns whether the session is currently processing events.
+func (s *Session) isBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy
+}
+
 // sessionInfoAdapter adapts Session to tool.SessionInfo
 type sessionInfoAdapter struct {
 	workDir string
@@ -757,6 +764,19 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// parent are complete, it emits a PMReactivate event. Create a fresh
 	// follow-up session for the parent PM issue.
 	if evt.Type == event.PMReactivate && evt.IssueNumber > 0 {
+		// Check if the original PM session is still running
+		prefixKey := fmt.Sprintf("%s/issues/%d", evt.Repository, evt.IssueNumber)
+		m.mu.RLock()
+		for k, sess := range m.sessions {
+			if strings.HasPrefix(k, prefixKey) && sess.isBusy() {
+				m.mu.RUnlock()
+				slog.Info("skipping PM reactivation — original PM session still running",
+					"session_key", k, "issue", evt.IssueNumber)
+				return
+			}
+		}
+		m.mu.RUnlock()
+
 		timestamp := time.Now().Unix()
 		sessionKey := fmt.Sprintf("%s/issues/%d/pm-followup-%d", evt.Repository, evt.IssueNumber, timestamp)
 		reactivateEvt := event.NewEvent(event.PMReactivate, evt.Repository, evt.IssueNumber, 0, evt.Sender, "reactivate")
@@ -875,11 +895,17 @@ func buildCloneURL(baseURL, token, repo string) string {
 	if token == "" {
 		return fmt.Sprintf("%s/%s.git", baseURL, repo)
 	}
+
+	// Determine the clone username. Git requires user:token format for authentication.
+	// When only a token is provided, git prompts for a password interactively,
+	// which fails in automated environments. Use a sensible default username.
+	cloneUser := "fordjent-bot"
+
 	if strings.HasPrefix(baseURL, "https://") {
-		return fmt.Sprintf("https://%s@%s/%s.git", token, strings.TrimPrefix(baseURL, "https://"), repo)
+		return fmt.Sprintf("https://%s:%s@%s/%s.git", cloneUser, token, strings.TrimPrefix(baseURL, "https://"), repo)
 	}
 	if strings.HasPrefix(baseURL, "http://") {
-		return fmt.Sprintf("http://%s@%s/%s.git", token, strings.TrimPrefix(baseURL, "http://"), repo)
+		return fmt.Sprintf("http://%s:%s@%s/%s.git", cloneUser, token, strings.TrimPrefix(baseURL, "http://"), repo)
 	}
 	return fmt.Sprintf("%s/%s.git", baseURL, repo)
 }

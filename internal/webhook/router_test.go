@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
@@ -824,5 +825,90 @@ func TestIsAgentEvent_PingParentMarkerStillFiltersFordMarker(t *testing.T) {
 
 	if !router.isAgentEvent(payload) {
 		t.Error("comment with <!-- ford --> marker (no ford-ping) should still be filtered")
+	}
+}
+
+func TestAdminEndpointRequiresAuth(t *testing.T) {
+	cfg := &config.Config{
+		Webhook:  config.WebhookConfig{Secret: "test-secret"},
+		Security: config.SecurityConfig{AdminToken: "secret-admin-token"},
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	// Without auth: should get 401
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for admin without auth, got %d", w.Code)
+	}
+
+	// With bearer token: should get 200 (or redirect)
+	req2 := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req2.Header.Set("Authorization", "Bearer secret-admin-token")
+	w2 := httptest.NewRecorder()
+	router.mux.ServeHTTP(w2, req2)
+	if w2.Code == http.StatusUnauthorized {
+		t.Errorf("expected non-401 for admin with valid token, got %d", w2.Code)
+	}
+
+	// With wrong token: should get 401
+	req3 := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req3.Header.Set("Authorization", "Bearer wrong-token")
+	w3 := httptest.NewRecorder()
+	router.mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for admin with wrong token, got %d", w3.Code)
+	}
+}
+
+func TestAdminEndpointDisabledWithoutToken(t *testing.T) {
+	cfg := &config.Config{
+		Webhook:  config.WebhookConfig{Secret: "test-secret"},
+		Security: config.SecurityConfig{AdminToken: ""}, // no token
+	}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for admin without token configured, got %d", w.Code)
+	}
+}
+
+func TestWebhookDedup(t *testing.T) {
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+
+	// Simulate a seen delivery ID
+	deliveryID := "dedup-test-123"
+	router.seenEvents.Store(deliveryID, time.Now())
+
+	// Build a push event payload
+	payload := map[string]interface{}{
+		"action":     "created",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "alice"},
+		"head_commit": map[string]interface{}{
+			"id": "abc123",
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/acp/v1/events", bytes.NewReader(body))
+	req.Header.Set("X-Forgejo-Event", "push")
+	req.Header.Set("X-Forgejo-Delivery", deliveryID)
+	w := httptest.NewRecorder()
+	router.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "duplicate") {
+		t.Errorf("expected duplicate status, got: %s", w.Body.String())
 	}
 }

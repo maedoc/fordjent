@@ -129,6 +129,11 @@ type openAIResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+	Error *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
 }
 
 // Client is an LLM provider client using OpenAI-compatible API.
@@ -302,6 +307,9 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 	}
 
 	if len(openaiResp.Choices) == 0 {
+		if openaiResp.Error != nil {
+			return nil, nil, fmt.Errorf("LLM error: %s (code: %s)", openaiResp.Error.Message, openaiResp.Error.Code)
+		}
 		return nil, nil, fmt.Errorf("no choices in response")
 	}
 

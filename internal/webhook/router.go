@@ -40,6 +40,7 @@ type Router struct {
 	shuttingDown bool
 	lc        *lifecycle.Lifecycle // optional: set post-construction for webhook delivery tracking
 	forgejo   *forgejo.Client      // optional: set post-construction for PR state checks
+	seenEvents sync.Map            // event_id -> time.Time for dedup (TTL 30s)
 }
 
 func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router {
@@ -54,14 +55,43 @@ func NewRouter(cfg *config.Config, bus *event.Bus, logger *slog.Logger) *Router 
 	r.mux.HandleFunc("/healthz", r.handleHealth)
 	r.mux.HandleFunc("/readyz", r.handleReadyz)
 	r.mux.HandleFunc("/metrics", metrics.Handler())
-	r.mux.HandleFunc("/status", r.handleStatus)
+	// /status is registered below (with or without auth)
 	r.mux.HandleFunc("/tokens-per-minute", r.handleTokensPerMinute)
 	r.mux.HandleFunc("/activity", r.handleActivity)
 	r.mux.HandleFunc("/trace/", r.handleTrace) // /trace/{owner}/{repo}/{issues|pulls}/{N}
 	r.mux.HandleFunc("/acp/v1/stream", r.handleStream)
 	r.mux.HandleFunc("/dashboard", r.handleDashboard)
-	r.mux.Handle("/admin", webui.Handler(cfg))
-	r.mux.Handle("/admin/", webui.Handler(cfg))
+
+	// Admin endpoint: require auth if admin_token is set
+	if cfg.Security.AdminToken != "" {
+		r.mux.Handle("/admin", requireAuth(cfg.Security.AdminToken, webui.Handler(cfg)))
+		r.mux.Handle("/admin/", requireAuth(cfg.Security.AdminToken, webui.Handler(cfg)))
+		r.mux.HandleFunc("/status", requireAuthFunc(cfg.Security.AdminToken, r.handleStatus))
+	} else {
+		r.logger.Warn("admin_token not set — admin/status endpoints disabled for security")
+		r.mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "admin endpoint disabled: set admin_token in config", http.StatusForbidden)
+		})
+		r.mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "admin endpoint disabled: set admin_token in config", http.StatusForbidden)
+		})
+		// /status remains public for health checks; /metrics is also public
+		r.mux.HandleFunc("/status", r.handleStatus)
+	}
+
+	// Periodic cleanup of seen event IDs (TTL ~30s)
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			now := time.Now()
+			r.seenEvents.Range(func(key, value interface{}) bool {
+				if t, ok := value.(time.Time); ok && now.Sub(t) > 30*time.Second {
+					r.seenEvents.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 
 	return r
 }
@@ -647,6 +677,22 @@ func (r *Router) handleWebhook(w http.ResponseWriter, req *http.Request) {
 			num = int(n)
 		}
 	}
+	// Dedup: skip if we've already processed this delivery ID recently
+	// Use the Forgejo delivery header for early dedup before event normalization.
+	deliveryID := req.Header.Get("X-Forgejo-Delivery")
+	if deliveryID == "" {
+		deliveryID = req.Header.Get("X-Gitea-Delivery")
+	}
+	if deliveryID != "" {
+		if _, seen := r.seenEvents.Load(deliveryID); seen {
+			r.logger.Info("duplicate webhook delivery, skipping", "delivery_id", deliveryID)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"delivery_id": "%s", "status": "duplicate"}`, deliveryID)
+			return
+		}
+		r.seenEvents.Store(deliveryID, time.Now())
+	}
+
 	r.logger.Info("webhook received",
 		"event_type", eventType,
 		"action", action,
@@ -1422,4 +1468,38 @@ func tryFormatJSON(raw string) string {
 		return raw
 	}
 	return string(formatted)
+}
+
+// requireAuth wraps an http.Handler with bearer-token or basic-auth authentication.
+func requireAuth(token string, handler http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !checkBearerToken(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}
+}
+
+// requireAuthFunc wraps an http.HandlerFunc with bearer-token or basic-auth authentication.
+func requireAuthFunc(token string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !checkBearerToken(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+// checkBearerToken validates the Authorization header (Bearer token or Basic auth).
+func checkBearerToken(r *http.Request, expected string) bool {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ") == expected
+	}
+	if user, pass, ok := r.BasicAuth(); ok {
+		return user == "admin" && pass == expected
+	}
+	return false
 }

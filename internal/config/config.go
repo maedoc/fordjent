@@ -135,6 +135,7 @@ type SecurityConfig struct {
 	ProtectedBranches     []string `yaml:"protected_branches"`
 	RequirePRForWorkflows bool     `yaml:"require_pr_for_workflows"`
 	FilterAgentEvents     bool     `yaml:"filter_agent_events"`
+	AdminToken            string   `yaml:"admin_token"` // bearer token for /admin and /status endpoints
 }
 
 type MemoryConfig struct {

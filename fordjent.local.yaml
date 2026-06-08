@@ -110,6 +110,7 @@ security:
   - master
   require_pr_for_workflows: true
   filter_agent_events: true
+  admin_token: "local-admin-token-12345"
 memory:
   enabled: true
   compaction_cron: 0 2 * * *
