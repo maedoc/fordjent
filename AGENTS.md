@@ -1819,3 +1819,28 @@ Expanded "Scope Restriction" section in the implementer system prompt with concr
 
 The scope restriction only works when the issue title/body contains a recognizable package path (e.g., `pkg/math`, `internal/foo`). Issues that merely describe functionality without mentioning a package path will not be scoped, and the agent will be free to modify any file. This is acceptable — unscoped agents behave as before.
 
+
+---
+
+## Bug Fixes 31–33 (June 8, 2026)
+
+### Bug Fix 31 — Forgejo Merge API Returns 405 Without Required Fields
+**Problem**: `POST /api/v1/repos/{repo}/pulls/{N}/merge` consistently returned HTTP 405 "Please try again later" even when the PR was mergeable.
+
+**Fix**: Added `merge_commit_title` and `merge_message` fields to the merge request body. Forgejo v9 requires these; without them it returns 405 instead of a proper error message.
+
+**Files changed**: `internal/forgejo/client.go` — `MergePR()` now sends `merge_commit_title: "Merge PR"` and `merge_message: "auto"`.
+
+### Bug Fix 32 — Bash Heredoc Bypasses write_file Scope Restriction
+**Problem**: Scoped agents used `cat <<EOF > pkg/str/str.go` via the bash tool to write files in other packages, completely bypassing the write_file scope restriction added in Bug Fix 30.
+
+**Fix**: Added scope-aware checking to the bash tool for file-writing commands (`>`, `>>`, `cat >`, `tee`, `cp`, `mv`). When scopePrefixes is set, these commands are blocked if the target path is outside the allowed prefixes. Added `SetScopePrefixes()` to `bashTool` and `SetBashScope()` to the tool registry.
+
+**Files changed**: `internal/tool/local_tools.go`, `internal/tool/registry.go`, `internal/session/agent.go`.
+
+### Bug Fix 33 — Build Gate Runs go test ./... Instead of Scoped Path
+**Problem**: `forgejo_create_pr` ran `go test ./...` which tested ALL packages, including other agents' incomplete stubs. This caused false failures: an agent working on `pkg/math` would be blocked because `pkg/str` had an empty test file that didn't compile.
+
+**Fix**: When `scopePkgs` is set on the PR tool, the build/test gate runs only the scoped packages (e.g., `go test ./pkg/math/`). Falls back to `./...` when no scope is detected.
+
+**Files changed**: `internal/tool/forgejo_tools.go` — `forgejoCreatePRTool` gained `scopePkgs` field and `SetScopePkgs()` method; build/test commands use scoped paths when available. `internal/tool/registry.go` — `SetPRScope()` converts scope prefixes to Go import paths.
