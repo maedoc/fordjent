@@ -1992,3 +1992,69 @@ The `isReadFileOutput()` regex `^ {5}\d+\t` only matched 5-space prefixes. But `
 | 2 (Design Debate) | ❌ Human B ignored | ✅ Binary search implemented (preserves order) |
 | 4 (Bug Verify) | — | ✅ Bug fix + regression test + message change |
 
+
+---
+
+## Gap Fixes 1-5 (June 8, 2026)
+
+### Gap 1 — Merge Queue Auto-Retry (CRITICAL)
+**Problem**: When the merge queue blocked `forgejo_create_pr`, the agent posted a reflection comment and the session died. No mechanism existed to retry after the blocking PR merged. The `blocked_branches` table existed and `ListBlockedBranches` + `ResolveBlockedBranch` methods were implemented, but the auto-requeue only posted a comment that nobody acted on.
+
+**Fix**: Three-layer fix:
+1. **Don't delete blocked branches**: Removed the `git push --delete origin <branch>` cleanup — the branch must survive so the re-dispatched agent can reuse it.
+2. **Re-dispatch instead of comment**: When a PR merges, instead of posting a "gate is clear" comment, dispatch a synthetic `IssueOpened` event that creates a fresh implementer session. The new agent will clone the repo, find the code on the branch, and attempt `forgejo_create_pr` again.
+3. **Force retry when blocking PR just merged**: The merge gate can still report "blocked" for 2-5 seconds after a PR merges because Forgejo hasn't updated its internal state. If the gate message references the just-merged PR number (`#N`), we re-dispatch anyway — the agent will do a fresh clone where the stale PR is already closed.
+4. **Retry counter**: Added `retry_count` column to `blocked_branches` table. After 2 re-dispatches, the branch is resolved (no more retries).
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | Re-dispatch `IssueOpened` event instead of comment; force retry when gate refs just-merged PR; 5s sleep (was 2s) |
+| `internal/lifecycle/lifecycle.go` | `retry_count` column on `blocked_branches`; `RetryCount` field on `BlockedBranch` |
+| `internal/tool/forgejo_tools.go` | Removed branch deletion on merge queue block |
+
+### Gap 2 — Forgejo Merge API 405 (HIGH)
+**Problem**: `POST /repos/{repo}/pulls/{N}/merge` returns 405 for some merge styles. The automerge flow tried only "merge" style, then fell back to a full reviewer LLM session that wasted 20+ turns and never actually merged.
+
+**Fix**:
+1. **Multi-style merge attempt**: Try `merge`, `squash`, and `rebase-merge` in order before giving up.
+2. **Eliminate reviewer fallback**: If all API merge styles fail, post a warning comment explaining the automerge label is set for Forgejo native auto-merge, and return. No LLM session is spawned. The `automerge` label (already added by `forgejo_create_pr`) lets Forgejo's built-in auto-merge handle it when checks pass.
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/session/manager.go` | Multi-style merge loop; post comment on 405; no reviewer fallback |
+
+### Gap 3 — PM Role Tag Auto-Injection (MEDIUM)
+**Problem**: The PM agent sometimes created sub-issues without `[implementer]` tags. The role gate then blocked these issues with a `needs-role` label, requiring manual intervention.
+
+**Fix**: Added `hasRoleTag()` and `inferRoleTag()` functions in `forgejo_tools.go`. Before creating an issue, if the title lacks a role tag, the tool infers one from keywords: test/QA → `[tester]`, CI/Docker/deploy → `[devops]`, review/refactor → `[reviewer]`, default → `[implementer]` (covers 90%+ of PM sub-issues).
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/tool/forgejo_tools.go` | `hasRoleTag()`, `inferRoleTag()`, auto-inject before API call |
+
+### Gap 4 — Automerge Reviewer Session Eliminated (MEDIUM)
+**Problem**: When direct API merge failed, the automerge flow spawned a reviewer LLM session. With a 12B model, this meant 15-20 turns of exploration (27 bash calls in one test) before hitting max-turns without actually merging.
+
+**Fix**: Completely eliminated the reviewer fallback. If all 3 merge styles fail, post a comment and rely on the `automerge` label for Forgejo native auto-merge. This closes the loop: PR creation → automerge label → direct API merge attempt → comment if failed → Forgejo native auto-merge handles it.
+
+### Gap 5 — Bug Reproduction Steering (MEDIUM)
+**Problem**: The implementer prompt said to reproduce bugs first, but the 12B model often skipped this and went straight to writing a fix. Without reproduction, the agent couldn't verify its fix actually works.
+
+**Fix**: Added `isBugReport` detection and `SetBugReport()` on the TurnExecutor. When an issue contains bug keywords (crash, panic, broken, fails, segfault, nil pointer, etc.), a steering message is injected on turns 2-5:
+> "This is a BUG report. You MUST reproduce the bug BEFORE writing any fix. Run the code with the described trigger scenario and confirm the crash/error."
+
+Reproduction is auto-detected when bash/git output contains `go run`, `go test`, `go build`, `python`, `pytest`, or `./` patterns. Once detected, the steering stops.
+
+**Files changed**:
+| File | Change |
+|------|--------|
+| `internal/agent/turn.go` | `isBugReport`, `hasReproduced` fields; `SetBugReport()`; steering injection; reproduction detection in `RecordToolCall` |
+| `internal/session/agent.go` | `isBugReport()` function; calls `SetBugReport()` in `buildContext` |
+
+### Validation
+- All interaction tests pass (automerge, PR comment routing, scaffold, role assignment)
+- Agent, lifecycle, mergequeue, scheduler, provider, cost packages pass
+- Live test: PR #4 created automatically after PR #3 merged (merge-queue-retry working)
