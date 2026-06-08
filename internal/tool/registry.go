@@ -10,6 +10,11 @@ import (
 	"github.com/fordjent/fordjent/internal/provider"
 )
 
+// ScopedWriter is implemented by tools that support path-based write restrictions.
+type ScopedWriter interface {
+	SetAllowedPrefixes(prefixes []string)
+}
+
 // Tool is the interface that all agent tools must implement.
 type Tool interface {
 	// Name returns the tool's identifier (e.g., "forgejo_comment").
@@ -121,4 +126,16 @@ func (r *Registry) ToolsExcluding(exclude map[string]bool) []provider.ToolDef {
 		})
 	}
 	return defs
+}
+
+// SetWriteScope restricts write_file to the given path prefixes.
+// No-op if write_file is not registered or doesn't implement ScopedWriter.
+func (r *Registry) SetWriteScope(prefixes []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.tools["write_file"]; ok {
+		if sw, ok := t.(ScopedWriter); ok {
+			sw.SetAllowedPrefixes(prefixes)
+		}
+	}
 }

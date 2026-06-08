@@ -62,6 +62,7 @@ type Agent struct {
 	commentCount     int
 	commentLimit     int
 	subIssueCount    int  // tracks forgejo_create_issue calls (for PM exit logic)
+	scopePrefixes    []string // write_file path restriction (e.g., ["pkg/math/"])
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
@@ -797,7 +798,11 @@ You are in Test Engineering mode. Your focus is test quality and coverage:
 
 If you encounter ambiguity or need clarification on requirements, use forgejo_ping_parent to ask the PM a question on the parent issue. Find the parent issue number from the 'Depends on: #N' reference in your issue body. Include your specific question and any relevant context about what's blocking you.`
 	case "implementer":
-		modeInstructions += `
+		scopeDetail := ""
+		if len(a.scopePrefixes) > 0 {
+			scopeDetail = fmt.Sprintf("\n- Your allowed paths: %s", strings.Join(a.scopePrefixes, ", "))
+		}
+		modeInstructions += fmt.Sprintf(`
 
 ## ROLE: Implementer
 You are in Implementer mode. Your focus is writing production code:
@@ -816,12 +821,21 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 5. Commit with git commit and, if needed, create a PR with forgejo_create_pr.
 6. Post ONE summary comment. Stop.
 
+**Scope restriction — CRITICAL:**
+- ONLY modify files in the package or directory mentioned in the issue title/body.
+- If the issue asks you to work on pkg/math, do NOT modify pkg/str, pkg/set, or any other package.
+- Other agents may be working on other packages simultaneously — your job is your assigned package only.
+- If you see empty placeholder files in other packages, leave them alone. They are NOT your responsibility.
+- After writing code, only git add and commit files in YOUR package.
+- The write_file tool will REJECT writes to paths outside your assigned package — this is enforced by the system, not a suggestion.%s
+
 **Anti-patterns to AVOID:**
 - DO NOT read the same file more than twice.
 - DO NOT use git status/log/diff more than once per turn.
 - DO NOT explore the repo structure more than needed.
 - DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.
 - DO NOT think step-by-step or plan before acting — read the file once, make your change, test, commit.
+- DO NOT modify files outside the package specified in the issue.
 - IMPORTANT: write_file REPLACES the entire file. You MUST include all existing unchanged lines plus your changes. If you only write the new lines, the old content is deleted.
 - ALWAYS run go test (or language-appropriate test) BEFORE creating a PR.
 
@@ -833,7 +847,7 @@ If this issue references a spec change (check issue body for 'Spec:' references 
 4. Check the spec's ## Verification section. Run those checks before creating a PR.
 5. After creating a PR, call openspec_mark_task to mark your task complete.
 6. If you cannot satisfy a spec requirement, report via forgejo_ping_parent with reason "spec_conflict".
-7. If no spec reference is found, proceed with normal implementation (issue body is the spec).`
+7. If no spec reference is found, proceed with normal implementation (issue body is the spec).`, scopeDetail)
 	}
 
 	stateInstructions := issueStateInstructions(fsmState)
@@ -916,7 +930,11 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 				Content: fmt.Sprintf("[Context] Issue #%d: %s\n\n%s", evt.IssueNumber, issue.Title, issue.Body),
 			})
 
-			// Parent context: if this issue references a parent, fetch it
+			// Extract scope prefixes from issue title/body for write_file restriction
+			a.scopePrefixes = extractScopePrefixes(issue.Title + " " + issue.Body)
+			if len(a.scopePrefixes) > 0 {
+				a.tools.SetWriteScope(a.scopePrefixes)
+			}
 			if parentRef := extractParentRef(issue.Body); parentRef > 0 && parentRef != evt.IssueNumber {
 				parent, parentErr := a.forgejo.GetIssue(ctx, evt.Repository, parentRef)
 				if parentErr == nil && parent != nil {
@@ -1056,6 +1074,27 @@ func extractParentRef(body string) int {
 		}
 	}
 	return 0
+}
+
+// extractScopePrefixes finds package/directory references in the issue text
+// that should restrict write_file to only those paths.
+// E.g. "pkg/math/math.go" -> ["pkg/math/"], "internal/foo" -> ["internal/foo/"]
+func extractScopePrefixes(text string) []string {
+	var prefixes []string
+	seen := make(map[string]bool)
+
+	// Match common patterns: pkg/X, internal/X, cmd/X, src/X
+	re := regexp.MustCompile(`(?:pkg|internal|cmd|src)/([a-zA-Z0-9_-]+)`)
+	matches := re.FindAllStringSubmatch(text, -1)
+	for _, m := range matches {
+		prefix := m[0] + "/"
+		if !seen[prefix] {
+			seen[prefix] = true
+			prefixes = append(prefixes, prefix)
+		}
+	}
+
+	return prefixes
 }
 
 // closingRefRe matches standard closing keywords: Closes, Fixes, Resolves, Close, Fix, Resolve
@@ -1367,7 +1406,8 @@ func buildRoleRegistry(
 		cit := tool.NewCreateIssueTool(forgejoAdapter, sess.IssueNumber, 0)
 		cit.SetScheduler(sched)
 		registry.Register(cit)
-		registry.Register(tool.NewWriteFileTool(sessionInfo, agentCfg))
+		wft := tool.NewWriteFileTool(sessionInfo, agentCfg)
+		registry.Register(wft)
 		gitT := tool.NewGitTool(sessionInfo, agentCfg)
 		gitT.SetSandboxConfig(sandboxCfg)
 		if violCounter != nil {
