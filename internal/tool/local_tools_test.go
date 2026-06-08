@@ -620,3 +620,16 @@ func TestStripLineNumbers(t *testing.T) {
 		})
 	}
 }
+
+func TestStripLineNumbersVaryingWidth(t *testing.T) {
+	// read_file aligns line numbers: lines 1-9 get 5 spaces, 10-99 get 4 spaces
+	input := "     1\tpackage main\n     2\timport \"fmt\"\n    10\tfunc main() {\n    11\t\tfmt.Println(\"hi\")\n    12\t}\n"
+	want := "package main\nimport \"fmt\"\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n"
+	if !isReadFileOutput(input) {
+		t.Error("expected isReadFileOutput=true for varying-width line numbers")
+	}
+	got := stripLineNumbers(input)
+	if got != want {
+		t.Errorf("stripLineNumbers() = %q, want %q", got, want)
+	}
+}
