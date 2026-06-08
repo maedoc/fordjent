@@ -123,6 +123,7 @@ func (l *Lifecycle) OnSessionBlocked(ctx context.Context, repo string, issueNumb
 			VALUES (?, ?, ?, ?, 'blocked', ?)
 			ON CONFLICT(repo, branch) DO UPDATE SET
 				status = 'blocked',
+				retry_count = retry_count + 1,
 				created_at = excluded.created_at,
 				resolved_at = NULL
 		`, repo, branch, issueNumber, sessionKey, time.Now().UTC())
@@ -141,13 +142,14 @@ type BlockedBranch struct {
 	IssueNumber int       `json:"issue_number"`
 	SessionKey  string    `json:"session_key"`
 	Status      string    `json:"status"`
+	RetryCount  int       `json:"retry_count"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
 // ListBlockedBranches returns all currently blocked branches for a repo.
 func (l *Lifecycle) ListBlockedBranches(ctx context.Context, repo string) ([]BlockedBranch, error) {
 	rows, err := l.db.QueryContext(ctx, `
-		SELECT repo, branch, issue_number, session_key, status, created_at
+		SELECT repo, branch, issue_number, session_key, status, retry_count, created_at
 		FROM blocked_branches
 		WHERE repo = ? AND status = 'blocked'
 		ORDER BY created_at DESC
@@ -160,7 +162,7 @@ func (l *Lifecycle) ListBlockedBranches(ctx context.Context, repo string) ([]Blo
 	for rows.Next() {
 		var b BlockedBranch
 		var t time.Time
-		_ = rows.Scan(&b.Repo, &b.Branch, &b.IssueNumber, &b.SessionKey, &b.Status, &t)
+		_ = rows.Scan(&b.Repo, &b.Branch, &b.IssueNumber, &b.SessionKey, &b.Status, &b.RetryCount, &t)
 		b.CreatedAt = t
 		out = append(out, b)
 	}
@@ -347,6 +349,7 @@ func initSchema(db *sql.DB) error {
 			issue_number INTEGER NOT NULL DEFAULT 0,
 			session_key  TEXT NOT NULL,
 			status       TEXT NOT NULL DEFAULT 'blocked',
+			retry_count  INTEGER NOT NULL DEFAULT 0,
 			created_at   DATETIME NOT NULL,
 			resolved_at  DATETIME
 		);

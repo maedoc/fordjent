@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/fordjent/fordjent/internal/config"
@@ -46,6 +47,8 @@ type TurnExecutor struct {
 	toolCallCounts map[string]int  // per-tool call counts
 	turnSteered    map[int]bool    // tracks which steering thresholds have fired
 	lastToolOutput map[string]string // last output per tool (for duplicate detection)
+	isBugReport    bool            // true when the issue describes a bug/crash/error
+	hasReproduced  bool            // true after a build/run/test command has been executed
 }
 
 func NewTurnExecutor(
@@ -84,9 +87,28 @@ func (te *TurnExecutor) SetExcludeTools(names map[string]bool) {
 	te.excludeTools = names
 }
 
+// SetBugReport marks this session as a bug report so the reproduction-first
+// steering message is injected.
+func (te *TurnExecutor) SetBugReport() {
+	te.isBugReport = true
+}
+
 // RecordToolCall increments the call count for a tool and tracks output for duplicate detection.
+// It also detects build/run/test execution for bug-reproduction tracking.
 func (te *TurnExecutor) RecordToolCall(name string, output string) {
 	te.toolCallCounts[name]++
+
+	// Detect build/run/test execution for bug-reproduction tracking
+	if !te.hasReproduced && (name == "bash" || name == "git") {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "go run") || strings.Contains(lower, "go test") ||
+			strings.Contains(lower, "go build") || strings.Contains(lower, "python") ||
+			strings.Contains(lower, "pytest") || strings.Contains(lower, "./") ||
+			strings.Contains(lower, "panic") || strings.Contains(lower, "error") ||
+			strings.Contains(lower, "fail") || strings.Contains(lower, "pass") {
+			te.hasReproduced = true
+		}
+	}
 	// Track last output (truncated) for duplicate detection on bash/git
 	if name == "bash" || name == "git" {
 		if len(output) > 200 {
@@ -211,7 +233,19 @@ func (te *TurnExecutor) ApplySteering(messages []provider.Message, lastToolName,
 		})
 	}
 
-	// 2. Duplicate output nudge (same bash/git result twice)
+	// 2. Bug reproduction steering: if this is a bug report and the agent
+	// hasn't run a build/test command yet, nudge them to reproduce first.
+	if te.isBugReport && !te.hasReproduced && te.turnCount >= 2 && te.turnCount <= 5 {
+		if !te.turnSteered[-500] {
+			te.turnSteered[-500] = true
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: "[Fordjent Steering] This is a BUG report. You MUST reproduce the bug BEFORE writing any fix. Run the code with the described trigger scenario (e.g., go run . <bad-input> or go test ./...) and confirm the crash/error. Only then write your fix.",
+			})
+		}
+	}
+
+	// 3. Duplicate output nudge (same bash/git result twice)
 	if nudge := te.DuplicateOutputNudge(lastToolName, lastToolOutput); nudge != "" {
 		messages = append(messages, provider.Message{
 			Role:    "user",

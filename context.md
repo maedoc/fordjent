@@ -1,234 +1,338 @@
-# PR Review Feedback Flow — Scouting Findings
+# Code Context — 5 Gap Analysis
 
-## 1. How PR Review Sessions Are Created and What Role They Get
+## Gap 1: Merge Queue Auto-Retry
 
-### Session Creation Flow
+### (a) Where CheckGate is called: `internal/tool/forgejo_tools.go:659`
 
-PR review sessions are created through **two paths**:
+```go
+// Line 648-686
+if t.mq != nil {
+    var mqErr error
+    for attempt := 0; attempt < 3; attempt++ {
+        blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
+        if err == nil {
+            if blocked {
+                slog.Warn("create_pr: merge queue blocked", "branch", params.Head, "msg", msg)
+                if t.repoDir != "" {
+                    cmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "push", "--delete", "origin", params.Head)
+                    // ... cleanup branch
+                }
+                return "", fmt.Errorf("%w: %s", sentinel.ErrBlocked, msg)
+            }
+            break
+        }
+        // ... retry on transient errors
+    }
+}
+```
 
-**Path A: Automerge label detected** (`Manager.handleEvent`, line ~476)
-When `pull_request.label_updated` fires and an `automerge` label appears on an open PR:
-- A synthetic `IssueCommentCreated` event is created with session key `repo/pulls/N`
-- The synthetic payload contains a comment body: `"[System] This PR has the 'automerge' label. Review the code and merge if it passes all checks."`
-- This triggers `getOrCreate()` → `runSession()`
+The `MergeGate` interface (line 500):
+```go
+type MergeGate interface {
+    CheckGate(ctx context.Context, repo, headBranch, baseBranch string) (blocked bool, message string, err error)
+}
+```
 
-**Path B: PR comment/ review event** (`Agent.ProcessEvent`, line ~574)
-When a `issue_comment.created` or `pull_request_review_comment.created` event arrives with `PRNumber > 0`:
-- The session was already created (likely by automerge path A or a prior PR opened event)
-- `ProcessEvent()` checks for PR comments and checks out the PR branch
+### (b) What happens after block message: `internal/session/manager.go:1114-1126`
 
-**Role assignment** (`Manager.runSession`, line ~956):
+When `forgejo_create_pr` returns `err` containing `sentinel.ErrBlocked`:
+
+```go
+if err := agt.ProcessEvent(ctx, evt); err != nil {
+    if errors.Is(err, sentinel.ErrBlocked) {
+        slog.Info("session blocked by merge queue", "session_key", sess.Key)
+        // ... git branch name extraction
+        m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
+    }
+    // ...
+}
+```
+
+`OnSessionBlocked` (in `internal/lifecycle/lifecycle.go`) labels the issue, logs the time, and ends the session. **The agent never tries again.**
+
+### (c) How scheduler `OnPRMerged` works: `internal/scheduler/scheduler.go:74-88`
+
+```go
+func (s *Scheduler) OnPRMerged(ctx context.Context, repo string, mergedPRNumber int) ([]PMReactivateResult, error) {
+    err := s.checkAndUnblock(ctx, repo, mergedPRNumber)
+    // ...
+}
+
+func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNumber int) error {
+    // 1. List all open issues
+    issues, _ := s.listOpenIssues(ctx, repo)
+    // 2. Detect circular deps
+    // 3. For each issue with "Depends on: #N" deps, check if deps are closed
+    // 4. If all deps closed → remove 'blocked', add 'ready', add reaction
+}
+```
+
+### (d) Auto-retry mechanism needed
+
+**Current problem**: The agent hits the merge queue block, `ErrBlocked` is returned, the session ends via `OnSessionBlocked`, and the branch is deleted. No mechanism exists to retry after the blocking PR merges.
+
+**Where to add retry logic**:
+
+1. **Option A — In `forgejo_tools.go`**: After `sentinel.ErrBlocked` is returned, instead of just returning the error, store the PR creation params (`params.Repository`, `params.Head`, `params.Base`, `params.Title`, `params.Body`) on the session and schedule a delayed retry. Check the `MergeGate` periodically until it clears.
+
+2. **Option B — In `manager.go`**: When `OnSessionBlocked` fires, create a deferred task that watches for the blocking PRs' merge event. On merge, re-dispatch the same event to the agent session (if still alive) or spin up a new session.
+
+3. **Option C — In `scheduler.go`**: Extend `OnPRMerged` to create synthetic events for any sessions that were blocked by the now-merged PR.
+
+**Key data structures**:
+- `mergequeue.Client.CheckGate` — already knows which PR numbers cause the block
+- `sentinel.ErrBlocked` — already defined, already wrapped in the error message
+- `lifecycle.Lifecycle.OnSessionBlocked` — already logs and labels; does NOT schedule retry
+
+### Interface: `internal/mergequeue/queue.go:63`
+```go
+func (c *Client) CheckGate(ctx context.Context, repo, headBranch, baseBranch string) (bool, string, error)
+```
+
+---
+
+## Gap 2: Forgejo Merge API 405
+
+### (a) `MergePR` implementation: `internal/forgejo/client.go:144-179`
+
+```go
+func (c *Client) MergePR(ctx context.Context, repo string, number int, style string) error {
+    apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "merge")
+
+    resp, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]interface{}{
+        "Do":                     style,
+        "merge_commit_title":     "Merge PR",
+        "merge_message":          "auto",
+        "allow_unrelated_histories": true,
+    })
+    // ...
+}
+```
+
+### (b) Payload sent
+
+The payload keys `Do`, `merge_commit_title`, `merge_message`, and `allow_unrelated_histories` are sent. Per the AGENTS.md, Bug #31 fixed the 405 by adding `merge_commit_title` and `merge_message`, but **405 still occurs for some merge styles** on Forgejo v9.
+
+### (c) Automerge flow in `manager.go:659-703`
+
+```go
+// Automerge label detection on PRs
+if evt.Type == event.PullRequestLabelUpdated && evt.PRNumber > 0 {
+    // ...
+    if hasAutomerge {
+        // Try direct API merge
+        mergeErr := m.forgejoClient.MergePR(ctx, evt.Repository, evt.PRNumber, "merge")
+        if mergeErr == nil {
+            slog.Info("automerge: direct merge succeeded")
+            return  // SUCCESS — no LLM session needed
+        }
+        slog.Warn("automerge: direct merge failed, falling back to reviewer")
+
+        // Fallback: spawn reviewer session
+        synthEvt := event.NewEvent(
+            event.IssueCommentCreated, evt.Repository, evt.IssueNumber, evt.PRNumber,
+            "automerge-trigger", "created",
+        )
+        synthEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
+        synthEvt.Payload = map[string]interface{}{
+            "comment": map[string]interface{}{"body": "[System] This PR has the 'automerge' label..."},
+        }
+        m.handleEvent(ctx, synthEvt)  // ← This spawns a reviewer agent session
+    }
+}
+```
+
+### (d) Automerge label workaround: `internal/tool/forgejo_tools.go:799-804`
+
+```go
+// Add 'automerge' label to trigger Forgejo native auto-merge.
+if lerr := t.adapter.Client().AddIssueLabels(ctx, params.Repository, prResp.Number, []string{"automerge"}); lerr != nil {
+    slog.Warn("create_pr: failed to add automerge label", "error", lerr)
+}
+```
+
+The `automerge` label triggers Forgejo's native auto-merge (if configured). Per AGENTS.md, the 405 API merge still happens because this is a "workaround" — the label approach bypasses the API but the API merge attempt runs FIRST and fails before the label is even added.
+
+**Fix approach**: Add the `automerge` label BEFORE calling `MergePR()` in manager.go, so Forgejo's native auto-merge handles it without needing the API call. If native auto-merge already merged it, the `Forgejo GetPR` check at line 680 (`prDetail.State == "open"`) would detect it's already merged and skip.
+
+---
+
+## Gap 3: PM Missing `[implementer]` Tags on Sub-Issues
+
+### (a) PM system prompt: `internal/session/agent.go:569-597`
+
+```go
+case "pm":
+    modeInstructions += `
+## ROLE: Project Manager
+...
+**ROLE TAGS ARE MANDATORY**: Every sub-issue title MUST start with a role tag in brackets:
+  - [implementer] for code implementation tasks
+  - [devops] for CI/CD, Docker, infrastructure, deployment tasks
+  - [tester] for testing, QA, integration test tasks
+  - [reviewer] for code review, PR review tasks
+  - Example: "[implementer] Implement git init command"
+  - Example: "[tester] Write integration tests for auth flow"
+  - Without these tags, the agent won't be assigned the correct tools and will fail.`
+```
+
+### (b) Where `CreateIssue` is called: `internal/tool/forgejo_tools.go:155-225`
+
+The `forgejoCreateIssueTool.Execute()` method sends the agent-provided title/body directly to Forgejo's API. There is **no post-processing** of the title to inject role tags.
+
+```go
+func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+    var params struct { Repository, Title, Body string }
+    json.Unmarshal(args, &params)
+    // ... dedup check ...
+    apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues")
+    payload := map[string]string{"title": params.Title, "body": body}
+    result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
+    // ...
+}
+```
+
+### (c) Auto-inject approach
+
+The fix should go in `forgejoCreateIssueTool.Execute()` before the API call. Logic:
+1. Parse the agent-provided title to detect the intended role from description text (e.g., "implement", "code", "test", "deploy")
+2. Prepend `[role]` prefix if missing
+3. The agent is told the PM creates issues — so the tool itself should sanitize titles
+
+**Where to change**: `internal/tool/forgejo_tools.go` line ~217, right before the `doRequest` call:
+```go
+// Auto-inject role tag if missing
+params.Title = autoInjectRoleTag(params.Title, params.Body)
+```
+
+**Alternative**: Add a tool-level validation step that returns an error to the agent if the title lacks a role tag, forcing the agent to re-submit. The `execute` pattern already returns errors that the LLM sees — this would cause 1 retry per sub-issue.
+
+---
+
+## Gap 4: Automerge Fallback LLM Session Wastes Turns
+
+### (a) Fallback trigger: `internal/session/manager.go:659-703`
+
+When `MergePR()` fails with 405:
+```go
+slog.Warn("automerge: direct merge failed, falling back to reviewer")
+synthEvt := event.NewEvent(event.IssueCommentCreated, ...)
+synthEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
+synthEvt.Payload = map[string]interface{}{
+    "comment": map[string]interface{}{"body": "[System] This PR has the 'automerge' label. Merge if it passes all checks."},
+}
+m.handleEvent(ctx, synthEvt)
+```
+
+### (b) Max turns per role: `internal/config/config.go:156-160` (defaults) + `internal/session/agent.go:539-553`
+
+```go
+// Defaults in config.go:156-160
+MaxTurnsImplementer: 50,
+MaxTurnsReviewer:    20,
+
+// effectiveMaxTurns in agent.go:539-553
+func (a *Agent) effectiveMaxTurns() int {
+    switch a.role {
+    case "pm":
+        if a.cfg.Agent.MaxTurnsPM > 0 { return a.cfg.Agent.MaxTurnsPM }
+    case "implementer":
+        if a.cfg.Agent.MaxTurnsImplementer > 0 { return a.cfg.Agent.MaxTurnsImplementer }
+    case "reviewer":
+        if a.cfg.Agent.MaxTurnsReviewer > 0 { return a.cfg.Agent.MaxTurnsReviewer }
+    }
+    return a.cfg.Agent.MaxTurns
+}
+```
+
+### (c) How the fallback session gets its role
+
+In `runSession` (manager.go:992):
 ```go
 role := detectRoleFromSession(ctx, m.forgejoClient, sess)
-if sess.IsPMFollowUp { role = "pm" }
-if sess.IsScaffoldAnswer { role = "implementer" }
-
-// ALL PRs get a reviewer session to inspect and merge code.
-// Bot PRs retain auto-bypass for merge approval.
-if sess.PRNumber > 0 && (role == "" || role == "implementer") {
+// ...
+} else if sess.PRNumber > 0 && (role == "" || role == "implementer") {
     role = "reviewer"
 }
 ```
 
-This means **any PR session defaults to "reviewer" role** unless the title contains a role tag (e.g., `[review]`) that maps to a different role. The `detectRoleFromSession()` function checks both issue labels/title AND PR title for role tags.
+The automerge-triggered synthetic event creates a session with key `pulls/N`. `detectRoleFromSession` checks the PR title and falls back to empty string, then the code above sets `role = "reviewer"`. So `MaxTurnsReviewer: 20` applies.
 
-**Session key formats**:
-- Review session: `fjadmin/repo/pulls/N`
-- Issue session: `fjadmin/repo/issues/N`
+**Problem**: The reviewer gets the message "This PR has the 'automerge' label. Merge if it passes all checks." and then tries to call `forgejo_merge_pr` — which is the SAME API that just failed with 405. The agent burns ~10 turns exploring the code, checking tests, and trying to merge before maxing out.
 
----
+### (d) Fix approaches
 
-## 2. Tools: Reviewer vs Implementer Role
+1. **Cap reviewer sessions spawned from automerge**: In `runSession`, detect if the session was auto-triggered (check sender or session key pattern) and override max_turns to something small (e.g., 2 turns — enough to read the PR state and give up).
 
-### Reviewer Role (`buildRoleRegistry`, `case "reviewer":`)
-| Tool | Available | Purpose |
-|------|-----------|---------|
-| `forgejo_comment` | ✅ | Post review comments |
-| `forgejo_list_issues` | ✅ | List issues |
-| `forgejo_get_issue` | ✅ | Get issue details |
-| `forgejo_search_code` | ✅ | Code search |
-| `forgejo_add_reaction` | ✅ | Add emoji reactions |
-| `forgejo_list_branches` | ✅ | List branches |
-| `forgejo_list_prs` | ✅ | List PRs |
-| `forgejo_pr_files` | ✅ | Files changed in a PR |
-| `forgejo_list_files` | ✅ | List repo files |
-| `forgejo_list_hooks` | ✅ | List webhooks |
-| `forgejo_list_collabs` | ✅ | List collaborators |
-| `forgejo_get_version` | ✅ | Forgejo version info |
-| `forgejo_get_user` | ✅ | User info |
-| `forgejo_get_sibling_issues` | ✅ | Related issues |
-| `read_file` | ✅ | Read file content |
-| `forgejo_merge_pr` | ✅ (with `bypassHumanApproval=true`) | Merge the PR |
-| `open_spec_read_spec` | ✅ | Read spec requirements |
-| `open_spec_get_tasks` | ✅ | Read spec tasks |
-| `open_spec_read_change` | ✅ | Read spec change details |
-| `bash` | ❌ **EXPLICITLY BLOCKED** | No shell access for reviewers |
-| `write_file` | ❌ Not registered | Cannot write files |
-| `git` | ❌ Not registered | Cannot run git |
-| `forgejo_create_pr` | ❌ Not registered | Cannot create new PRs |
-| `forgejo_create_issue` | ❌ Not registered | Cannot create sub-issues |
-| `ping_parent` | ❌ Not registered | Cannot ping PM |
-| `delete_branch` | ❌ Not registered | Cannot delete branches |
+2. **Detect 405 and skip fallback**: In manager.go line 685, if `MergePR` fails, check the error status code. If 405, add a comment saying "Automerge API not working — please merge manually" and return early without spawning the reviewer session.
 
-### Implementer Role (`buildRoleRegistry`, `case "implementer" fallthrough`)
-| Tool | Available |
-|------|-----------|
-| Everything a reviewer has (common tools) | ✅ |
-| `bash` | ✅ |
-| `write_file` | ✅ |
-| `git` | ✅ |
-| `forgejo_create_pr` | ✅ |
-| `forgejo_merge_pr` | ✅ (with `bypassHumanApproval=false` — requires human approval for non-bot PRs) |
-| `forgejo_create_issue` | ✅ |
-| `open_spec_mark_task` | ✅ |
-| `ping_parent` | ✅ |
-| `delete_branch` | ✅ |
-| `create_hook` / `delete_hook` | ✅ |
-
-### Key Difference
-The reviewer is **explicitly given no implementation tools** — `write_file`, `git`, `bash`, `forgejo_create_pr` are simply not registered in the registry. This is the primary defense. There are no "soft" restrictions or prompt-level only blocks for the reviewer — the tools simply do not exist in their tool catalog.
+3. **Use the `automerge` label BEFORE API merge**: The `forgejo_create_pr` tool already adds the `automerge` label (line 801). If we change manager.go to check if the PR already has the label and just wait (or re-attempt the merge later), we avoid spawning a session entirely.
 
 ---
 
-## 3. System Prompt Differences: Reviewer vs Implementer
+## Gap 5: Agent Doesn't Reproduce Bugs Before Fixing
 
-### Reviewer System Prompt (agent.go, ~line 707)
-```
-## ROLE: Code Reviewer
-You are in Code Review mode. You do NOT write code or push commits. Your job is:
-- Examine the PR using read_file and forgejo_list_prs (view files, diff).
-- Check for correctness, style, test coverage, and edge cases.
-- If issues found, post a comment describing what needs to change.
-- DO NOT leave PRs open indefinitely — either merge or request changes.
-```
-Plus policy-aware merge instructions (no-auto-merge, require-review, automerge label checks).
+### (b) Implementer prompt: `internal/session/agent.go:861`
 
-**Plus spec-driven review instructions** (openspec reading, verification criteria).
-
-### PM System Prompt
-Extensive — includes PM role, milestone tools, sub-issue creation, OpenSpec spec creation, plan-first policy, PM follow-up mode, scaffold answer mode.
-
-### Implementer System Prompt
-Extensive — includes implementer role, scope restriction, action-first workflow, anti-patterns (don't read same file >2x, don't explore more than needed), bug report reproduction guidance, write_file line number stripping.
-
-### PR Review Mode (shared across roles when PRComment event arrives)
-```
-## PR Review Mode (IMPORTANT)
-You are responding to a review comment on an existing pull request.
-- You are already on the PR branch (check git status if unsure).
-- Make your fixes directly on this branch.
-- After fixing, commit and push to the SAME branch.
-- Do NOT create a new PR — the PR already exists.
-- Post a comment confirming which issues were fixed.
-- If the PR is mergeable with no conflicts, you may call forgejo_merge_pr to merge it automatically.
-```
-
-**Note**: The "PR Review Mode" instructions are for **implementers responding to review feedback**, NOT for the reviewer role. The reviewer already has read-only tools. There's no mechanism to detect whether a human wrote "request changes" vs "approved" — the review feedback is just a comment body passed as context.
-
----
-
-## 4. PR Comment Event Routing (Webhook → Event → Session)
-
-### Step 1: Webhook Receives `issue_comment.created`
-`Router.handleWebhook()` at `POST /acp/v1/events`:
-- Validates HMAC signature
-- Reads `X-Forgejo-Event` header → `issue_comment`
-- Extracts action → `created`
-- Normalizes to event type `issue_comment.created`
-- Extracts issue/PR number, repo, sender, session key
-
-### Step 2: Session Key Correction for PR Comments
-`normalizeEvent()` calls `extractPRNum()`:
 ```go
-if issue, ok := payload["issue"].(map[string]interface{}); ok {
-    if isPR, ok := issue["is_pull_request"].(bool); ok && isPR {
-        return extractIssueNum()  // → the PR number
-    }
-}
+- For BUG REPORTS: reproduce the bug FIRST. If the issue says 'crashes when X', run the code with X to confirm the crash BEFORE writing any fix.
+- For write_file: supply ONLY the new file content. Do NOT copy the line numbers shown by read_file.
 ```
-However, **Forgejo v9 does NOT include `is_pull_request` in webhook payloads** (agent.go line ~549). So `extractPRNum()` returns 0, and the session key is wrongly set to `repo/issues/N`.
 
-**Workaround in `handleWebhook`** (line ~552):
+Also in `buildSystemPrompt`, the implementer-specific section includes:
 ```go
-if evt.PRNumber == 0 && ... r.forgejo != nil {
-    issue, err := r.forgejo.GetIssue(req.Context(), evt.Repository, evt.IssueNumber)
-    if err == nil && issue.PullRequest.IsPR() {
-        evt.PRNumber = evt.IssueNumber
-        evt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.IssueNumber)
-    }
-}
-```
-This adds an **API roundtrip** to correct the session key for PR comments.
-
-### Step 3: Agent Event Filter
-`isAgentEvent()` filters out events from the agent itself:
-- Checks `<!-- ford -->` marker in comment body
-- Filters comments from `fordjent-bot` user
-- Push events and merged PR events are NEVER filtered
-
-### Step 4: Closed PR Guard
-Comments on **closed/merged PRs** are skipped to prevent token burn:
-```go
-if evt.Type == "issue_comment.created" && evt.PRNumber > 0 && r.forgejo != nil {
-    pr, _ := r.forgejo.GetPR(req.Context(), evt.Repository, evt.PRNumber)
-    if pr.State == "closed" { return "skipped_closed_pr" }
-}
+"DO NOT read the same file more than twice"
 ```
 
-### Step 5: Event Published to Bus
-`bus.Publish()` fans out the event to all subscribers (session manager's event queue).
+### (c) Steering messages: `internal/agent/turn.go:182-232`
 
-### Step 6: Session Manager Routes to Session
-`Manager.handleEvent()`:
-- For `issue_comment.created` on PRs, the event falls through (no special gating)
-- If session exists, event is queued to `sess.events` channel
-- `runSession()` picks up the event → `Agent.ProcessEvent()`
+The `ApplySteering` function injects contextual nudges:
 
-### Step 7: PR Branch Checkout (agent.go ~line 574)
-```go
-if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
-    pr, _ := a.forgejo.GetPR(...)
-    if pr.Head.Ref != "" {
-        exec.Command(... "fetch origin " + pr.Head.Ref)
-        exec.Command(... "checkout -B " + pr.Head.Ref + " origin/" + pr.Head.Ref)
-        // Inject context message about PR branch
-    }
-}
-```
-This checks out the PR branch before the LLM loop runs — critical for implementer sessions responding to review feedback.
+1. **Per-tool repeat nudge** (line 136): Fires when a tool is called too many times — "You've called bash X times. Stop exploring."
+2. **Duplicate output nudge** (line 174): Fires when bash/git returns the same output — "Same output as previous call."
+3. **Hard gate write enforce** (line 187): At turn 15, removes exploration tools if no `write_file` has been called.
+4. **Turn budget thresholds** (line 225): 40%/60%/80%/90% budget warnings.
+
+**None of these steering messages address "reproduce before fix" specifically.** The steering system is turn-proportional and tool-call-proportional, not behavior-pattern-aware.
+
+### (d) Forced "reproduce first" step approaches
+
+1. **Prompt-level**: Strengthen the bug report instructions with a mandatory first-step. Instead of a suggestion, make it an explicit instruction:
+   ```
+   STEP 1 IS MANDATORY: Build the project and run it with the bug scenario BEFORE writing any code.
+   If the bug cannot be reproduced, post a comment explaining why and STOP.
+   ```
+
+2. **Tool-level guard**: Add a `bug_reproduced` flag to the agent. On the first few turns of a bug report session, reject `write_file` and `git commit` calls with a message: "You must reproduce the bug first. Run the code with the trigger scenario and confirm the crash/bug."
+
+3. **Steering-level**: Add a new steering message in `ApplySteering` that fires on turn 2-3 of bug report sessions if no successful run/compile has been observed yet (check for "build failed" or "no write_file" patterns). Message: "This is a BUG report, not a feature request. Reproduce the bug by running the code with the described trigger scenario BEFORE writing fixes."
+
+4. **Pre-computation step**: In `runSession`, before the agent loop, auto-run `go build` (or a build detection for the project type). If build fails, inject a steering message. If the issue is a bug report and the build succeeds, inject a message confirming "The code compiles. Now reproduce the specific bug scenario."
+
+### Data sources for fix:
+- `internal/session/agent.go:861` — current bug report instruction (weak: suggestive, not mandatory)
+- `internal/agent/turn.go:182-232` — steering system (can add new steering type, but would need a way to detect "bug report session")
+- `internal/session/manager.go:1313` — `detectRoleFromTitle` already recognizes `[tester]` role (bug reports could use `[tester]` or `[bug]` tags)
+- `internal/tool/local_tools.go` — the `build` and `test` commands in `forgejo_create_pr` could be extended to auto-run before a bug-fix session starts
 
 ---
 
-## 5. "Human Requested Changes" Detection — **NOT IMPLEMENTED**
+## Summary of Files to Change
 
-After thorough searching, there is **no existing logic** that auto-detects whether a human reviewer wrote "request changes" vs "approve". The review comment body is passed as plain text context to the LLM, and:
-
-1. **Reviewer role** has `forgejo_merge_pr` tool. The **system prompt** instructs reviewers to "either merge or request changes" but the model decides based on reading the comment body text.
-
-2. **Implementer role in PR Review Mode** is told to "Make fixes directly on this branch" but has no signal about whether changes are actually required vs optional improvements.
-
-3. **Agent event filter** (`isAgentEvent`) only filters by `<!-- ford -->` marker and sender identity — not by comment content semantics.
-
-4. **No human review state machine**: There's no concept of tracking "human requested changes" state. The only states are the FSM labels (`planning`, `implementing`, `ready`, `blocked`, `done`, `plan_approved`).
-
-### Implication
-If you want the system to distinguish between:
-- "Human wrote: 'Please fix X'" → should auto-reassign to implementer → implementer fixes → pushes to PR branch
-- "Human wrote: 'LGTM'" → should auto-merge (if automerge enabled)
-
-...this **does not exist**. You would need to implement it. Options:
-1. LLM-based classification of comment content
-2. Manual label addition by human (e.g., `needs-fix`)
-3. Forgejo review API integration (checking `pr_reviews` for `REQUEST_CHANGES` vs `APPROVED` state)
-
-The merge queue does check `request_reviewers`, but that's for POST-PR-creation reviewer assignment, not for interpreting review feedback.
-
----
-
-## Start Here
-
-1. **`internal/session/agent.go`** (lines 574-600): PR branch checkout logic — the code that switches the working tree to the PR branch before processing a review comment
-2. **`internal/session/agent.go`** (lines 707-730): Reviewer system prompt — the role-specific instructions
-3. **`internal/session/agent.go`** (lines 1311-1400): `buildRoleRegistry()` — the complete tool assignment per role (the authoritative source for what tools each role has)
-4. **`internal/session/manager.go`** (lines 956-970): `runSession()` — the role assignment logic, including the `reviewer` override for PRs
-5. **`internal/webhook/router.go`** (lines 490-560): `normalizeEvent()` + `handleWebhook` — the webhook → event → session key mapping, including the PR comment correction hack
+| Gap | Primary Files | Lines |
+|-----|--------------|-------|
+| 1 - Merge queue retry | `internal/tool/forgejo_tools.go` | 648-686 (CheckGate call) |
+|  | `internal/session/manager.go` | 1114-1126 (ErrBlocked handling) |
+|  | `internal/mergequeue/queue.go` | 63-118 (CheckGate logic) |
+|  | `internal/scheduler/scheduler.go` | 74-88, 155-210 (OnPRMerged/unblock) |
+| 2 - 405 merge | `internal/forgejo/client.go` | 144-179 (MergePR) |
+|  | `internal/session/manager.go` | 659-703 (automerge detection + fallback) |
+|  | `internal/tool/forgejo_tools.go` | 799-804 (automerge label addition) |
+| 3 - PM role tags | `internal/tool/forgejo_tools.go` | 155-225 (CreateIssue tool execute) |
+|  | `internal/session/agent.go` | 569-597 (PM prompt) |
+| 4 - Automerge reviewer cap | `internal/config/config.go` | 156-160 (defaults) |
+|  | `internal/session/manager.go` | 659-703, 992-1025 (runSession + role detection) |
+|  | `internal/session/agent.go` | 539-553 (effectiveMaxTurns) |
+| 5 - Bug reproduction | `internal/session/agent.go` | 861 (bug prompt) |
+|  | `internal/agent/turn.go` | 182-232 (steering) |
+|  | `internal/tool/local_tools.go` | build/test commands |

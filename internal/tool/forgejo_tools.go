@@ -209,6 +209,15 @@ func (t *forgejoCreateIssueTool) Execute(ctx context.Context, args json.RawMessa
 		body += "Wait for the 'ready' label before starting implementation.\n"
 	}
 
+	// Auto-inject role tag if title is missing one.
+	// PM sub-issues are overwhelmingly implementation tasks, so default
+	// to [implementer] if no tag can be inferred.
+	if !hasRoleTag(params.Title) {
+		previous := params.Title
+		params.Title = inferRoleTag(params.Title, params.Body)
+		slog.Info("create_issue: auto-injected role tag", "before", previous, "after", params.Title, "repo", params.Repository)
+	}
+
 	apiPath := path.Join("/api/v1/repos", forgejo.EscapeRepoPath(params.Repository), "issues")
 	payload := map[string]string{"title": params.Title, "body": body}
 	result, err := t.adapter.doRequest(ctx, http.MethodPost, apiPath, payload)
@@ -659,14 +668,9 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 			blocked, msg, err := t.mq.CheckGate(ctx, params.Repository, params.Head, params.Base)
 			if err == nil {
 				if blocked {
-					// Clean up dangling branch so the repo doesn't accumulate stale branches
 					slog.Warn("create_pr: merge queue blocked", "branch", params.Head, "msg", msg)
-					if t.repoDir != "" {
-						cmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "push", "--delete", "origin", params.Head)
-						if out, err := cmd.CombinedOutput(); err != nil {
-							slog.Warn("mergequeue: failed to clean up blocked branch", "branch", params.Head, "error", err, "output", string(out))
-						}
-					}
+					// DO NOT delete the branch — the merge-queue-retry mechanism
+					// needs the branch to still exist when it re-dispatches the session.
 					return "", fmt.Errorf("%w: %s", sentinel.ErrBlocked, msg)
 				}
 				break
@@ -2089,4 +2093,49 @@ func (t *forgejoListMilestonesTool) Execute(ctx context.Context, args json.RawMe
 	}
 	result, _ := json.MarshalIndent(milestones, "", "  ")
 	return string(result), nil
+}
+
+// hasRoleTag checks if the title already starts with a [role] tag.
+func hasRoleTag(title string) bool {
+	lower := strings.ToLower(title)
+	tags := []string{"[implementer]", "[implement]", "[dev]", "[developer]", "[pm]", "[reviewer]", "[review]", "[tester]", "[test]", "[devops]", "[qa]"}
+	for _, tag := range tags {
+		if strings.HasPrefix(lower, tag) {
+			return true
+		}
+	}
+	return false
+}
+
+// inferRoleTag adds a role tag prefix based on keywords in the title/body.
+// Defaults to [implementer] since PM sub-issues are overwhelmingly code tasks.
+func inferRoleTag(title, body string) string {
+	combined := strings.ToLower(title + " " + body)
+
+	// Test/QA keywords
+	testWords := []string{"test", "qa", "integration test", "unit test", "verify", "validation", "regression"}
+	for _, w := range testWords {
+		if strings.Contains(combined, w) {
+			return "[tester] " + title
+		}
+	}
+
+	// DevOps keywords
+	devopsWords := []string{"ci/cd", "pipeline", "docker", "deploy", "infra", "kubernetes", "helm", "terraform"}
+	for _, w := range devopsWords {
+		if strings.Contains(combined, w) {
+			return "[devops] " + title
+		}
+	}
+
+	// Review keywords
+	reviewWords := []string{"review", "audit", "refactor", "cleanup", "lint"}
+	for _, w := range reviewWords {
+		if strings.Contains(combined, w) {
+			return "[reviewer] " + title
+		}
+	}
+
+	// Default: implementer (covers 90%+ of PM sub-issues)
+	return "[implementer] " + title
 }

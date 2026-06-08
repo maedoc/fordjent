@@ -962,6 +962,11 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 				a.tools.SetPRScope(a.scopePrefixes)
 				a.tools.SetBashScope(a.scopePrefixes)
 			}
+
+			// Detect if this is a bug report — set the reproduction-first steering flag
+			if isBugReport(issue.Title + " " + issue.Body) {
+				a.executor.SetBugReport()
+			}
 			if parentRef := extractParentRef(issue.Body); parentRef > 0 && parentRef != evt.IssueNumber {
 				parent, parentErr := a.forgejo.GetIssue(ctx, evt.Repository, parentRef)
 				if parentErr == nil && parent != nil {
@@ -1124,6 +1129,21 @@ func extractScopePrefixes(text string) []string {
 	return prefixes
 }
 
+// isBugReport detects if an issue describes a bug/crash/error that should
+// be reproduced before being fixed.
+func isBugReport(text string) bool {
+	lower := strings.ToLower(text)
+	bugKeywords := []string{"crash", "panic", "bug", "broken", "fails", "error when", "nil pointer",
+		"segfault", "exception", "incorrect", "wrong result", "unexpected", "still happens",
+		"reproduce", "regression", "doesn't work", "does not work"}
+	for _, kw := range bugKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+// followed by an optional colon, optional whitespace, and #N. Case-insensitive.
 // closingRefRe matches standard closing keywords: Closes, Fixes, Resolves, Close, Fix, Resolve
 // followed by an optional colon, optional whitespace, and #N. Case-insensitive.
 var closingRefRe = regexp.MustCompile(`(?i)(?:close(?:s)?|fix(?:es)?|resolve(?:s)?)\s*:?\s*#(\d+)`)

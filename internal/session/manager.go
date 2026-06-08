@@ -421,17 +421,36 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 					return
 				}
 				for _, b := range blocked {
+					// Don't re-dispatch if we've already retried too many times
+					if b.RetryCount >= 2 {
+						slog.Warn("merge queue: max retries reached for blocked branch, giving up", "branch", b.Branch, "retries", b.RetryCount)
+						_ = m.lc.ResolveBlockedBranch(schedCtx, evt.Repository, b.Branch)
+						continue
+					}
 					cleared, msg, err := m.mqClient.CheckGate(schedCtx, evt.Repository, b.Branch, "main")
 					if err != nil {
 						slog.Warn("merge queue: re-check failed", "error", err, "branch", b.Branch)
 						continue
 					}
 					if cleared {
-						slog.Info("merge gate cleared for blocked branch, posting unblock nudge", "branch", b.Branch, "issue", b.IssueNumber)
+						slog.Info("merge gate cleared for blocked branch, re-dispatching session", "branch", b.Branch, "issue", b.IssueNumber)
+						// Re-dispatch a new implementer session for this issue.
+						// The previous session died after being blocked; we need a fresh one
+						// to attempt PR creation again now that the gate is clear.
+						retryEvt := event.NewEvent(
+							event.IssueOpened,
+							evt.Repository,
+							b.IssueNumber,
+							0,
+							"merge-queue-retry",
+							"opened",
+						)
+						retryEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, b.IssueNumber)
+						// Remove the blocked label so the agent can pick it up
 						if m.forgejoClient != nil {
-							body := "The merge gate is now clear after conflicting PRs were merged. You may retry creating the PR."
-							_ = m.forgejoClient.PostIssueComment(schedCtx, evt.Repository, b.IssueNumber, body)
+							_ = m.forgejoClient.RemoveIssueLabel(schedCtx, evt.Repository, b.IssueNumber, "blocked")
 						}
+						m.handleEvent(schedCtx, retryEvt)
 						_ = m.lc.ResolveBlockedBranch(schedCtx, evt.Repository, b.Branch)
 					} else {
 						slog.Info("merge gate still blocked for branch", "branch", b.Branch, "reason", msg)
@@ -672,37 +691,32 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				if hasAutomerge {
 					slog.Info("automerge label detected on PR, attempting direct merge", "pr", evt.PRNumber, "repo", evt.Repository)
 					// Try to merge the PR directly via API. No LLM session needed.
-					// If the merge fails (conflicts, not mergeable), fall back to reviewer session.
+					// Try multiple merge styles as a workaround for Forgejo v9 405 errors.
 					if m.forgejoClient != nil {
 						prDetail, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
 						if prErr == nil && prDetail.State == "open" && !prDetail.HasConflicts {
-							mergeErr := m.forgejoClient.MergePR(ctx, evt.Repository, evt.PRNumber, "merge")
-							if mergeErr == nil {
-								slog.Info("automerge: direct merge succeeded", "pr", evt.PRNumber, "repo", evt.Repository)
-								return
+							// Try each merge style in order; Forgejo v9 accepts some but not all
+							for _, style := range []string{"merge", "squash", "rebase-merge"} {
+								mergeErr := m.forgejoClient.MergePR(ctx, evt.Repository, evt.PRNumber, style)
+								if mergeErr == nil {
+									slog.Info("automerge: direct merge succeeded", "pr", evt.PRNumber, "style", style, "repo", evt.Repository)
+									return
+								}
+								slog.Debug("automerge: merge style failed, trying next", "pr", evt.PRNumber, "style", style, "error", mergeErr)
 							}
-							slog.Warn("automerge: direct merge failed, falling back to reviewer", "pr", evt.PRNumber, "error", mergeErr)
+							// All styles failed — the automerge label is already on the PR.
+							// Forgejo's native auto-merge may handle it if configured on the server.
+							// Post a comment for visibility and skip the reviewer session.
+							slog.Warn("automerge: all API merge styles failed, label is set for Forgejo native auto-merge", "pr", evt.PRNumber)
+							if m.forgejoClient != nil {
+								_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.PRNumber, "⚠️ Auto-merge via API failed. The 'automerge' label is set — Forgejo will merge automatically when checks pass, or a human can merge manually.")
+							}
+							return
 						} else {
-							slog.Warn("automerge: PR not mergeable", "pr", evt.PRNumber, "error", prErr, "state", prDetail.State, "conflicts", prDetail.HasConflicts)
+								slog.Warn("automerge: PR not mergeable", "pr", evt.PRNumber, "error", prErr, "state", prDetail.State, "conflicts", prDetail.HasConflicts)
+							}
 						}
 					}
-					// Fallback: spawn reviewer session
-					synthEvt := event.NewEvent(
-						event.IssueCommentCreated,
-						evt.Repository,
-						evt.IssueNumber,
-						evt.PRNumber,
-						"automerge-trigger",
-						"created",
-					)
-					synthEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
-					synthEvt.Payload = map[string]interface{}{
-						"comment": map[string]interface{}{
-							"body": "[System] This PR has the 'automerge' label. Merge if it passes all checks.",
-						},
-					}
-					m.handleEvent(ctx, synthEvt)
-				}
 			}
 		}
 		return

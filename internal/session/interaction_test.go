@@ -390,7 +390,7 @@ func TestFSMPlanningLabelDoesNotCloseIssue(t *testing.T) {
 	}
 }
 
-func TestAutomergeLabelSpawnsReviewer(t *testing.T) {
+func TestAutomergeLabelDirectMerge(t *testing.T) {
 	f := newInteractionForgejo(t)
 	defer f.Close()
 
@@ -421,12 +421,13 @@ func TestAutomergeLabelSpawnsReviewer(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
+	// When direct API merge succeeds, NO session should be created
 	mgr.mu.RLock()
 	_, exists := mgr.sessions["org/repo/pulls/7"]
 	mgr.mu.RUnlock()
 
-	if !exists {
-		t.Error("expected session to be created in pulls/7 when automerge label is applied")
+	if exists {
+		t.Error("automerge via direct API should NOT create a reviewer session")
 	}
 }
 
