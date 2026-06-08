@@ -523,17 +523,32 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 	// Skip for scaffold issues ([scaffold] prefix) — they are auto-generated and should
 	// be implemented immediately.
 	// Skip for PRs — PRs don't need role tags, they're already past the implementation stage.
+	// Skip for fordjent-yolo repos — untagged issues default to "implementer".
 	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" && evt.PRNumber == 0 {
 		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
 		if err != nil {
 			slog.Warn("role gate: failed to get issue", "error", err, "issue", evt.IssueNumber)
 		} else if detectRoleFromIssue(issue) == "" && !strings.HasPrefix(issue.Title, "[scaffold]") {
-			slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
-			m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
-			if err := m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"}); err != nil {
-				slog.Warn("role gate: failed to add needs-role label", "error", err, "issue", evt.IssueNumber)
+			// Check if repo has fordjent-yolo topic → default to implementer
+			yolo := false
+			if topics, tErr := m.forgejoClient.GetRepoTopics(ctx, evt.Repository); tErr == nil {
+				for _, t := range topics {
+					if t == "fordjent-yolo" {
+						yolo = true
+						break
+					}
+				}
 			}
-			return
+			if yolo {
+				slog.Info("role gate: defaulting untagged issue to implementer (fordjent-yolo)", "issue", evt.IssueNumber, "repo", evt.Repository)
+			} else {
+				slog.Info("role gate: blocking untagged issue", "issue", evt.IssueNumber, "repo", evt.Repository)
+				m.postRoleGuidance(ctx, evt.Repository, evt.IssueNumber)
+				if err := m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"}); err != nil {
+					slog.Warn("role gate: failed to add needs-role label", "error", err, "issue", evt.IssueNumber)
+				}
+				return
+			}
 		}
 	}
 
