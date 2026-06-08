@@ -504,17 +504,26 @@ func TestPRCommentRoutesToPullsSession(t *testing.T) {
 
 	mgr.handleEvent(context.Background(), evt)
 
+	// Find session with -fix prefix (exact key includes event ID suffix)
+	var sess *Session
+	var exists bool
 	mgr.mu.RLock()
-	sess, exists := mgr.sessions["org/repo/pulls/7-fix"]
-	if !exists {
-		// Also check the original key in case the redirect didn't fire
-		// (e.g. if sender matches a bot pattern)
-		sess, exists = mgr.sessions["org/repo/pulls/7"]
+	for k, s := range mgr.sessions {
+		if strings.HasPrefix(k, "org/repo/pulls/7-fix") {
+			sess = s
+			exists = true
+			break
+		}
+		if k == "org/repo/pulls/7" {
+			sess = s
+			exists = true
+			break
+		}
 	}
 	mgr.mu.RUnlock()
 
 	if !exists {
-		t.Fatal("expected session to be created at org/repo/pulls/7-fix for PR comment")
+		t.Fatal("expected session to be created with pulls/7-fix* key for PR comment")
 	}
 	if sess.PRNumber != 7 {
 		t.Errorf("expected PRNumber=7, got %d", sess.PRNumber)
@@ -916,13 +925,20 @@ func TestPRCommentRouting(t *testing.T) {
 
 	mgr.handleEvent(ctx, evt)
 
-	sess, exists := mgr.sessions["fjadmin/testbed/pulls/7-fix"]
-	if !exists {
-		// Also try the original key if redirect didn't fire
-		sess, exists = mgr.sessions["fjadmin/testbed/pulls/7"]
+	// Find session with -fix prefix (exact key includes event ID suffix)
+	var sess *Session
+	var exists bool
+	mgr.mu.RLock()
+	for k, s := range mgr.sessions {
+		if strings.HasPrefix(k, "fjadmin/testbed/pulls/7-fix") || k == "fjadmin/testbed/pulls/7" {
+			sess = s
+			exists = true
+			break
+		}
 	}
+	mgr.mu.RUnlock()
 	if !exists {
-		t.Error("PR comment should create pulls/N-fix or pulls/N session")
+		t.Error("PR comment should create pulls/N-fix* or pulls/N session")
 		return
 	}
 	if sess.PRNumber != 7 {

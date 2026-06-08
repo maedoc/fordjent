@@ -670,7 +670,23 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 					}
 				}
 				if hasAutomerge {
-					slog.Info("automerge label detected on PR, spawning reviewer", "pr", evt.PRNumber, "repo", evt.Repository)
+					slog.Info("automerge label detected on PR, attempting direct merge", "pr", evt.PRNumber, "repo", evt.Repository)
+					// Try to merge the PR directly via API. No LLM session needed.
+					// If the merge fails (conflicts, not mergeable), fall back to reviewer session.
+					if m.forgejoClient != nil {
+						prDetail, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+						if prErr == nil && prDetail.State == "open" && !prDetail.HasConflicts {
+							mergeErr := m.forgejoClient.MergePR(ctx, evt.Repository, evt.PRNumber, "merge")
+							if mergeErr == nil {
+								slog.Info("automerge: direct merge succeeded", "pr", evt.PRNumber, "repo", evt.Repository)
+								return
+							}
+							slog.Warn("automerge: direct merge failed, falling back to reviewer", "pr", evt.PRNumber, "error", mergeErr)
+						} else {
+							slog.Warn("automerge: PR not mergeable", "pr", evt.PRNumber, "error", prErr, "state", prDetail.State, "conflicts", prDetail.HasConflicts)
+						}
+					}
+					// Fallback: spawn reviewer session
 					synthEvt := event.NewEvent(
 						event.IssueCommentCreated,
 						evt.Repository,
@@ -682,7 +698,7 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 					synthEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
 					synthEvt.Payload = map[string]interface{}{
 						"comment": map[string]interface{}{
-							"body": "[System] This PR has the 'automerge' label. Review the code and merge if it passes all checks.",
+							"body": "[System] This PR has the 'automerge' label. Merge if it passes all checks.",
 						},
 					}
 					m.handleEvent(ctx, synthEvt)
@@ -763,8 +779,18 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		if m.forgejoClient != nil {
 			pr, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
 			if prErr == nil && pr.State == "open" {
-				// Redirect to a new session key with -fix suffix
+				// Redirect to a new session key with -fix suffix.
+				// Use event ID to create unique keys per comment, so conflicting
+				// feedback from different reviewers gets separate sessions.
 				fixKey := evt.SessionKey + "-fix"
+				if evt.ID != "" {
+					// Use last 8 chars of event ID for uniqueness
+					suffix := evt.ID
+					if len(suffix) > 8 {
+						suffix = suffix[len(suffix)-8:]
+					}
+					fixKey = evt.SessionKey + "-fix-" + suffix
+				}
 				slog.Info("PR review fix: redirecting human comment to implementer session",
 					"original_key", evt.SessionKey,
 					"fix_key", fixKey,
