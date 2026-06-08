@@ -835,6 +835,8 @@ If you encounter ambiguity or need clarification on requirements, use forgejo_pi
 - DO NOT explore the repo structure more than needed.
 - DO NOT call bash for ls/cat/pwd repeatedly — use read_file instead.
 - DO NOT think step-by-step or plan before acting — read the file once, make your change, test, commit.
+- For BUG REPORTS: reproduce the bug FIRST. If the issue says 'crashes when X', run the code with X to confirm the crash BEFORE writing any fix.
+- For write_file: supply ONLY the new file content. Do NOT copy the line numbers shown by read_file.
 - DO NOT modify files outside the package specified in the issue.
 - IMPORTANT: write_file REPLACES the entire file. You MUST include all existing unchanged lines plus your changes. If you only write the new lines, the old content is deleted.
 - ALWAYS run go test (or language-appropriate test) BEFORE creating a PR.

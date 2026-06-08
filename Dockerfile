@@ -52,7 +52,7 @@ ENTRYPOINT ["entrypoint.sh"]
 # =============================================================================
 FROM golang:1.25-alpine AS full
 
-RUN apk add --no-cache build-base git ca-certificates curl bubblewrap
+RUN apk add --no-cache build-base git ca-certificates curl bubblewrap python3 py3-pip
 
 RUN bwrap --version
 

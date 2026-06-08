@@ -296,6 +296,23 @@ func containsNullByte(s string) bool {
 	return strings.ContainsRune(s, '\x00')
 }
 
+// isReadFileOutput detects when the model has copied read_file output format
+// into write_file content. read_file prefixes each line with "    N\t" where
+// N is the line number. This pattern is distinctive: 5+ spaces, digits, tab.
+var lineNumPrefix = regexp.MustCompile(`(?m)^ {5}\d+\t`)
+
+func isReadFileOutput(content string) bool {
+	// Match at least 3 lines with the line-number prefix
+	matches := lineNumPrefix.FindAllString(content, -1)
+	return len(matches) >= 3
+}
+
+// stripLineNumbers removes the "    N\t" line-number prefix from read_file output.
+// This converts "     1\tline1\n     2\tline2" to "line1\nline2".
+func stripLineNumbers(content string) string {
+	return lineNumPrefix.ReplaceAllString(content, "")
+}
+
 func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit int) (string, error) {
 	if containsNullByte(path) {
 		return "", fmt.Errorf("path contains null bytes: %q", path)
@@ -456,6 +473,13 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	// Strip line numbers from content if the model copied read_file output format.
+	// read_file returns lines like "     1\tcontent"; the model sometimes copies
+	// this format into write_file instead of writing raw content.
+	if isReadFileOutput(params.Content) {
+		params.Content = stripLineNumbers(params.Content)
 	}
 
 	if containsNullByte(params.Path) {

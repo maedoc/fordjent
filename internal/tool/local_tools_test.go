@@ -582,3 +582,41 @@ func TestWriteFileAbsoluteEscapePath(t *testing.T) {
 		os.RemoveAll(filepath.Join(repoDir, "etc"))
 	}
 }
+
+func TestStripLineNumbers(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		isRead  bool
+	}{
+		{
+			name:   "read_file output format",
+			input:  "     1\tpackage main\n     2\timport \"fmt\"\n     3\tfunc main() {\n     4\t\tfmt.Println(\"hello\")\n     5\t}",
+			want:   "package main\nimport \"fmt\"\nfunc main() {\n\tfmt.Println(\"hello\")\n}",
+			isRead: true,
+		},
+		{
+			name:   "normal code untouched",
+			input:  "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}",
+			want:   "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}",
+			isRead: false,
+		},
+		{
+			name:   "short content untouched",
+			input:  "package main\nimport \"fmt\"",
+			want:   "package main\nimport \"fmt\"",
+			isRead: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReadFileOutput(tt.input); got != tt.isRead {
+				t.Errorf("isReadFileOutput() = %v, want %v", got, tt.isRead)
+			}
+			if got := stripLineNumbers(tt.input); got != tt.want {
+				t.Errorf("stripLineNumbers() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
