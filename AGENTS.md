@@ -1952,3 +1952,43 @@ The `isReadFileOutput()` regex `^ {5}\d+\t` only matched 5-space prefixes. But `
 | `internal/session/agent.go` | Human feedback injection in PR Review Mode prompt |
 | `internal/session/interaction_test.go` | Updated test expectations for `-fix` session key |
 | `internal/tool/local_tools.go` | Line number regex: `^ {5}` → `^ +`; threshold: 3 → 2 matches |
+
+---
+
+## Multi-User Testing Waves 1-6 (June 8, 2026)
+
+### Test Matrix
+
+| Wave | Scenario | Result | Key Findings |
+|------|----------|--------|-------------|
+| 1 | Demanding Stakeholder (3 review rounds) | ✅ PASS | All 3 rounds pushed; 4 commits on PR branch |
+| 2 | Design Debate (conflicting feedback) | ❌→✅ | Bug 41 fixed: unique session keys per comment |
+| 3 | PM Decomposition + Sequential | ❌ FAIL | Compound git, line number leaks, max turns |
+| 4 | Bug Report + Verification | ✅ PASS | Bug fix + regression test + message change |
+| 5 | Parallel PRs + Cross-Review | ⚠️ PARTIAL | Merge queue blocks #2 PR correctly; #1 has no recovery |
+| 6 | Silent Partner (merge then new issue) | ❌ FAIL | Automerge exploration loop; 2nd agent doesn't produce PR |
+
+### Bugs Fixed (Bug 40-42)
+
+| Bug | Severity | Fix |
+|-----|----------|-----|
+| 40 | HIGH | Compound git commands (&&, ||, ;) fail → reject with helpful message |
+| 41 | HIGH | Conflicting PR review feedback → unique session keys per comment (pulls/N-fix-EVENTID8) |
+| 42 | HIGH | Automerge exploration loop → lightweight direct API merge, fallback to reviewer only on failure |
+
+### Remaining Known Issues
+
+| Issue | Impact | Notes |
+|-------|--------|-------|
+| Forgejo merge API 405 | Blocks API merge | Works for some merge styles; `merge_commit_title` helped but not fully resolved |
+| Merge queue has no auto-retry | Blocked agents give up | Agent posts reflection comment instead of waiting/retrying |
+| PM sometimes omits [implementer] tag | Sub-issue blocked | 1/5 sub-issues in Wave 3; improved prompt should help |
+| Agent doesn't systematically test edge cases | Missing test coverage | Model limitation, not code — 12B model misses corner cases |
+
+### Validation After Fixes
+
+| Wave | Before Fixes | After Fixes |
+|------|-------------|-------------|
+| 2 (Design Debate) | ❌ Human B ignored | ✅ Binary search implemented (preserves order) |
+| 4 (Bug Verify) | — | ✅ Bug fix + regression test + message change |
+
