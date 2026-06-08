@@ -1771,3 +1771,51 @@ git push "https://fjadmin:${ADMIN_TOKEN}@forgejo.wdmn.fr/fjadmin/testbed2.git" m
 - Qwen model unsuitable for implementer (828 git calls, 0 write_file)
 - Auto-merge not happening despite fordjent-yolo topic (policy issue?)
 - Some sessions still hit max-turns (needs further tuning)
+
+---
+
+## Bug Fix 30 — Cross-Contamination in Parallel Agent Sessions (June 8, 2026)
+
+**Problem**: When multiple agents worked on the same repo simultaneously, each agent saw the whole codebase and "helpfully" fixed other agents' packages. For example, an agent assigned to `pkg/math` would also write code in `pkg/str` and `pkg/set` because it saw empty stubs and interpreted them as broken code. This caused:
+
+1. **File overlap** — merge queue blocked PRs because multiple agents touched the same files
+2. **Build gate false failures** — `go test ./...` fails when other agents' packages have incomplete code
+3. **Turn waste** — agents spent 8-10 extra turns fixing other packages instead of their own
+
+**Root cause**: Each agent clone is a snapshot of `main`. The agent has no way to know other agents are working on other packages. The 12B model can't distinguish "empty stub awaiting another agent" from "broken code I should fix."
+
+**Solution**: Four-layer defense:
+
+### Layer 1: `extractScopePrefixes()` (code)
+Parses the issue title/body for package path patterns (`pkg/X`, `internal/X`, `cmd/X`, `src/X`). Returns prefixes like `["pkg/math/"]`. Called from `buildContext()` after fetching the issue.
+
+### Layer 2: `write_file` path restriction (code)
+If `scopePrefixes` is set on the agent, `write_file` rejects paths outside the allowed prefixes. The agent receives: `Error: path prefix not allowed: pkg/str/str.go (allowed: [pkg/math/])`. This is enforced at the tool level — the model literally cannot write outside its scope.
+
+### Layer 3: Scoped build/test gate (code)
+`forgejo_create_pr` runs `go test ./pkg/math/` instead of `go test ./...` when the agent is scoped. This prevents the build gate from failing on other agents' incomplete packages.
+
+### Layer 4: Prompt-level scope instruction (prompt)
+Expanded "Scope Restriction" section in the implementer system prompt with concrete examples, dynamic path injection, and notice that `write_file` will REJECT out-of-scope writes.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `internal/session/agent.go` | `scopePrefixes` field; `extractScopePrefixes()` function; scope injection in prompt; `SetWriteScope` + `SetPRScope` calls in `buildContext()` |
+| `internal/tool/registry.go` | `ScopedWriter` + `ScopedPRCreator` interfaces; `SetWriteScope()` + `SetPRScope()` methods |
+| `internal/tool/forgejo_tools.go` | `scopePkgs` field + `SetScopePkgs()` on `forgejoCreatePRTool`; scoped `go build` / `go test` commands |
+
+### Test Results
+
+| Metric | Before Fix | After Fix |
+|--------|-----------|-----------|
+| PRs created (3 parallel) | 1/3 | 3/3 |
+| Cross-contamination writes | Yes (2+ packages per agent) | None |
+| Build gate false failures | 2/3 blocked | 0/3 |
+| Merge queue blocks | 1 false positive | 0 |
+
+### Limitation
+
+The scope restriction only works when the issue title/body contains a recognizable package path (e.g., `pkg/math`, `internal/foo`). Issues that merely describe functionality without mentioning a package path will not be scoped, and the agent will be free to modify any file. This is acceptable — unscoped agents behave as before.
+
