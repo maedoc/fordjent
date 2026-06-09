@@ -2109,3 +2109,35 @@ Reproduction is auto-detected when bash/git output contains `go run`, `go test`,
 - Keeping branches long enough for merge-queue-retry (current: no deletion)
 - Not filling disk with stale data (branches on closed/merged issues are safe to delete)
 - The current approach (no cleanup) is safe but wasteful
+
+---
+
+## Security Hardening Round (June 9, 2026)
+
+### Symlink Escape Prevention (HIGH — Gap 2)
+**Problem**: `write_file` and `read_file` used `filepath.Join` + `filepath.Clean` + prefix check, but never resolved symlinks. An agent could create a symlink inside the repo pointing outside (`ln -s /etc/passwd pkg/math/ptr`), then `read_file("pkg/math/ptr")` would read `/etc/passwd` — bypassing all containment checks.
+
+**Fix**: Added `resolveAndCheckPath()` helper in `internal/tool/local_tools.go` that:
+1. Calls `filepath.EvalSymlinks` on the full path
+2. For new files (doesn't exist yet), resolves the longest existing ancestor directory, then appends remaining components
+3. Verifies the resolved path is within `repoDir`
+4. Checks scope prefixes against the **resolved** path, not the raw path
+5. Both `read_file` and `write_file` now use this helper
+
+### Bash Scope Bypass Hardening (MEDIUM-HIGH — Gap 1)
+**Problem**: The bash scope regex missed `dd of=`, `tar -C`, `rsync`, and `ln -s` write targets. A scoped agent could write files in disallowed paths using these commands.
+
+**Fix**: Added write-path detection patterns for `dd of=`, `tar -C`, `rsync`, and `ln -s`. Also resolves symlinks on bash write targets before scope checking, preventing bypass via symlinks pointing outside allowed paths.
+
+### Dependency Syntax Expansion (MEDIUM — Gap 6)
+**Problem**: `parseDependsOn` only recognised `Depends on:` (space). Missed `depends-on:` (hyphen), `Requires:`, `Blocked by:`, `Subtask of:`, `Parent issue:`, etc.
+
+**Fix**: Broadened `dependsOnKeywordRegex` to also recognise: `depends-on`, `Requires`, `Blocked by`, `Needs`, `Relies on`, `Subtask of`, `Parent issue`, `Tracking`, `Prerequisite`. Added 10 new test cases.
+
+### Remaining Lower-Priority Gaps
+
+| # | Gap | Severity | Description |
+|---|-----|----------|-------------|
+| 1 | Transitive deps | LOW-MEDIUM | Scheduler only checks direct dependencies. A→B→C chains require manual unblocking at each level. PM issues without PRs are transitively satisfied (correct), but deep PM→impl chains aren't checked. |
+| 2 | Session restart protection | LOW | No `shutdown.json` checkpoint. On restart, agent replays previous tool calls from memory.jsonl. Tools are idempotent (write_file replaces, git creates new SHAs), so real risk is just wasted tokens. |
+| 3 | Stale cleanup | LOW | Feature branches and workDirs accumulate. `cleanupOldWorkDirs` handles 7-day-old completed sessions. `shutdownAll` doesn't clean workDirs or delete from sessions.db. No branch cleanup exists. |
