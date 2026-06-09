@@ -138,16 +138,31 @@ func (t *bashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 
 	// Scope restriction: block file-writing bash commands outside allowed prefixes
 	if len(t.scopePrefixes) > 0 {
-		// Detect file-writing patterns: > file, >> file, cat > file, cat <<EOF > file, tee file, cp src dst, mv src dst
+		// Detect file-writing patterns: > file, >> file, cat > file, cat <<EOF > file,
+		// tee file, cp src dst, mv src dst, dd of=, tar -C, rsync, ln -s
 		writePatterns := []*regexp.Regexp{
 			regexp.MustCompile(`>(?:>]){0,1}\s*([a-zA-Z0-9_./-]+)`),
-			regexp.MustCompile(`(?:cat|tee)\s+(?:-Ae Shelter)?\s*([a-zA-Z0-9_./-]+)`),
-			regexp.MustCompile(`(?:cp|mv)\s+(?:\S+\s+)+([a-zA-Z0-9_./-]+)$`),
+			regexp.MustCompile(`(?:cat|tee)\s+(?:-[aAeE]+\s+)*([a-zA-Z0-9_./-]+)`),
+			regexp.MustCompile(`(?:cp|mv|install)\s+(?:\S+\s+)+([a-zA-Z0-9_./-]+)$`),
+			regexp.MustCompile(`dd\s+.*of=([a-zA-Z0-9_./-]+)`),
+			regexp.MustCompile(`tar\s+.*-C\s+([a-zA-Z0-9_./-]+)`),
+			regexp.MustCompile(`rsync\s+.*\s+([a-zA-Z0-9_./-]+)\s*$`),
+			regexp.MustCompile(`ln\s+(?:-\w*\s*)?s\s+\S+\s+([a-zA-Z0-9_./-]+)`),
 		}
 		for _, pat := range writePatterns {
 			matches := pat.FindAllStringSubmatch(params.Command, -1)
 			for _, m := range matches {
 				targetPath := filepath.ToSlash(filepath.Clean(m[1]))
+				// Resolve symlinks on the bash write target to prevent
+				// scope bypass via symlink pointing outside allowed paths.
+				absTarget := filepath.Join(t.repoDir, targetPath)
+				resolvedTarget, symErr := filepath.EvalSymlinks(absTarget)
+				if symErr == nil {
+					// Successfully resolved — rederive the relative path
+					if rel, relErr := filepath.Rel(t.repoDir, resolvedTarget); relErr == nil {
+						targetPath = filepath.ToSlash(rel)
+					}
+				}
 				allowed := false
 				for _, prefix := range t.scopePrefixes {
 					if strings.HasPrefix(targetPath, prefix) {
@@ -296,6 +311,88 @@ func containsNullByte(s string) bool {
 	return strings.ContainsRune(s, '\x00')
 }
 
+// resolveAndCheckPath resolves symlinks and verifies the path stays within repoDir.
+// If scopePrefixes is non-empty, also verifies the resolved relative path starts
+// with one of them. This prevents symlink-based directory escapes where an agent
+// creates a symlink inside the repo pointing to a file outside, then reads or writes
+// through it.
+func resolveAndCheckPath(repoDir, filename string, scopePrefixes []string) (string, error) {
+	repoDir = filepath.Clean(repoDir)
+
+	// Clean and join the path
+	cleanPath := filepath.Clean(filename)
+	absPath := filepath.Join(repoDir, cleanPath)
+
+	// Resolve symlinks in the path. filepath.EvalSymlinks resolves ALL symlinks.
+	// If the file doesn't exist yet (write_file creating a new file), we resolve
+	// as much of the path as exists, then append the remaining components.
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolving path: %w", err)
+		}
+		// File doesn't exist yet — resolve the longest existing prefix of the path.
+		// Walk from the deepest existing ancestor up to repoDir.
+		dir := filepath.Dir(absPath)
+		base := filepath.Base(absPath)
+		var extraComponents []string
+		for {
+			rp, rpErr := filepath.EvalSymlinks(dir)
+			if rpErr == nil {
+				// Found an existing ancestor — resolve it and append remaining components.
+				resolved = rp
+				for _, c := range extraComponents {
+					resolved = filepath.Join(resolved, c)
+				}
+				resolved = filepath.Join(resolved, base)
+				break
+			}
+			if !os.IsNotExist(rpErr) {
+				return "", fmt.Errorf("resolving path: %w", rpErr)
+			}
+			// This directory component doesn't exist either — remember it and try parent.
+			extraComponents = append([]string{filepath.Base(dir)}, extraComponents...)
+			parentDir := filepath.Dir(dir)
+			if parentDir == dir || parentDir == "/" || parentDir == "." {
+				// Reached root without finding an existing dir — can't resolve.
+				// Use the cleaned absPath as-is; the containment check below still applies.
+				resolved = absPath
+				break
+			}
+			dir = parentDir
+		}
+	}
+
+	// Verify the resolved path is within repoDir
+	repoBase := repoDir + string(os.PathSeparator)
+	if resolved != repoDir && !strings.HasPrefix(resolved, repoBase) {
+		return "", fmt.Errorf("path escapes repository root via symlink: %s -> %s", filename, resolved)
+	}
+
+	// Defense-in-depth: also check with filepath.Rel
+	if rel, err := filepath.Rel(repoDir, resolved); err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path escapes repository root via symlink: %s -> %s", filename, resolved)
+	}
+
+	// Check scope prefixes against the RESOLVED path (relative to repoDir)
+	if len(scopePrefixes) > 0 {
+		relPath, _ := filepath.Rel(repoDir, resolved)
+		relPath = filepath.ToSlash(relPath)
+		allowed := false
+		for _, prefix := range scopePrefixes {
+			if strings.HasPrefix(relPath, prefix) || relPath == strings.TrimSuffix(prefix, "/") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", fmt.Errorf("path prefix not allowed: %s (allowed: %v)", filename, scopePrefixes)
+		}
+	}
+
+	return resolved, nil
+}
+
 // isReadFileOutput detects when the model has copied read_file output format
 // into write_file content. read_file prefixes each line with "    N\t" where
 // N is the line number. This pattern is distinctive: 5+ spaces, digits, tab.
@@ -328,53 +425,24 @@ func (t *readFileTool) readFile(ctx context.Context, path string, offset, limit 
 		limit = 2000
 	}
 
-	// Pre-clean the path to normalize ../ and redundant separators before joining,
-	// matching write_file's approach. This provides defense-in-depth.
+	// Pre-clean the path to normalize ../ and redundant separators before joining.
 	cleanPath := filepath.Clean(path)
 
-	absPath := filepath.Join(t.repoDir, cleanPath)
-
 	// Sanitize: if model passed an absolute path containing repoDir, extract the relative part.
-	if strings.HasPrefix(path, t.repoDir) {
-		rel, err := filepath.Rel(t.repoDir, path)
+	if filepath.IsAbs(cleanPath) && strings.HasPrefix(cleanPath, t.repoDir) {
+		rel, err := filepath.Rel(t.repoDir, cleanPath)
 		if err == nil {
-			absPath = filepath.Join(t.repoDir, rel)
+			cleanPath = rel
 		}
 	}
 
-	// Sanitize: if model passed "repo/<file>" and repoDir already ends with "repo", strip the prefix.
-	relClean := strings.TrimPrefix(path, "repo/")
-	relClean = strings.TrimPrefix(relClean, "/")
-	if relClean != path {
-		candidate := filepath.Join(t.repoDir, relClean)
-		if _, err := os.Stat(candidate); err == nil {
-			absPath = candidate
-		}
+	// Resolve symlinks and verify path containment.
+	// This subsumes the old filepath.Clean + filepath.Join + prefix checks.
+	resolvedPath, rerr := resolveAndCheckPath(t.repoDir, cleanPath, nil) // no scope check for reads
+	if rerr != nil {
+		return "", rerr
 	}
-
-	// Containment check: ensure the resolved path does not escape the repository root.
-	absPath = filepath.Clean(absPath)
-	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
-	if !strings.HasPrefix(absPath, repoClean) {
-		slog.Warn("file access blocked: path escapes repository root",
-			"tool", "read_file",
-			"requested_path", path,
-			"resolved_path", absPath,
-			"repo_root", t.repoDir,
-		)
-		return "", fmt.Errorf("path escapes repository root: %s", path)
-	}
-
-	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
-	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
-		slog.Warn("file access blocked: path escapes repository root",
-			"tool", "read_file",
-			"requested_path", path,
-			"resolved_path", absPath,
-			"repo_root", t.repoDir,
-		)
-		return "", fmt.Errorf("path escapes repository root: %s", path)
-	}
+	absPath := resolvedPath
 
 	relForLog := path
 	if rel, err := filepath.Rel(t.repoDir, absPath); err == nil {
@@ -490,43 +558,13 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return fmt.Sprintf("[dry-run] Would write %d bytes to %s", len(params.Content), params.Path), nil
 	}
 
-	absPath := filepath.Join(t.repoDir, filepath.Clean(params.Path))
-	repoClean := filepath.Clean(t.repoDir) + string(os.PathSeparator)
-	if !strings.HasPrefix(absPath, repoClean) {
-		slog.Warn("file access blocked: path escapes repository root",
-			"tool", "write_file",
-			"requested_path", params.Path,
-			"resolved_path", absPath,
-			"repo_root", t.repoDir,
-		)
-		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
+	// Resolve symlinks and verify path containment + scope restrictions.
+	// This subsumes the old filepath.Clean + filepath.Join + prefix checks.
+	resolvedPath, err := resolveAndCheckPath(t.repoDir, params.Path, t.allowedPrefixes)
+	if err != nil {
+		return "", err
 	}
-
-	// Defense-in-depth: verify resolved path is within repo root using filepath.Rel.
-	if rel, err := filepath.Rel(filepath.Clean(t.repoDir), absPath); err != nil || strings.HasPrefix(rel, "..") {
-		slog.Warn("file access blocked: path escapes repository root",
-			"tool", "write_file",
-			"requested_path", params.Path,
-			"resolved_path", absPath,
-			"repo_root", t.repoDir,
-		)
-		return "", fmt.Errorf("path escapes repository root: %s", params.Path)
-	}
-
-	// Path prefix restriction for PM role (spec writing only)
-	if len(t.allowedPrefixes) > 0 {
-		relPath := filepath.ToSlash(filepath.Clean(params.Path))
-		allowed := false
-		for _, prefix := range t.allowedPrefixes {
-			if strings.HasPrefix(relPath, prefix) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return "", fmt.Errorf("write_file restricted to spec paths (openspec/changes/ or openspec/specs/)")
-		}
-	}
+	absPath := resolvedPath
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return "", fmt.Errorf("create directories: %w", err)

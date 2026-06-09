@@ -110,6 +110,18 @@ func TestParseDependsOn(t *testing.T) {
 		{"DEPENDS ON #15, #16, #17", []int{15, 16, 17}},
 		{"Depends on: #15\nSee also #16", []int{15}},
 		{"No deps here.", nil},
+		// Extended keyword patterns:
+		{"depends-on: #15", []int{15}},
+		{"Requires: #20", []int{20}},
+		{"Blocked by: #10, #11", []int{10, 11}},
+		{"blocked by #5", []int{5}},
+		{"Subtask of: #30", []int{30}},
+		{"Parent issue: #8", []int{8}},
+		{"Needs: #12", []int{12}},
+		{"Prerequisite: #7", []int{7}},
+		{"relies on: #3", []int{3}},
+		{"Tracking: #22", []int{22}},
+		{"This is unrelated text with #99", nil}, // no keyword → not a dependency
 	}
 
 	for _, tc := range cases {

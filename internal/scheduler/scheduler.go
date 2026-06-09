@@ -23,7 +23,7 @@ import (
 )
 
 var dependsOnRegex = regexp.MustCompile(`(?i)#(\d+)`)
-var dependsOnKeywordRegex = regexp.MustCompile(`(?i)depends\s+on`)
+var dependsOnKeywordRegex = regexp.MustCompile(`(?i)(?:depends\s+on|depends-on|requires|blocked\s+by|needs|relies\s+on|subtask\s+of|parent\s+issue|tracking|prerequisite)\s*:?`)
 var priorityRegex = regexp.MustCompile(`(?i)priority\s*:\s*(\d+)`)
 
 // Scheduler wraps a Forgejo client and provides dependency management.
