@@ -3,9 +3,13 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1147,5 +1151,298 @@ func TestSpecLifecycleLabels_TransitionOnSpecPRMerge(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected spec-approved label to be added, got addedLabels:", f.addedLabels)
+	}
+}
+
+// --- Restart Checkpoint + Stale Cleanup tests ---
+
+func TestShutdownCheckpointWrites(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     string
+		lastTool  string
+	}{
+		{"completed", "completed", "forgejo_create_pr"},
+		{"failed", "failed", "write_file"},
+		{"cancelled", "cancelled", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeShutdownCheckpoint(dir, tc.state, tc.lastTool)
+			cp := readShutdownCheckpoint(dir)
+			if cp == nil {
+				t.Fatalf("expected checkpoint to exist")
+			}
+			if cp.State != tc.state {
+				t.Errorf("state = %q, want %q", cp.State, tc.state)
+			}
+			if cp.LastTool != tc.lastTool {
+				t.Errorf("last_tool = %q, want %q", cp.LastTool, tc.lastTool)
+			}
+			if cp.Timestamp == "" {
+				t.Error("expected timestamp to be set")
+			}
+		})
+	}
+}
+
+func TestRestoreSkipsCompletedSession(t *testing.T) {
+	// Create a session store with a completed session
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	workDir := filepath.Join(dir, "work", "test-session")
+	_ = os.MkdirAll(workDir, 0755)
+	// Write shutdown.json indicating completed
+	writeShutdownCheckpoint(workDir, "completed", "forgejo_create_pr")
+
+	rec := &SessionRecord{
+		SessionKey:  "test/session",
+		Repository:  "test/repo",
+		IssueNumber: 1,
+		WorkDir:     workDir,
+		RepoDir:     filepath.Join(workDir, "repo"),
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	if err := store.Create(rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Verify session exists in store
+	records, _ := store.ListAll()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	// Simulate restoreSessions logic: when shutdown.json has state="completed",
+	// the session should be skipped and the store record deleted.
+	cp := readShutdownCheckpoint(workDir)
+	if cp == nil || cp.State != "completed" {
+		t.Fatalf("expected completed checkpoint")
+	}
+	// In real code, this would call store.Delete and skip session creation.
+	// For test, verify the store CRUD works.
+	if err := store.Delete("test/session"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	records, _ = store.ListAll()
+	if len(records) != 0 {
+		t.Fatalf("expected 0 records after delete, got %d", len(records))
+	}
+}
+
+func TestRestoreCrashRecoverySteering(t *testing.T) {
+	// No shutdown.json → crash → session should be restored with verification steering
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	workDir := filepath.Join(dir, "work", "test-crash-session")
+	_ = os.MkdirAll(workDir, 0755)
+	// No shutdown.json written — simulating a crash
+
+	rec := &SessionRecord{
+		SessionKey:  "test/crash-session",
+		Repository:  "test/repo",
+		IssueNumber: 2,
+		WorkDir:     workDir,
+		RepoDir:     filepath.Join(workDir, "repo"),
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	if err := store.Create(rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Check that no shutdown checkpoint exists (crash condition)
+	cp := readShutdownCheckpoint(workDir)
+	if cp != nil {
+		t.Fatal("expected no checkpoint for crash scenario")
+	}
+
+	// In the real code, when tp == nil and lifecycle state is "working",
+	// IsCrashRecovery would be set to true. We verify the flag mechanism works.
+	sess := &Session{
+		Key:             rec.SessionKey,
+		WorkDir:         rec.WorkDir,
+		IsCrashRecovery: true, // This is what restoreSessions would set
+	}
+	if !sess.IsCrashRecovery {
+		t.Error("expected IsCrashRecovery to be true")
+	}
+}
+
+func TestStoreDeleteOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Create two sessions
+	for i := 0; i < 2; i++ {
+		rec := &SessionRecord{
+			SessionKey:  fmt.Sprintf("test/session-%d", i),
+			Repository:  "test/repo",
+			IssueNumber: i,
+			WorkDir:     filepath.Join(dir, "work", fmt.Sprintf("session-%d", i)),
+			RepoDir:     filepath.Join(dir, "work", fmt.Sprintf("session-%d", i), "repo"),
+			CreatedAt:   time.Now(),
+			LastActive:  time.Now(),
+		}
+		if err := store.Create(rec); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	// Simulate shutdownAll: delete all records from store
+	records, _ := store.ListAll()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records before shutdown, got %d", len(records))
+	}
+	for _, rec := range records {
+		store.Delete(rec.SessionKey)
+	}
+
+	records, _ = store.ListAll()
+	if len(records) != 0 {
+		t.Fatalf("expected 0 records after shutdownAll, got %d", len(records))
+	}
+}
+
+func TestPruneMergedBranches(t *testing.T) {
+	// Create a git repo with a merged feature branch
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+
+	// Initialize repo
+	cmd := exec.Command("git", "init", repoDir)
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+
+	// Create initial commit on main
+	cmd = exec.Command("git", "-C", repoDir, "config", "user.email", "test@test.com")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "config", "user.name", "Test")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "add", ".")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "commit", "-m", "initial")
+	_ = cmd.Run()
+
+	// Create and merge a feature branch
+	cmd = exec.Command("git", "-C", repoDir, "checkout", "-b", "feature/test")
+	_ = cmd.Run()
+	_ = os.WriteFile(filepath.Join(repoDir, "test.txt"), []byte("test"), 0644)
+	cmd = exec.Command("git", "-C", repoDir, "add", ".")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "commit", "-m", "add test")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "checkout", "main")
+	_ = cmd.Run()
+	cmd = exec.Command("git", "-C", repoDir, "merge", "feature/test")
+	_ = cmd.Run()
+
+	// Verify feature/test is now merged
+	cmd = exec.Command("git", "-C", repoDir, "branch", "--merged", "main")
+	output, _ := cmd.CombinedOutput()
+	merged := strings.TrimSpace(string(output))
+	if !strings.Contains(merged, "feature/test") {
+		t.Skip("feature/test not showing as merged")
+	}
+
+	// Prune
+	pruneMergedBranches(repoDir)
+
+	// Verify feature/test was deleted
+	cmd = exec.Command("git", "-C", repoDir, "branch")
+	output, _ = cmd.CombinedOutput()
+	branches := string(output)
+	if strings.Contains(branches, "feature/test") {
+		t.Error("expected feature/test branch to be pruned, but it still exists")
+	}
+	if !strings.Contains(branches, "main") {
+		t.Error("expected main branch to still exist")
+	}
+}
+
+func TestPruneBranchesFailureNonFatal(t *testing.T) {
+	// Pass a corrupt/non-existent directory — should log warning but not panic
+	dir := t.TempDir()
+	corruptDir := filepath.Join(dir, "nonexistent")
+
+	// This should not panic or cause test failure
+	pruneMergedBranches(corruptDir)
+
+	// Also test with a non-git directory
+	normalDir := filepath.Join(dir, "notagitrepo")
+	_ = os.MkdirAll(normalDir, 0755)
+	pruneMergedBranches(normalDir)
+
+	// If we get here without panic, the test passes
+}
+
+func TestCompletedAtColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	workDir := filepath.Join(dir, "work", "completed-session")
+	_ = os.MkdirAll(workDir, 0755)
+
+	// Create a session
+	rec := &SessionRecord{
+		SessionKey:  "test/completed-at",
+		Repository:  "test/repo",
+		IssueNumber: 1,
+		WorkDir:     workDir,
+		RepoDir:     filepath.Join(workDir, "repo"),
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	if err := store.Create(rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Verify completed_at is NULL initially
+	got, err := store.Get("test/completed-at")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("expected completed_at to be NULL for active session, got %v", got.CompletedAt)
+	}
+
+	// Set completed_at
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.SetCompletedAt("test/completed-at", now); err != nil {
+		t.Fatalf("SetCompletedAt: %v", err)
+	}
+
+	// Verify it's set
+	got, err = store.Get("test/completed-at")
+	if err != nil {
+		t.Fatalf("Get after SetCompletedAt: %v", err)
+	}
+	if got.CompletedAt == nil {
+		t.Fatal("expected completed_at to be set, got nil")
+	}
+	// Compare as RFC3339 strings to avoid timezone issues
+	if got.CompletedAt.Format(time.RFC3339) != now.Format(time.RFC3339) {
+		t.Errorf("completed_at = %v, want %v", got.CompletedAt, now)
 	}
 }

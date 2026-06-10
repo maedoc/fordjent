@@ -18,6 +18,11 @@ import (
 	"github.com/fordjent/fordjent/internal/tool"
 )
 
+// fullPrompt concatenates all parts of a systemPromptParts for test assertions.
+func fullPrompt(p provider.SystemPromptParts) string {
+	return p.Stable + p.TurnInfo + p.ToolsDesc
+}
+
 func TestBuildTurnSignature(t *testing.T) {
 	calls := []provider.ToolCall{
 		{Function: provider.FunctionCall{Name: "bash", Arguments: `{"command":"ls"}`}},
@@ -321,7 +326,7 @@ func TestBuildSystemPrompt_IncludesStateInstructions(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "implementer", lifecycle.StatePlanning, 0, 5)
-	if !strings.Contains(prompt, "Planning") {
+	if !strings.Contains(fullPrompt(prompt), "Planning") {
 		t.Error("system prompt should include planning state instructions")
 	}
 }
@@ -343,10 +348,10 @@ func TestBuildSystemPrompt_PRReviewMode(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "PR Review Mode") {
+	if !strings.Contains(fullPrompt(prompt), "PR Review Mode") {
 		t.Error("system prompt should include PR Review Mode for PR comment events")
 	}
-	if !strings.Contains(prompt, "Do NOT create a new PR") {
+	if !strings.Contains(fullPrompt(prompt), "Do NOT create a new PR") {
 		t.Error("PR Review Mode should instruct not to create a new PR")
 	}
 }
@@ -384,10 +389,10 @@ func TestBuildSystemPrompt_AutomergeReviewerPrompt(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 7, 7, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateMerging, 0, 5)
-	if !strings.Contains(prompt, "automerge") {
+	if !strings.Contains(fullPrompt(prompt), "automerge") {
 		t.Error("reviewer prompt should mention automerge when PR has automerge label")
 	}
-	if !strings.Contains(prompt, "forgejo_merge_pr") {
+	if !strings.Contains(fullPrompt(prompt), "forgejo_merge_pr") {
 		t.Error("automerge reviewer prompt should instruct to call forgejo_merge_pr")
 	}
 }
@@ -454,10 +459,10 @@ func TestBuildSystemPrompt_DevOpsRole(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "devops", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "DevOps") {
+	if !strings.Contains(fullPrompt(prompt), "DevOps") {
 		t.Error("devops prompt should include DevOps role instructions")
 	}
-	if !strings.Contains(prompt, "infrastructure") {
+	if !strings.Contains(fullPrompt(prompt), "infrastructure") {
 		t.Error("devops prompt should mention infrastructure")
 	}
 }
@@ -479,10 +484,10 @@ func TestBuildSystemPrompt_TesterRole(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "tester", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "Test Engineer") {
+	if !strings.Contains(fullPrompt(prompt), "Test Engineer") {
 		t.Error("tester prompt should include Test Engineer role instructions")
 	}
-	if !strings.Contains(prompt, "test quality") {
+	if !strings.Contains(fullPrompt(prompt), "test quality") {
 		t.Error("tester prompt should mention test quality")
 	}
 }
@@ -504,10 +509,10 @@ func TestBuildSystemPrompt_PMRole(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "Project Manager") {
+	if !strings.Contains(fullPrompt(prompt), "Project Manager") {
 		t.Error("pm prompt should include Project Manager role instructions")
 	}
-	if !strings.Contains(prompt, "Depends on:") {
+	if !strings.Contains(fullPrompt(prompt), "Depends on:") {
 		t.Error("pm prompt should mention dependency tracking")
 	}
 }
@@ -814,10 +819,10 @@ func TestBuildSystemPrompt_PolicyNoAutoMerge(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "no-auto-merge policy") {
+	if !strings.Contains(fullPrompt(prompt), "no-auto-merge policy") {
 		t.Error("reviewer prompt should mention no-auto-merge policy")
 	}
-	if !strings.Contains(prompt, "MUST NOT call forgejo_merge_pr") {
+	if !strings.Contains(fullPrompt(prompt), "MUST NOT call forgejo_merge_pr") {
 		t.Error("reviewer prompt should say MUST NOT call forgejo_merge_pr")
 	}
 }
@@ -841,10 +846,10 @@ func TestBuildSystemPrompt_PolicyRequireReview(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "requires human review before merging") {
+	if !strings.Contains(fullPrompt(prompt), "requires human review before merging") {
 		t.Error("reviewer prompt should mention require-review policy")
 	}
-	if !strings.Contains(prompt, "approved") {
+	if !strings.Contains(fullPrompt(prompt), "approved") {
 		t.Error("reviewer prompt should mention approved label requirement")
 	}
 }
@@ -869,7 +874,7 @@ func TestBuildSystemPrompt_PolicyYolo(t *testing.T) {
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
 	// Yolo mode: reviewer should be told to merge bot PRs immediately
-	if !strings.Contains(prompt, "call forgejo_merge_pr IMMEDIATELY") {
+	if !strings.Contains(fullPrompt(prompt), "call forgejo_merge_pr IMMEDIATELY") {
 		t.Error("yolo reviewer prompt should tell reviewer to merge bot PRs immediately")
 	}
 }
@@ -893,10 +898,10 @@ func TestBuildSystemPrompt_PolicyPlanFirst(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueOpened, "org/repo", 42, 0, "alice", "opened")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "pm", lifecycle.StateOpened, 0, 5)
-	if !strings.Contains(prompt, "plan-first policy") {
+	if !strings.Contains(fullPrompt(prompt), "plan-first policy") {
 		t.Error("pm prompt should mention plan-first policy")
 	}
-	if !strings.Contains(prompt, "plan-approved") {
+	if !strings.Contains(fullPrompt(prompt), "plan-approved") {
 		t.Error("pm prompt should mention plan-approved label")
 	}
 }

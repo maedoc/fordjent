@@ -177,7 +177,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 	}
 
 	// Step 3: Build context for the LLM
-	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState, a.executor.CurrentTurn(), a.executor.MaxTurns())
+	systemPromptParts := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState, a.executor.CurrentTurn(), a.executor.MaxTurns())
 	contextMessages, err := a.buildContext(ctx, evt)
 	if err != nil {
 		slog.Warn("failed to build full context", "error", err)
@@ -253,7 +253,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 			"messages", len(messages),
 		)
 
-		result, updatedMessages, err := a.executor.Run(ctx, systemPrompt, messages)
+		result, updatedMessages, err := a.executor.Run(ctx, systemPromptParts, messages)
 		messages = updatedMessages
 
 		if err != nil {
@@ -543,7 +543,10 @@ func (a *Agent) effectiveMaxTurns() int {
 	return a.cfg.Agent.MaxTurns
 }
 
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState, turn, maxTurns int) string {
+// systemPromptParts is an alias for provider.SystemPromptParts
+type systemPromptParts = provider.SystemPromptParts
+
+func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState, turn, maxTurns int) systemPromptParts {
 	toolsDesc := a.tools.Descriptions()
 
 	// Detect repo language for language-aware prompting
@@ -877,9 +880,15 @@ If this issue references a spec change (check issue body for 'Spec:' references 
 
 	stateInstructions := issueStateInstructions(fsmState)
 
-	turnBudgetInfo := fmt.Sprintf("\n\n## Turn Budget\nYou have %d turns total and are currently on turn %d. You have access to a turn() tool that tells you how many turns you've used and how many remain. Check it periodically, especially if you've been working for a while.", maxTurns, turn)
+	// Cache optimization: turnBudgetInfo and toolsDesc are NOT included in the
+	// system prompt. They are returned separately so they can be sent as subsequent
+	// user messages. This keeps the system prompt stable across turns, enabling
+	// KV cache hits in providers like NeuralWatt that use automatic prefix caching.
+	// Previously, turn# and tool descriptions were embedded in the system prompt,
+	// changing message[0] on every API call and invalidating the entire cache.
+	turnBudgetInfo := fmt.Sprintf("## Turn Budget\nYou have %d turns total and are currently on turn %d. You have access to a turn() tool that tells you how many turns you've used and how many remain. Check it periodically, especially if you've been working for a while.", maxTurns, turn)
 
-	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
+	stable := fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
 
 ## Current Context
 - Repository: %s
@@ -887,11 +896,6 @@ If this issue references a spec change (check issue body for 'Spec:' references 
 - Sender: @%s
 - Target: %s
 %s%s%s
-%s
-
-## Your Capabilities
-You have access to the following tools:
-%s
 
 ## Rules
 1. Always read existing code before making changes.
@@ -927,11 +931,15 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		modeInstructions,
 		langInstruction,
 		stateInstructions,
-		turnBudgetInfo,
-		toolsDesc,
 		a.cfg.Agent.CommitPrefix,
 		strings.Join(a.cfg.Security.ProtectedBranches, ", "),
 	)
+
+	return systemPromptParts{
+		Stable:    stable,
+		TurnInfo:  turnBudgetInfo,
+		ToolsDesc: toolsDesc,
+	}
 }
 
 func (a *Agent) targetDescription(evt *event.Event) string {
@@ -1544,4 +1552,20 @@ This issue has a 'blocked' label. Before giving up:
 Implementation tools (write_file, git, forgejo_create_pr, forgejo_merge_pr) are BLOCKED while the 'blocked' label is present. If you verify dependencies are resolved, you may use forgejo tools to remove the 'blocked' label and add 'ready'.`
 	}
 	return ""
+}
+
+// LastToolName returns the name of the last tool executed by the agent's turn executor.
+func (a *Agent) LastToolName() string {
+	if a.executor == nil {
+		return ""
+	}
+	return a.executor.LastToolName()
+}
+
+// SetVerificationSteering enables crash-recovery verification steering
+// on the first turn of a restored session.
+func (a *Agent) SetVerificationSteering(enabled bool) {
+	if a.executor != nil {
+		a.executor.SetVerificationSteering(enabled)
+	}
 }

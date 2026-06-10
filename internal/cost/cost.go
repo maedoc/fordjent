@@ -19,6 +19,10 @@ type UsageRecord struct {
 	InputTokens      int64
 	OutputTokens     int64
 	TotalTokens      int64
+	CachedTokens     int64  // tokens served from KV cache (saves cost)
+	CacheSavingsUSD  float64 // actual savings from caching (NeuralWatt)
+	RequestCostUSD   float64 // actual cost of this request
+	EnergyJoules     float64 // energy consumed
 	CostUSD          float64
 	Timestamp        time.Time
 }
@@ -46,6 +50,12 @@ func NewTracker(dbPath string) (*Tracker, error) {
 }
 
 func (t *Tracker) migrate() error {
+	// Add columns for cache tracking if they don't exist (migration-safe)
+	t.db.Exec(`ALTER TABLE usage ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`)
+	t.db.Exec(`ALTER TABLE usage ADD COLUMN cache_savings_usd REAL NOT NULL DEFAULT 0`)
+	t.db.Exec(`ALTER TABLE usage ADD COLUMN request_cost_usd REAL NOT NULL DEFAULT 0`)
+	t.db.Exec(`ALTER TABLE usage ADD COLUMN energy_joules REAL NOT NULL DEFAULT 0`)
+
 	_, err := t.db.Exec(`
 CREATE TABLE IF NOT EXISTS usage (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +67,10 @@ CREATE TABLE IF NOT EXISTS usage (
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	total_tokens INTEGER NOT NULL DEFAULT 0,
 	cost_usd REAL NOT NULL DEFAULT 0,
+	cached_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_savings_usd REAL NOT NULL DEFAULT 0,
+	request_cost_usd REAL NOT NULL DEFAULT 0,
+	energy_joules REAL NOT NULL DEFAULT 0,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -73,10 +87,12 @@ func (t *Tracker) Record(r *UsageRecord) error {
 	defer t.mu.Unlock()
 
 	_, err := t.db.Exec(
-		`INSERT INTO usage (session_key, provider, model, repository, input_tokens, output_tokens, total_tokens, cost_usd, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO usage (session_key, provider, model, repository, input_tokens, output_tokens, total_tokens, cost_usd, cached_tokens, cache_savings_usd, request_cost_usd, energy_joules, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.SessionKey, r.ProviderName, r.Model, r.Repository,
-		r.InputTokens, r.OutputTokens, r.TotalTokens, r.CostUSD, r.Timestamp,
+		r.InputTokens, r.OutputTokens, r.TotalTokens, r.CostUSD,
+		r.CachedTokens, r.CacheSavingsUSD, r.RequestCostUSD, r.EnergyJoules,
+		r.Timestamp,
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage record: %w", err)

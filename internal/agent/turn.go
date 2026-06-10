@@ -49,6 +49,8 @@ type TurnExecutor struct {
 	lastToolOutput map[string]string // last output per tool (for duplicate detection)
 	isBugReport    bool            // true when the issue describes a bug/crash/error
 	hasReproduced  bool            // true after a build/run/test command has been executed
+	lastToolName   string          // name of the last tool executed (for shutdown checkpoint)
+	verificationSteering bool       // when true, inject verification steering on first turn
 }
 
 func NewTurnExecutor(
@@ -97,6 +99,7 @@ func (te *TurnExecutor) SetBugReport() {
 // It also detects build/run/test execution for bug-reproduction tracking.
 func (te *TurnExecutor) RecordToolCall(name string, output string) {
 	te.toolCallCounts[name]++
+	te.lastToolName = name
 
 	// Detect build/run/test execution for bug-reproduction tracking
 	if !te.hasReproduced && (name == "bash" || name == "git") {
@@ -126,6 +129,17 @@ func (te *TurnExecutor) CurrentTurn() int {
 // MaxTurns returns the max turn budget.
 func (te *TurnExecutor) MaxTurns() int {
 	return te.maxTurns
+}
+
+// LastToolName returns the name of the last tool executed in this session.
+func (te *TurnExecutor) LastToolName() string {
+	return te.lastToolName
+}
+
+// SetVerificationSteering enables crash-recovery verification steering
+// on the first turn of a restored session.
+func (te *TurnExecutor) SetVerificationSteering(enabled bool) {
+	te.verificationSteering = enabled
 }
 
 // PerToolRepeatNudge returns a nudge message if a tool has been called too many times.
@@ -283,9 +297,20 @@ func (te *TurnExecutor) ApplySteering(messages []provider.Message, lastToolName,
 }
 
 // Run executes one LLM turn: handles compaction before the call, records cost after.
-func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages []provider.Message) (*TurnResult, []provider.Message, error) {
+// systemPrompt can be either a string or a systemPromptParts struct.
+// When systemPromptParts is used, the stable prefix, turn info, and tool descriptions
+// are sent as separate messages to enable KV cache hits on the stable prefix.
+func (te *TurnExecutor) Run(ctx context.Context, systemPrompt interface{}, messages []provider.Message) (*TurnResult, []provider.Message, error) {
 	te.turnCount++
 	start := time.Now()
+
+	// Inject verification steering on first turn for crash-recovered sessions
+	if te.verificationSteering && te.turnCount == 1 {
+		messages = append(messages, provider.Message{
+			Role:    "user",
+			Content: "[Fordjent Steering] The previous session was interrupted. Re-read any files you previously wrote to verify they are correct before continuing. Do not assume prior write_file or git operations succeeded.",
+		})
+	}
 
 	// Check budget before spending
 	if te.costTracker != nil {
@@ -307,9 +332,35 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 		compacted = true
 	}
 
+	// Build the stable system prompt string and append volatile parts as separate user messages.
+	// This ensures the prefix (message[0]) stays identical across turns, enabling
+	// automatic prefix caching in providers like NeuralWatt/OpenAI.
+	var sysPromptStr string
+	switch sp := systemPrompt.(type) {
+	case provider.SystemPromptParts:
+		sysPromptStr = sp.Stable
+		// Append volatile parts AFTER conversation history so they don't break
+		// the prefix cache. These change every turn (turn counter) or when tools
+		// are excluded (tool descriptions).
+		if sp.ToolsDesc != "" {
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: "## Available Tools\n" + sp.ToolsDesc,
+			})
+		}
+		if sp.TurnInfo != "" {
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: sp.TurnInfo,
+			})
+		}
+	case string:
+		sysPromptStr = sp
+	}
+
 	// Call LLM (retry is handled inside Client.Chat)
 	toolDefs := te.tools.ToolsExcluding(te.excludeTools)
-	response, usage, err := te.llm.Chat(ctx, systemPrompt, messages, toolDefs)
+	response, usage, err := te.llm.Chat(ctx, sysPromptStr, messages, toolDefs)
 	latency := time.Since(start)
 
 	if err != nil {
@@ -324,15 +375,19 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 		costUSD = usage.Cost(te.llm.Cfg())
 		if te.costTracker != nil {
 			_ = te.costTracker.Record(&cost.UsageRecord{
-				SessionKey:   te.sessionKey,
-				ProviderName: te.llm.Cfg().Name,
-				Model:        te.llm.Cfg().Model,
-				Repository:   te.repository,
-				InputTokens:  int64(usage.PromptTokens),
-				OutputTokens: int64(usage.CompletionTokens),
-				TotalTokens:  int64(usage.TotalTokens),
-				CostUSD:      costUSD,
-				Timestamp:    start,
+				SessionKey:      te.sessionKey,
+				ProviderName:     te.llm.Cfg().Name,
+				Model:           te.llm.Cfg().Model,
+				Repository:      te.repository,
+				InputTokens:     int64(usage.PromptTokens),
+				OutputTokens:    int64(usage.CompletionTokens),
+				TotalTokens:     int64(usage.TotalTokens),
+				CachedTokens:    int64(usage.CachedTokens + usage.CacheReadTokens),
+				CacheSavingsUSD: usage.CacheSavingsUSD,
+				RequestCostUSD:  usage.RequestCostUSD,
+				EnergyJoules:    usage.EnergyJoules,
+				CostUSD:         costUSD,
+				Timestamp:       start,
 			})
 		}
 	}
@@ -346,6 +401,8 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt string, messages [
 		"tokens_in", usage.PromptTokens,
 		"tokens_out", usage.CompletionTokens,
 		"total_tokens", usage.TotalTokens,
+		"cached_tokens", usage.CachedTokens + usage.CacheReadTokens,
+		"cache_savings_usd", usage.CacheSavingsUSD,
 		"cost_usd", costUSD,
 		"tool_calls", toolCount,
 		"tools_used", te.toolCallCounts,

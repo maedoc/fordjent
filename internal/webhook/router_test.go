@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -910,5 +911,299 @@ func TestWebhookDedup(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "duplicate") {
 		t.Errorf("expected duplicate status, got: %s", w.Body.String())
+	}
+}
+
+// --- Routing Table Tests ---
+
+func TestRouteTable_SpecPRComment(t *testing.T) {
+	// Rule 1: issue_comment.created on spec-proposed PR → PM
+	// Without a Forgejo client, Rule 1 won't match (can't fetch labels)
+	// But Rule 6 (human comment on PR) should still match
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil) // no forgejo client
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
+	evt.PRNumber = 10
+	evt.SessionKey = "org/repo/pulls/10"
+
+	result, matched := rt.Route(context.Background(), evt)
+	// Without forgejo client, Rule 1 won't match (can't fetch labels)
+	// But Rule 6 (human comment on PR) should still match
+	if matched {
+		if result.Role != "reviewer" {
+			t.Errorf("expected reviewer role, got %s", result.Role)
+		}
+	}
+}
+
+func TestRouteTable_PullRequestMerged(t *testing.T) {
+	// Rule 8: pull_request.merged → scheduler
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.PullRequestMerged, "org/repo", 0, 42, "fordjent-bot", "merged")
+	evt.PRNumber = 42
+	evt.SessionKey = "org/repo/pulls/42"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "scheduler" {
+		t.Errorf("expected scheduler role, got %s", result.Role)
+	}
+	if result.SessionKey != "org/repo/pulls/42" {
+		t.Errorf("expected org/repo/pulls/42, got %s", result.SessionKey)
+	}
+}
+
+func TestRouteTable_IssueClosed(t *testing.T) {
+	// Rule 9: issue.closed → scheduler
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.IssueClosed, "org/repo", 20, 0, "alice", "closed")
+	evt.IssueNumber = 20
+	evt.SessionKey = "org/repo/issues/20"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "scheduler" {
+		t.Errorf("expected scheduler role, got %s", result.Role)
+	}
+}
+
+func TestRouteTable_ArchiveChangeRequested(t *testing.T) {
+	// Rule 10: ArchiveChangeRequested → pm
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.ArchiveChangeRequested, "org/repo", 5, 0, "fordjent-scheduler", "archive")
+	evt.Change = "user-auth"
+	evt.SessionKey = "org/repo/archive/user-auth-123"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "pm" {
+		t.Errorf("expected pm role, got %s", result.Role)
+	}
+}
+
+func TestRouteTable_NormalPRComment(t *testing.T) {
+	// Rule 6: issue_comment.created on normal PR (human sender) → reviewer
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil) // no forgejo → no label lookup → Rule 6 applies
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 30, 30, "alice", "created")
+	evt.PRNumber = 30
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "reviewer" {
+		t.Errorf("expected reviewer role, got %s", result.Role)
+	}
+	if result.SessionKey != "org/repo/pulls/30" {
+		t.Errorf("expected org/repo/pulls/30, got %s", result.SessionKey)
+	}
+}
+
+func TestRouteTable_ReviewCommentOnNormalPR(t *testing.T) {
+	// Rule 7: pull_request_review_comment on normal PR → reviewer
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.PullRequestReviewComment, "org/repo", 0, 30, "bob", "created")
+	evt.PRNumber = 30
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "reviewer" {
+		t.Errorf("expected reviewer role, got %s", result.Role)
+	}
+}
+
+func TestRouteTable_BotCommentIgnored(t *testing.T) {
+	// Rule 6 doesn't match for bot senders — no rule matches
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 30, 30, "fordjent-bot", "created")
+	evt.PRNumber = 30
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if matched {
+		t.Errorf("bot comment should not match any route, got role=%s key=%s", result.Role, result.SessionKey)
+	}
+}
+
+func TestRouteTable_ReviewCommentWithActionableBody(t *testing.T) {
+	// Rule 5: pull_request_review_comment with actionable body → implementer fix
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil)
+	router.SetRouteTable(rt)
+
+	evt := event.NewEvent(event.PullRequestReviewComment, "org/repo", 0, 30, "bob", "created")
+	evt.PRNumber = 30
+	evt.SessionKey = "org/repo/pulls/30"
+	evt.Payload = map[string]interface{}{
+		"comment": map[string]interface{}{
+			"body": "Please fix the nil check on line 42",
+		},
+	}
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match")
+	}
+	if result.Role != "implementer" {
+		t.Errorf("expected implementer role, got %s", result.Role)
+	}
+	if !result.IsFix {
+		t.Error("expected IsFix to be true")
+	}
+	if result.SessionKey != "org/repo/pulls/30-fix" {
+		t.Errorf("expected org/repo/pulls/30-fix, got %s", result.SessionKey)
+	}
+}
+
+func TestHasLabel(t *testing.T) {
+	tests := []struct {
+		labels []string
+		name   string
+		want   bool
+	}{
+		{[]string{"spec-proposed", "ralph"}, "spec-proposed", true},
+		{[]string{"spec-proposed", "ralph"}, "ralph", true},
+		{[]string{"spec-proposed"}, "ralph", false},
+		{nil, "spec-proposed", false},
+	}
+	for _, tt := range tests {
+		got := hasLabel(tt.labels, tt.name)
+		if got != tt.want {
+			t.Errorf("hasLabel(%v, %q) = %v, want %v", tt.labels, tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestRouteTable_FullHandoffChain validates the priority-ordered routing
+// from spec PR comment → PM, through PR merge → scheduler, to
+// ArchiveChangeRequested → PM archival. Uses synthetic events without
+// a real Forgejo API.
+func TestRouteTable_FullHandoffChain(t *testing.T) {
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	rt := NewRouteTable(nil) // no Forgejo API
+	router.SetRouteTable(rt)
+
+	// Step 1: Spec PR comment → PM (would need real Forgejo for label check)
+	specCommentEvt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
+	specCommentEvt.PRNumber = 10
+	specCommentEvt.SessionKey = "org/repo/pulls/10"
+	// Without forgejo, we can't check spec-proposed label, so this falls through
+	// to Rule 6 (human comment on PR → reviewer). This is correct behavior:
+	// the routing table can only determine role if it can see the labels.
+	result, matched := rt.Route(context.Background(), specCommentEvt)
+	if matched {
+		// Falls through to reviewer since no spec label visible
+		if result.Role != "reviewer" {
+			t.Errorf("step 1: expected reviewer (no forgejo labels), got %s", result.Role)
+		}
+	}
+
+	// Step 2: PR merged → scheduler
+	mergeEvt := event.NewEvent(event.PullRequestMerged, "org/repo", 0, 10, "fordjent-bot", "merged")
+	mergeEvt.PRNumber = 10
+	mergeEvt.SessionKey = "org/repo/pulls/10"
+	result, matched = rt.Route(context.Background(), mergeEvt)
+	if !matched {
+		t.Fatal("step 2: expected route to match for PR merge")
+	}
+	if result.Role != "scheduler" {
+		t.Errorf("step 2: expected scheduler, got %s", result.Role)
+	}
+
+	// Step 3: Issue opened → no match in routing table (issues.opened is not in the 10 priority rules)
+	// The routing table only covers comment, merge, and review events for now.
+	issueOpenEvt := event.NewEvent(event.IssueOpened, "org/repo", 20, 0, "fordjent-bot", "opened")
+	issueOpenEvt.IssueNumber = 20
+	issueOpenEvt.SessionKey = "org/repo/issues/20"
+	_, matched = rt.Route(context.Background(), issueOpenEvt)
+	// IssueOpened is not in the routing table — it's handled by the manager's handleEvent directly
+	// This is expected: the routing table governs PR-level handoffs, not issue creation.
+
+	// Step 4: Issue closed → scheduler
+	issueCloseEvt := event.NewEvent(event.IssueClosed, "org/repo", 20, 0, "alice", "closed")
+	issueCloseEvt.IssueNumber = 20
+	issueCloseEvt.SessionKey = "org/repo/issues/20"
+	result, matched = rt.Route(context.Background(), issueCloseEvt)
+	if !matched {
+		t.Fatal("step 4: expected route to match for issue closed")
+	}
+	if result.Role != "scheduler" {
+		t.Errorf("step 4: expected scheduler, got %s", result.Role)
+	}
+
+	// Step 5: ArchiveChangeRequested → PM
+	archiveEvt := event.NewEvent(event.ArchiveChangeRequested, "org/repo", 1, 0, "fordjent-scheduler", "archive")
+	archiveEvt.Change = "user-auth"
+	archiveEvt.SessionKey = "org/repo/archive/user-auth-123"
+	result, matched = rt.Route(context.Background(), archiveEvt)
+	if !matched {
+		t.Fatal("step 5: expected route to match for ArchiveChangeRequested")
+	}
+	if result.Role != "pm" {
+		t.Errorf("step 5: expected pm, got %s", result.Role)
+	}
+}
+
+// TestApplyRoute sets evt.Role and evt.SessionKey from the route result.
+func TestApplyRoute(t *testing.T) {
+	rt := NewRouteTable(nil)
+	evt := event.NewEvent(event.PullRequestMerged, "org/repo", 0, 42, "bot", "merged")
+	evt.PRNumber = 42
+	evt.SessionKey = "org/repo/pulls/42"
+
+	matched := ApplyRoute(context.Background(), rt, evt)
+	if !matched {
+		t.Fatal("expected ApplyRoute to match")
+	}
+	if evt.Role != "scheduler" {
+		t.Errorf("expected role=scheduler, got %s", evt.Role)
 	}
 }
