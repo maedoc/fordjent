@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -85,12 +86,21 @@ func (r *Registry) Execute(ctx context.Context, name string, rawArgs string) (st
 }
 
 // Tools returns all registered tools as LLM tool definitions.
+// Sorted by name for deterministic output — random map iteration would
+// change the tool array order between calls, invalidating VLLM prefix caches.
 func (r *Registry) Tools() []provider.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	var names []string
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var defs []provider.ToolDef
-	for _, t := range r.tools {
+	for _, name := range names {
+		t := r.tools[name]
 		defs = append(defs, provider.ToolDef{
 			Type: "function",
 			Function: provider.FunctionDef{
@@ -100,6 +110,7 @@ func (r *Registry) Tools() []provider.ToolDef {
 			},
 		})
 	}
+
 	return defs
 }
 
@@ -108,8 +119,17 @@ func (r *Registry) Descriptions() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// Sort names for deterministic output — random map iteration order would
+	// change the system prompt text between calls, invalidating prefix caches.
+	var names []string
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var result string
-	for _, t := range r.tools {
+	for _, name := range names {
+		t := r.tools[name]
 		result += fmt.Sprintf("- **%s**: %s\n", t.Name(), t.Description())
 	}
 	return result
@@ -124,17 +144,27 @@ func (r *Registry) List() []string {
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
 // ToolsExcluding returns tool definitions excluding the named tools.
 // Used to hide tools that the agent should not call (e.g., forgejo_comment after limit).
+// Sorted by name for deterministic output — random map iteration would
+// change the tool array order between calls, invalidating VLLM prefix caches.
 func (r *Registry) ToolsExcluding(exclude map[string]bool) []provider.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	var names []string
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var defs []provider.ToolDef
-	for _, t := range r.tools {
+	for _, name := range names {
+		t := r.tools[name]
 		if exclude[t.Name()] {
 			continue
 		}

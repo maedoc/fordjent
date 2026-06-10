@@ -123,6 +123,7 @@ type functionJSON struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
+	Strict      bool                   `json:"strict"`
 }
 
 type toolCallJSON struct {
@@ -273,22 +274,28 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 	// Build request messages
 	var reqMessages []messageJSON
 
-	// System prompt: always include cache_control hint so the stable prefix gets cached.
-	// This is the biggest win — the system prompt is ~2-3K tokens and is 99% stable across turns.
+	// System prompt: use "system" role to match OpenAI convention and Pi's format.
+	// VLLM chat templates produce different tokens for "system" vs "user" roles,
+	// so using the correct role ensures prefix compatibility with the model's training.
 	sysMsg := messageJSON{
-		Role:    "user", // "user" role is used consistently for all injected messages across providers
+		Role:    "system",
 		Content: systemPrompt,
-		CacheControl: &cacheControlJSON{Type: "ephemeral"},
 	}
 	reqMessages = append(reqMessages, sysMsg)
 
-	for i, msg := range messages {
+	for _, msg := range messages {
 		mj := messageJSON{
 			Role:       msg.Role,
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
 		}
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// Normalize: set content to nil for tool-only assistant messages.
+			// Pi sends null content for these; empty string "" produces different
+			// tokens in the chat template and can invalidate VLLM prefix caches.
+			if mj.Content == "" {
+				mj.Content = nil
+			}
 			for _, tc := range msg.ToolCalls {
 				mj.ToolCalls = append(mj.ToolCalls, toolCallJSON{
 					ID:   tc.ID,
@@ -301,13 +308,10 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 			}
 		}
 
-		// Add cache_control hints on messages near the boundary of the likely cache window.
-		// The last few messages of each request are most likely to change; putting cache hints
-		// on earlier conversation messages helps providers that support prefix caching.
-		// Specifically: mark the last message before the new user input gets cache_control.
-		if i == len(messages)-1 && (mj.Role == "user" || mj.Role == "tool") {
-			mj.CacheControl = &cacheControlJSON{Type: "ephemeral"}
-		}
+		// NOTE: No cache_control hints are sent. NeuralWatt/VLLM uses automatic prefix
+		// caching based on token block hashes. Adding cache_control fields can change the
+		// JSON serialization and invalidate the prefix hash. Pi does not send cache_control
+		// for NeuralWatt, and gets 90%+ cache hit rates without it.
 
 		reqMessages = append(reqMessages, mj)
 	}
@@ -321,6 +325,7 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 				Name:        t.Function.Name,
 				Description: t.Function.Description,
 				Parameters:  t.Function.Parameters,
+				Strict:      false, // matches Pi's format; some providers reject unknown fields but this is standard
 			},
 		})
 	}

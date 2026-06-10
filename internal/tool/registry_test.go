@@ -111,6 +111,28 @@ func TestRegistryDescriptions(t *testing.T) {
 	}
 }
 
+func TestRegistryDescriptions_Deterministic(t *testing.T) {
+	registry := NewRegistry()
+	// Register tools in non-alphabetical order
+	registry.Register(&mockTool{name: "zebra", description: "Z tool", params: map[string]interface{}{}})
+	registry.Register(&mockTool{name: "alpha", description: "A tool", params: map[string]interface{}{}})
+	registry.Register(&mockTool{name: "mike", description: "M tool", params: map[string]interface{}{}})
+
+	desc1 := registry.Descriptions()
+	desc2 := registry.Descriptions()
+	desc3 := registry.Descriptions()
+
+	if desc1 != desc2 || desc2 != desc3 {
+		t.Errorf("Descriptions() must be deterministic across calls for prefix cache stability.\n call1: %q\n call2: %q\n call3: %q", desc1, desc2, desc3)
+	}
+
+	// Verify alphabetical ordering
+	expected := "- **alpha**: A tool\n- **mike**: M tool\n- **zebra**: Z tool\n"
+	if desc1 != expected {
+		t.Errorf("Descriptions() not sorted alphabetically.\n got:      %q\n expected: %q", desc1, expected)
+	}
+}
+
 func TestRegistryList(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&mockTool{name: "a", description: "A", params: map[string]interface{}{}})
