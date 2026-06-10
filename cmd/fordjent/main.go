@@ -13,6 +13,7 @@ import (
 
 	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/event"
+	"github.com/fordjent/fordjent/internal/ralph"
 	"github.com/fordjent/fordjent/internal/scanner"
 	"github.com/fordjent/fordjent/internal/session"
 	"github.com/fordjent/fordjent/internal/webhook"
@@ -72,6 +73,19 @@ func main() {
 
 	// Session manager
 	go mgr.Run(ctx)
+
+	// Ralph scheduler: periodically scans for PRs with 'ralph' label
+	// and spawns iterative refinement sessions
+	if cfg.Ralph.Enabled {
+		ralphSched := ralph.NewScheduler(mgr.ForgejoClient(), cfg.Ralph)
+		ralphSched.SetDispatchFunc(func(repo string, prNumber, iterNum int) {
+			// Signal the manager to scan for ralph-labeled PRs
+			mgr.ScanRalphPRs(ctx)
+		})
+		ralphSched.Start()
+		slog.Info("ralph scheduler enabled", "interval", cfg.Ralph.CooldownBetweenIterations)
+		defer ralphSched.Stop()
+	}
 
 	// Background ready-issue scanner
 	var scan *scanner.Scanner

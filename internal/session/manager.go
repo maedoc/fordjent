@@ -2074,6 +2074,129 @@ func (m *Manager) OnRalphAppendComplete(ctx context.Context, repo string, prNumb
 	return nil
 }
 
+// ScanRalphPRs scans for open PRs with the 'ralph' label and spawns
+// the next ralph iteration if caps allow. Called by the ralph scheduler ticker.
+func (m *Manager) ScanRalphPRs(ctx context.Context) {
+	if m.forgejoClient == nil || !m.cfg.Ralph.Enabled {
+		return
+	}
+
+	repos := m.reposWithRalphLabels()
+	for _, repo := range repos {
+		m.scanRepoForRalph(ctx, repo)
+	}
+}
+
+// reposWithRalphLabels returns repos that might have ralph-labeled PRs.
+func (m *Manager) reposWithRalphLabels() []string {
+	var repos []string
+	seen := make(map[string]bool)
+	if m.cfg.Scanner.Repo != "" {
+		repos = append(repos, m.cfg.Scanner.Repo)
+		seen[m.cfg.Scanner.Repo] = true
+	}
+	// Also check repos from active sessions
+	m.mu.RLock()
+	for key := range m.sessions {
+		if idx := strings.Index(key, "/issues/"); idx > 0 {
+			repo := key[:idx]
+			if !seen[repo] {
+				repos = append(repos, repo)
+				seen[repo] = true
+			}
+		} else if idx := strings.Index(key, "/pulls/"); idx > 0 {
+			repo := key[:idx]
+			if !seen[repo] {
+				repos = append(repos, repo)
+				seen[repo] = true
+			}
+		}
+	}
+	m.mu.RUnlock()
+	return repos
+}
+
+// scanRepoForRalph checks a single repo for ralph-labeled PRs and spawns iterations.
+func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
+	prList, err := m.forgejoClient.ListOpenPRsByLabel(ctx, repo, "ralph")
+	if err != nil {
+		slog.Debug("ralph scan: failed to list PRs", "repo", repo, "error", err)
+		return
+	}
+
+	for _, pr := range prList {
+		prKey := fmt.Sprintf("%s/pulls/%d", repo, pr.Number)
+
+		// Check if an iteration is already active
+		m.mu.RLock()
+		active := false
+		for k := range m.sessions {
+			if strings.HasPrefix(k, prKey+"-ralph-i") {
+				active = true
+				break
+			}
+		}
+		m.mu.RUnlock()
+		if active {
+			slog.Debug("ralph scan: iteration already active", "pr", pr.Number)
+			continue
+		}
+
+		// Count existing iterations from lifecycle DB
+		var iterCount int
+		if m.lc != nil {
+			iterCount, _ = m.lc.CountRalphIterations(ctx, prKey)
+		}
+
+		// Check iteration cap
+		if iterCount >= m.cfg.Ralph.MaxIterationsPerPR {
+			slog.Info("ralph scan: max iterations exceeded", "pr", pr.Number, "iterations", iterCount)
+			continue
+		}
+
+		// Check cooldown — if the last iteration is still running, skip.
+		// If completed, we rely on the cooldown timer (the scheduler tick interval
+		// itself acts as the cooldown boundary — we don't spawn faster than the
+		// ticker interval).
+		if m.lc != nil {
+			lastIter, err := m.lc.GetLastRalphIteration(ctx, prKey)
+			if err == nil && lastIter != nil && lastIter.Status == "running" {
+				slog.Debug("ralph scan: previous iteration still running", "pr", pr.Number)
+				continue
+			}
+		}
+
+		iterNum := iterCount + 1
+		sessKey := fmt.Sprintf("%s-ralph-i%d", prKey, iterNum)
+		slog.Info("ralph scan: spawning iteration", "pr", pr.Number, "iteration", iterNum, "key", sessKey)
+
+		// Record the iteration in the lifecycle DB
+		if m.lc != nil {
+			rec := &lifecycle.RalphRecord{
+				PRKey:      prKey,
+				Iteration:  iterNum,
+				SessionKey: sessKey,
+				Status:     "running",
+			}
+			if err := m.lc.RecordRalphIteration(ctx, rec); err != nil {
+				slog.Warn("ralph scan: failed to record iteration", "error", err)
+			}
+		}
+
+		// Create a synthetic IssueOpened event for the implementer session
+		// The session key includes -ralph-iN so the agent will detect it
+		evt := &event.Event{
+			Type:       event.IssueOpened,
+			Repository: repo,
+			Sender:     "ralph-scheduler",
+			IssueNumber: pr.Number,
+			PRNumber:   pr.Number,
+		}
+
+		go m.handleEvent(ctx, evt)
+	}
+}
+
 // hasQuestionLabel checks if an issue has the "question" label.
 func hasQuestionLabel(ctx context.Context, client *forgejo.Client, repo string, issueNumber int) bool {
 	if client == nil || issueNumber == 0 {

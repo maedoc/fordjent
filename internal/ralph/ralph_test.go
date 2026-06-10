@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/fordjent/fordjent/internal/config"
 )
 
 // --- Tracker tests ---
@@ -336,10 +338,22 @@ func TestProgressListEmpty(t *testing.T) {
 	}
 }
 
-// --- Scheduler tests ---
+// defaultRalphConfig returns a test config with sensible defaults.
+func defaultRalphConfig() config.RalphConfig {
+	return config.RalphConfig{
+		Enabled:                   true,
+		MaxIterationsPerPR:        20,
+		TurnBudgetPerIteration:    20,
+		CooldownBetweenIterations: 2 * time.Minute,
+		MaxCostPerPRUSD:           5.00,
+		NudgeThresholdPct:         0.25,
+		SummaryModel:              "",
+		AutoRalphOnYolo:            true,
+	}
+}
 
 func TestSchedulerShouldSpawnFirstIteration(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	s := NewScheduler(nil, cfg)
 
 	ok, reason := s.ShouldSpawn("repo/pulls/42", "", time.Time{}, 0, 0)
@@ -349,7 +363,7 @@ func TestSchedulerShouldSpawnFirstIteration(t *testing.T) {
 }
 
 func TestSchedulerShouldSpawnCooldownNotElapsed(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	cfg.CooldownBetweenIterations = 5 * time.Minute
 	s := NewScheduler(nil, cfg)
 
@@ -364,7 +378,7 @@ func TestSchedulerShouldSpawnCooldownNotElapsed(t *testing.T) {
 }
 
 func TestSchedulerShouldSpawnCooldownElapsed(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	cfg.CooldownBetweenIterations = 1 * time.Minute
 	s := NewScheduler(nil, cfg)
 
@@ -376,7 +390,7 @@ func TestSchedulerShouldSpawnCooldownElapsed(t *testing.T) {
 }
 
 func TestSchedulerShouldSpawnIterationCapExceeded(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	cfg.MaxIterationsPerPR = 3
 	s := NewScheduler(nil, cfg)
 
@@ -390,7 +404,7 @@ func TestSchedulerShouldSpawnIterationCapExceeded(t *testing.T) {
 }
 
 func TestSchedulerShouldSpawnBudgetExceeded(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	cfg.MaxCostPerPRUSD = 5.00
 	s := NewScheduler(nil, cfg)
 
@@ -401,7 +415,7 @@ func TestSchedulerShouldSpawnBudgetExceeded(t *testing.T) {
 }
 
 func TestSchedulerMarkActive(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	s := NewScheduler(nil, cfg)
 
 	if s.IsActive("repo/pulls/42") {
@@ -426,7 +440,7 @@ func TestSchedulerMarkActive(t *testing.T) {
 }
 
 func TestSchedulerStartStop(t *testing.T) {
-	cfg := DefaultRalphConfig()
+	cfg := defaultRalphConfig()
 	cfg.CooldownBetweenIterations = 10 * time.Second
 	s := NewScheduler(nil, cfg)
 

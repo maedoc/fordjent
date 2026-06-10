@@ -335,21 +335,28 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt interface{}, messa
 	// Build the stable system prompt string and append volatile parts as separate user messages.
 	// This ensures the prefix (message[0]) stays identical across turns, enabling
 	// automatic prefix caching in providers like NeuralWatt/OpenAI.
+	//
+	// IMPORTANT: volatile parts (ToolsDesc, TurnInfo) are appended to a COPY of messages,
+	// not the stored slice. If we append to the stored slice, the volatile parts from
+	// the previous turn get baked into the conversation history, causing duplication
+	// and changing the message structure between turns, which invalidates the cache.
 	var sysPromptStr string
+	var llmMessages []provider.Message
 	switch sp := systemPrompt.(type) {
 	case provider.SystemPromptParts:
 		sysPromptStr = sp.Stable
-		// Append volatile parts AFTER conversation history so they don't break
-		// the prefix cache. These change every turn (turn counter) or when tools
-		// are excluded (tool descriptions).
+		// Build a fresh copy with volatile parts appended AFTER conversation history.
+		// These change every turn (turn counter) or when tools are excluded (tool descriptions).
+		llmMessages = make([]provider.Message, len(messages))
+		copy(llmMessages, messages)
 		if sp.ToolsDesc != "" {
-			messages = append(messages, provider.Message{
+			llmMessages = append(llmMessages, provider.Message{
 				Role:    "user",
 				Content: "## Available Tools\n" + sp.ToolsDesc,
 			})
 		}
 		if sp.TurnInfo != "" {
-			messages = append(messages, provider.Message{
+			llmMessages = append(llmMessages, provider.Message{
 				Role:    "user",
 				Content: sp.TurnInfo,
 			})
@@ -360,7 +367,11 @@ func (te *TurnExecutor) Run(ctx context.Context, systemPrompt interface{}, messa
 
 	// Call LLM (retry is handled inside Client.Chat)
 	toolDefs := te.tools.ToolsExcluding(te.excludeTools)
-	response, usage, err := te.llm.Chat(ctx, sysPromptStr, messages, toolDefs)
+	requestMessages := llmMessages
+	if llmMessages == nil {
+		requestMessages = messages // string systemPrompt case: no copy needed
+	}
+	response, usage, err := te.llm.Chat(ctx, sysPromptStr, requestMessages, toolDefs)
 	latency := time.Since(start)
 
 	if err != nil {

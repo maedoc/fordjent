@@ -6,48 +6,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fordjent/fordjent/internal/config"
 	"github.com/fordjent/fordjent/internal/forgejo"
 )
 
-// RalphConfig holds configuration for the ralph loop subsystem.
-// It is embedded in the main config struct.
-type RalphConfig struct {
-	Enabled                   bool          `yaml:"enabled"`
-	MaxIterationsPerPR        int           `yaml:"max_iterations_per_pr"`
-	TurnBudgetPerIteration    int           `yaml:"turn_budget_per_iteration"`
-	CooldownBetweenIterations time.Duration `yaml:"cooldown_between_iterations"`
-	MaxCostPerPRUSD           float64       `yaml:"max_cost_per_pr_usd"`
-	NudgeThresholdPct         float64       `yaml:"nudge_threshold_pct"`
-	SummaryModel              string        `yaml:"summary_model"`
-	AutoRalphOnYolo           bool          `yaml:"auto_ralph_on_yolo"`
-}
-
-// DefaultRalphConfig returns sensible defaults.
-func DefaultRalphConfig() RalphConfig {
-	return RalphConfig{
-		Enabled:                   true,
-		MaxIterationsPerPR:        20,
-		TurnBudgetPerIteration:    20,
-		CooldownBetweenIterations: 2 * time.Minute,
-		MaxCostPerPRUSD:           5.00,
-		NudgeThresholdPct:         0.25,
-		SummaryModel:              "",
-		AutoRalphOnYolo:           true,
-	}
-}
-
 // Scheduler scans for ralph-labeled PRs and spawns iterations on a ticker.
 type Scheduler struct {
-	forgejo *forgejo.Client
-	cfg     RalphConfig
-	ticker  *time.Ticker
-	done    chan struct{}
-	mu      sync.Mutex
-	active  map[string]bool // prKey → iteration running
+	forgejo       *forgejo.Client
+	cfg           config.RalphConfig
+	ticker        *time.Ticker
+	done         chan struct{}
+	mu            sync.Mutex
+	active        map[string]bool // prKey → iteration running
+	dispatchFunc  func(repo string, prNumber, iterNum int) // called to dispatch a ralph session
 }
 
 // NewScheduler creates a ralph scheduler.
-func NewScheduler(forgejoClient *forgejo.Client, cfg RalphConfig) *Scheduler {
+func NewScheduler(forgejoClient *forgejo.Client, cfg config.RalphConfig) *Scheduler {
 	if cfg.TurnBudgetPerIteration <= 0 {
 		cfg.TurnBudgetPerIteration = 20
 	}
@@ -63,6 +38,13 @@ func NewScheduler(forgejoClient *forgejo.Client, cfg RalphConfig) *Scheduler {
 		done:    make(chan struct{}),
 		active:  make(map[string]bool),
 	}
+}
+
+// SetDispatchFunc sets the function called when a ralph iteration should be spawned.
+// This is the bridge to the session manager — the scheduler decides WHEN to spawn,
+// the manager decides HOW to create the session.
+func (s *Scheduler) SetDispatchFunc(fn func(repo string, prNumber, iterNum int)) {
+	s.dispatchFunc = fn
 }
 
 // Start begins the ticker goroutine for scanning ralph-labeled PRs.
@@ -100,14 +82,18 @@ func (s *Scheduler) run() {
 // scanAndDispatch lists open PRs with the 'ralph' label and checks
 // whether the next iteration should be spawned.
 func (s *Scheduler) scanAndDispatch() {
-	// This method is called by the ticker. In production, it lists open
-	// PRs from Forgejo and spawns iterations. The session manager wires
-	// this to its own session creation logic via callback.
-	//
-	// Since the session manager handles the actual session creation,
-	// this method primarily logs and checks caps. The real dispatch
-	// is done by Manager.scanRalphPRs() which calls this for state checks.
 	slog.Debug("ralph scheduler: scan tick")
+
+	if s.forgejo == nil {
+		return
+	}
+
+	// List open PRs — we rely on the dispatch function being set by the manager.
+	// The manager's scanRalphPRs does the actual Forgejo API call and iteration
+	// dispatch. This ticker just signals that it's time to scan.
+	if s.dispatchFunc != nil {
+		s.dispatchFunc("", 0, 0) // sentinel call; manager ignores zeros and scans all
+	}
 }
 
 // ShouldSpawn checks whether a new iteration should be spawned for the given PR.
@@ -172,6 +158,6 @@ func (s *Scheduler) IsActive(prKey string) bool {
 }
 
 // Config returns the scheduler configuration.
-func (s *Scheduler) Config() RalphConfig {
+func (s *Scheduler) Config() config.RalphConfig {
 	return s.cfg
 }

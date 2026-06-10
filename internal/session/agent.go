@@ -27,6 +27,7 @@ import (
 	"github.com/fordjent/fordjent/internal/mergequeue"
 	"github.com/fordjent/fordjent/internal/metrics"
 	"github.com/fordjent/fordjent/internal/provider"
+	"github.com/fordjent/fordjent/internal/ralph"
 	"github.com/fordjent/fordjent/internal/sandbox"
 	"github.com/fordjent/fordjent/internal/scaffold"
 	"github.com/fordjent/fordjent/internal/sentinel"
@@ -63,6 +64,9 @@ type Agent struct {
 	commentLimit     int
 	subIssueCount    int  // tracks forgejo_create_issue calls (for PM exit logic)
 	scopePrefixes    []string // write_file path restriction (e.g., ["pkg/math/"])
+	isRalph          bool    // true when this is a ralph iterative refinement session
+	ralphIterNum     int     // ralph iteration number (1-based)
+	ralphPRNum      int     // ralph PR number
 }
 
 func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost.Tracker, lc *lifecycle.Lifecycle, role string, sandboxReporter sandbox.ErrorReporter, sched tool.DependencyChecker, policyDetector *policy.CachedDetector) *Agent {
@@ -129,6 +133,29 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 	}
 	registry.Register(tool.NewTurnTool(turnGetter))
 
+	// Detect Ralph session from session key pattern (repo/pulls/N-ralph-iM)
+	isRalph := tool.IsRalphSession(sess.Key)
+	var ralphIterNum, ralphPRNum int
+	if isRalph {
+		_, ralphPRNum, ralphIterNum, _ = tool.ParseRalphSessionKey(sess.Key)
+		slog.Info("ralph session detected", "key", sess.Key, "pr", ralphPRNum, "iteration", ralphIterNum)
+
+		// Register ralph-specific tools
+		ralphTracker := ralph.NewTracker(maxTurns)
+		ralphGuard := ralph.NewGuard(sess.RepoDir)
+		registry.Register(tool.NewRalphUpdateTool(ralphTracker, ralphGuard, sess.RepoDir, ralphPRNum, ralphIterNum))
+		registry.Register(tool.NewRalphProgressTool(ralphGuard, ralphTracker, sess.RepoDir, ralphPRNum, ralphIterNum))
+
+		// Enable spec immutability guard on write_file and git tools
+		registry.SetRalphGuard(ralphGuard, true, false)
+
+		// Override turn budget for ralph iterations
+		if cfg.Ralph.TurnBudgetPerIteration > 0 {
+			maxTurns = cfg.Ralph.TurnBudgetPerIteration
+			executor = agent.NewTurnExecutor(cfg, llmClient, registry, ct, sess.Key, sess.Repository, maxTurns, role)
+		}
+	}
+
 	return &Agent{
 		cfg:             cfg,
 		sess:            sess,
@@ -145,6 +172,9 @@ func NewAgent(cfg *config.Config, sess *Session, mq *mergequeue.Client, ct *cost
 		triggeringIssue: sess.TriggeringIssue,
 		policyDetector:  policyDetector,
 		commentLimit:     cfg.Agent.MaxCommentsPerSession,
+		isRalph:          isRalph,
+		ralphIterNum:    ralphIterNum,
+		ralphPRNum:      ralphPRNum,
 	}
 }
 
@@ -493,6 +523,16 @@ Update the issue comment with your reflection, then continue working.`,
 
 		// Apply steering messages (turn budget warnings, inactivity detection)
 		messages = a.executor.ApplySteering(messages, lastToolName, lastToolOutput)
+
+		// Ralph protocol nudging: inject 4-A protocol stage guidance
+		if a.isRalph {
+			if ralphNudge, ok := a.getRalphNudge(turn); ok {
+				messages = append(messages, provider.Message{
+					Role:    "user",
+					Content: ralphNudge,
+				})
+			}
+		}
 
 		// Record turn progress in lifecycle DB for diagnostics (after tool execution)
 		if a.lc != nil {
@@ -880,6 +920,29 @@ If this issue references a spec change (check issue body for 'Spec:' references 
 
 	stateInstructions := issueStateInstructions(fsmState)
 
+	// Ralph protocol section — injected only for ralph sessions
+	var ralphSection string
+	if a.isRalph {
+		ralphSection = fmt.Sprintf(`
+
+## Ralph Iterative Refinement (Iteration %d)
+You are in Ralph iterative refinement mode. Your job is to improve an existing PR until its acceptance criteria are met.
+
+**4-A Protocol — you MUST follow this sequence:**
+1. **awareness**: Call ralph_update(stage='awareness', message='...') after reading the PR, comments, git log, and any spec files. Understand what needs to change.
+2. **act**: Call ralph_update(stage='act', message='...') after writing/modifying code to address the remaining acceptance criteria.
+3. **assert**: Call ralph_update(stage='assert', message='...') after building and testing your changes. Document what passes and what remains.
+4. **append**: Call ralph_update(stage='append', message='...') when ready to commit. This triggers auto-commit and push.
+
+**Rules:**
+- Stages MUST be called in order. You cannot skip ahead.
+- write_file is BLOCKED for spec files (openspec/**/spec.md) — spec scope is immutable during ralph.
+- git commit is BLOCKED if staged changes touch spec files.
+- Use ralph_progress to write a progress file for this iteration.
+- You have %d turns for this iteration. Budget carefully.
+- After append, the harness will verify acceptance criteria. If met, the ralph label is removed and a reviewer is queued.`, a.ralphIterNum, a.cfg.Ralph.TurnBudgetPerIteration)
+	}
+
 	// Cache optimization: turnBudgetInfo and toolsDesc are NOT included in the
 	// system prompt. They are returned separately so they can be sent as subsequent
 	// user messages. This keeps the system prompt stable across turns, enabling
@@ -895,7 +958,7 @@ If this issue references a spec change (check issue body for 'Spec:' references 
 - Event: %s (action: %s)
 - Sender: @%s
 - Target: %s
-%s%s%s
+%s%s%s%s
 
 ## Rules
 1. Always read existing code before making changes.
@@ -931,6 +994,7 @@ Respond in plain text. Use tools to interact with the repository and Forgejo API
 		modeInstructions,
 		langInstruction,
 		stateInstructions,
+		ralphSection,
 		a.cfg.Agent.CommitPrefix,
 		strings.Join(a.cfg.Security.ProtectedBranches, ", "),
 	)
@@ -1568,4 +1632,37 @@ func (a *Agent) SetVerificationSteering(enabled bool) {
 	if a.executor != nil {
 		a.executor.SetVerificationSteering(enabled)
 	}
+}
+
+// IsRalphSession returns whether this agent is running in Ralph mode.
+func (a *Agent) IsRalphSession() bool {
+	return a.isRalph
+}
+
+// getRalphNudge returns a ralph protocol nudge message based on the current turn.
+// Uses escalating thresholds to guide the agent through the 4-A protocol.
+func (a *Agent) getRalphNudge(turn int) (string, bool) {
+	if !a.isRalph || a.executor == nil {
+		return "", false
+	}
+	max := a.executor.MaxTurns()
+	if max <= 0 {
+		return "", false
+	}
+	pct := float64(turn) / float64(max)
+
+	// Urgent: final 2 turns
+	if turn >= max-2 {
+		return "[RALPH URGENT] Only " + strconv.Itoa(max-turn) + " turn(s) remaining. Call ralph_update with stage='append' and commit your work NOW.", true
+	}
+	if pct >= 0.75 {
+		return "[RALPH NUDGE] 75% budget used. If you haven't called ralph_update with stage='assert', do so immediately. Build and test your changes.", true
+	}
+	if pct >= 0.50 {
+		return "[RALPH NUDGE] 50% of budget consumed. If you haven't called ralph_update with stage='act', do so now. Write your code changes.", true
+	}
+	if pct >= 0.25 {
+		return "[RALPH NUDGE] At 25% of budget. Call ralph_update with stage='awareness' if you haven't already. Read the PR comments and understand what needs to change.", true
+	}
+	return "", false
 }

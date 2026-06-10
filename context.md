@@ -1,238 +1,149 @@
-# Merge Conflict Analysis — 3 Files, 15 Blocks
+# Subsystem Audit: PM Role, OpenSpec Protocol, Ralph Iterative Refinement
 
-## Summary
+## 1. PM Role
 
-All 15 conflicts follow the **same pattern**: upstream split `buildSystemPrompt()` return from `string` → `SystemPromptParts` (3-part struct: Stable + TurnInfo + ToolsDesc) and added `turn/maxTurns` parameters. Downstream kept `string` return and hardcoded tool descriptions inside the prompt. Additionally, upstream added cache-tracking log lines in `turn.go`.
+### (a) Wiring Status: ✅ FULLY WIRED
+- **Session creation**: Issue title containing `[pm]` or `[decompose]` triggers `detectRoleFromTitle()` → role = "pm"
+- **Session key**: `repo/issues/N` — no special suffix
+- **Tool registry**: `buildRoleRegistry()` in `internal/session/agent.go` line 1395 — PM gets specialized tools:
+  - `forgejo_create_issue` (with scheduler integration + plan-first gate, max 5 sub-issues per call)
+  - `forgejo_get_sub_issues`
+  - `forgejo_create_milestone` / `forgejo_set_milestone` / `forgejo_list_milestones`
+  - `write_file` — **RESTRICTED**: Only allowed under `openspec/changes/` and `openspec/specs/` prefixes
+  - `open_spec_get_tasks` / `open_spec_propose` / `open_spec_archive_change`
+  - Common tools: comment, list_issues, get_issue, search_code, reaction, list_branches, list_prs, pr_files, list_files, list_hooks, list_collabs, version, user, sibling_issues
+  - **NOT available**: bash (no shell), git (no git), write_file (full repo), forgejo_create_pr, forgejo_merge_pr
 
-**Verdict**: Keep upstream's refactored approach everywhere. The downstream side is the older string-return pattern that was superseded by the structured multi-part system prompt.
+### (b) Config Flags: NONE — enabled by default
+No config flag controls PM. The PM role is activated purely by issue title convention (`[pm]` or `[decompose]` prefix).
 
----
+### (c) Forgejo Prerequisites
+- **Labels**: FSM labels expected (`planning`, `plan-approved`, `implementing`, `ready`, `blocked`, `done`) — created by `EnsureLabels()` on webhook first event
+- **Topic**: `fordjent-yolo` enables zero-friction mode (bypasses plan approval, auto-assumes implementer on untagged sub-issues)
+- **Users**: `djent-pm` role user — created by `bootstrap-local.sh` but must exist on cloud Forgejo
+- **Milestones**: No special prerequisite — created via API
 
-## Conflict 1: `internal/agent/turn.go` (line ~408)
-
-### The Block
-
-```go
-<<<<<<< Updated upstream
-		"cached_tokens", usage.CachedTokens + usage.CacheReadTokens,
-		"cache_savings_usd", usage.CacheSavingsUSD,
-=======
-		"cached_tokens", usage.CachedTokens,
->>>>>>> Stashed changes
-```
-
-### What's Happening
-**Upstream** logs combined cache metrics (`CachedTokens + CacheReadTokens`) plus `cache_savings_usd`. **Downstream** (stashed) only logs `CachedTokens`.
-
-### Recommendation: **KEEP UPSTREAM**
-The downstream change is a regression — it removes cache observability metrics that were added upstream. The upstream version gives complete cache visibility (raw cache hits + read-through cache + USD savings).
-
----
-
-## Conflict 2: `internal/session/agent.go` (line ~180)
-
-### The Block
-
-```go
-<<<<<<< Updated upstream
-	systemPromptParts := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState, a.executor.CurrentTurn(), a.executor.MaxTurns())
-=======
-	systemPrompt := a.buildSystemPrompt(ctx, evt, analysisMode, a.role, fsmState)
->>>>>>> Stashed changes
-contextMessages, err := a.buildContext(ctx, evt)
-```
-
-### What's Happening
-**Upstream** calls `buildSystemPrompt` with all 7 params (including `CurrentTurn()` and `MaxTurns()`) and stores result in `systemPromptParts`. **Downstream** (stashed) calls it with 5 params and stores result in `systemPrompt`. This is a direct consequence of the `buildSystemPrompt` signature change.
-
-### Recommendation: **KEEP UPSTREAM**
-The downstream 5-param call signature doesn't exist anymore. Upstream passes turn budget info and max turns so the agent can display its budget. Keep the 7-param call.
+### (d) Known Gotchas from AGENTS.md
+| Issue | Description |
+|-------|-------------|
+| PM sometimes omits `[implementer]` tag | Sub-issues without role tags get `needs-role` label and are blocked |
+| Qwen model analysis-loop (625+ turns, 0 write_file) | PM uses the same model as implementer — if implementer stucks, all roles do |
+| Sub-issue ordering | Issues marked `blocked` stay blocked until scheduler unblocks them via `Depends on:` parsing |
+| Milestone progress not real-time | Milestone progress bar requires sub-issues to be closed, not just PR merged |
+| PM can write files but only under openspec/ paths | If PM tries to write code files in `src/` or `pkg/`, write_file will reject |
+| PM reactivation loop | When PM parent's milestones close, PMReactivate events fire — `isBusy()` check prevents double-session, but needs admin client for label ops |
 
 ---
 
-## Conflict 3: `internal/session/agent.go` (line ~550)
+## 2. OpenSpec Protocol (Spec-Driven Lifecycle)
 
-### The Block
+### (a) Wiring Status: ⚠️ PARTIALLY WIRED
 
-```go
-<<<<<<< Updated upstream
-// systemPromptParts is an alias for provider.SystemPromptParts
-type systemPromptParts = provider.SystemPromptParts
+**What IS wired:**
+- **Spec PR detection**: `internal/speccycle/prmanager.go` — `SpecPRManager.IsSpecPR()` checks if a PR's files contain `openspec/changes/<name>/` paths via `GetPRFiles()` API call. Extracts change name from path.
+- **handleSpecPRMerged**: In `manager.go` line 2218 — when a PR is merged, calls `specPRManager.IsSpecPR()`. If it's a spec PR, finds the parent issue and dispatches `ArchiveChangeRequested` to PM (line 2222).
+- **Archive path**: Line 1112 — `IsArchival: evt.Type == event.ArchiveChangeRequested` → archival session with `open_spec_archive_change` tool
+- **Scheduler lifecycle hooks**: `OnPRMerged()` unblocks dependent issues, closes milestones, dispatches `ArchiveChangeRequested` when all task issues are closed
+- **Tasks.md tracking**: `MarkTaskInTasksMd()` updates `openspec/specs/<name>/tasks.md` with checkmarks
 
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState, turn, maxTurns int) systemPromptParts {
-=======
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState) string {
->>>>>>> Stashed changes
-	toolsDesc := a.tools.Descriptions()
-```
+**What is NOT wired:**
+- **No spec-authoring PM session creation**: When a feature issue like `[pm] Plan and implement X` is opened, there's **no automatic creation of spec authoring PM sessions**. The PM must manually create the spec issue within its decomposition. There's no `spec-authoring` event type or auto-spawner.
+- **PM prompt mentions spec but doesn't enforce it**: The PM system prompt has "OpenSpec Workflow" section but doesn't mandate spec creation before implementation. It's a suggestion, not an enforcement.
+- **No `open_spec_create_change` tool**: PM has `open_spec_get_tasks`, `open_spec_propose`, `open_spec_archive_change` — but no `open_spec_create_change` to create new spec changes. The `openspec/changes/` directory structure must be created manually.
+- **`open_spec_mark_task` is ONLY for implementers**: Reviewers get `read_spec` + `read_change` + `get_tasks`, but NOT `mark_task`. Only implementers can check off completed tasks.
 
-### What's Happening
-**Upstream**: `buildSystemPrompt` returns `systemPromptParts` (an alias for `provider.SystemPromptParts`), accepting `turn` and `maxTurns` as extra parameters. The return type alias is needed in this file.
-**Downstream**: Returns `string`, no turn/maxTurns params. The function body then starts directly with `toolsDesc := a.tools.Descriptions()`.
+### (b) Config Flags: NONE — enabled by default
+No config flag controls OpenSpec protocol. It runs whenever `openspec/` directory structure exists and spec-pr detection runs on merge.
 
-### Recommendation: **KEEP UPSTREAM**
-This is the core signature change. The downstream string-return is the old pattern. The upstream multi-part return is the cache-optimized new pattern where:
-- `Stable`: The main prompt text (cache-across-turns)
-- `TurnInfo`: Turn budget (changes each turn, sent as separate user message)
-- `ToolsDesc`: Tool descriptions (changes when tools are excluded)
+### (c) Forgejo Prerequisites
+- **Label**: `spec` label expected (created by `EnsureLabels()`)
+- **No special topic or user needed**: Spec PRs are created by implementers under the `djent-dev` identity
+- **Directory structure**: `openspec/changes/` and `openspec/specs/` dirs must exist in the repo (created by PM or initial scaffold)
 
-Keep the `systemPromptParts` alias and 7-param signature.
-
----
-
-## Conflict 4: `internal/session/agent.go` (line ~891)
-
-### The Block
-
-```go
-<<<<<<< Updated upstream
-	// Cache optimization: turnBudgetInfo and toolsDesc are NOT included in the
-	// system prompt. They are returned separately so they can be sent as subsequent
-	// user messages. This keeps the system prompt stable across turns, enabling
-	// KV cache hits in providers like NeuralWatt that use automatic prefix caching.
-	// Previously, turn# and tool descriptions were embedded in the system prompt,
-	// changing message[0] on every API call and invalidating the entire cache.
-	turnBudgetInfo := fmt.Sprintf("## Turn Budget\nYou have %d turns total and are currently on turn %d. You have access to a turn() tool that tells you how many turns you've used and how many remain. Check it periodically, especially if you've been working for a while.}", maxTurns, turn)
-
-	stable := fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
-=======
-	return fmt.Sprintf(`You are Fordjent, an autonomous coding agent that helps with software development tasks on a Forgejo instance.
->>>>>>> Stashed changes
-## Current Context
-```
-
-### What's Happening
-**Upstream** splits `buildSystemPrompt()` into:
-1. A `turnBudgetInfo` string (extracted out of system prompt → sent as separate user message)
-2. A `stable` var holding the base system prompt template (without `return`)
-3. Later returns `systemPromptParts{Stable: stable, TurnInfo: turnBudgetInfo, ...}`
-
-**Downstream**: Direct `return fmt.Sprintf(...)` — all-in-one string. It also includes `toolsDesc` inside the prompt template string (see conflicts 5/6 below).
-
-### Recommendation: **KEEP UPSTREAM**
-The upstream approach achieves KV-cache optimization: the `stable` portion stays identical across turns, so KV cache providers can hit the prefix cache. The downstream approach rebuilds the entire prompt string each turn, invalidating the cache. This is a significant performance optimization worth keeping.
+### (d) Known Gotchas from AGENTS.md
+| Issue | Description |
+|-------|-------------|
+| No auto spec authoring PM | Feature issues with `[pm]` prefix don't auto-generate spec authoring sub-issues |
+| Spec creation is manual | PM must create `openspec/changes/<name>/` directory structure and spec.md manually |
+| Open tasks.md not auto-trimmed | When tasks are completed, old completed entries remain in tasks.md (manual cleanup) |
+| Multi-change spec PRs not supported | `isSpecPR()` returns only ONE change name even if PR contains multiple changes |
+| ArchiveChangeRequested only on "all tasks closed" | PR merge unblocks dependents but doesn't trigger archive until ALL task issues are closed |
 
 ---
 
-## Conflict 5: `internal/session/agent.go` (~between lines 911 area — "Your Capabilities" section)
+## 3. Ralph Iterative Refinement
 
-### The Block
+### (a) Wiring Status: ❌ NOT WIRED — DORMANT CODE
 
-```html
-<<<<<<< Updated upstream
-=======
+**What EXISTS but is NOT wired:**
+| Component | File | Status |
+|-----------|------|--------|
+| Ralph config struct | `internal/config/config.go:150-160` | Defined but never read |
+| Ralph scheduler | `internal/ralph/scheduler.go` | `NewScheduler()` + `Start()`/`Stop()`/`ShouldSpawn()/`MarkActive()`/`IsActive()` exist |
+| Ralph tracker | `internal/ralph/tracker.go` | `RalphConfig` + `DefaultRalphConfig()` + scheduler methods |
+| Ralph guard | `internal/ralph/guard.go` | `RalphConfig` + `DefaultRalphConfig()` + scheduler methods (duplicate?) |
+| Ralph tools | `internal/tool/ralph_tools.go` | `ralph_update`, `ralph_progress`, `ralph_status` tools defined |
+| Ralph lifecycle table | `internal/lifecycle/lifecycle.go:384-583` | `ralph_sessions` table + `RecordRalphIteration()`, `GetLastRalphIteration()`, `GetRalphCost()`, `ListStalledRalphSessions()`, `CountRalphIterations()`, `GetLastNRalphIterations()` |
+| Lifecycle ralph handler | `internal/session/manager.go:2052-2071` | `OnRalphAppendComplete()` — removes ralph label, adds ralph-completed |
+| BuildRalphGuard | `internal/tool/registry.go:120-135` | `SetRalphGuard()` — enables spec immutability on write_file + git commit tools |
 
-## Your Capabilities
-You have access to the following tools:
-%s
->>>>>>> Stashed changes
+**What is MISSING (gaps preventing wiring):**
+| Gap | Impact |
+|-----|--------|
+| **No ralph.Scheduler.Start() call** | `main.go` line 46 — `mgr.Run(ctx)` starts session manager, but nothing creates or starts `ralph.NewScheduler()`. The scheduler goroutine never runs. |
+| **Ralph tools never registered** | `buildRoleRegistry()` in `agent.go` — NO case for Ralph tools (`ralph_update`, `ralph_progress`, `ralph_status`) on ANY role. |
+| **No RalphGuard set** | `SetRalphGuard()` in registry is never called — spec files can be modified in ralph sessions |
+| **No ralph session key detection** | `buildContext()` / session creation has no check for `ralph` label or `-ralph-iN` session key suffix |
+| **`ralph.Sched.ShouldSpawn()` never called** | No auto-scan for PRs that need ralph refinement (stalled implementer → auto-activate ralph) |
+| **Auto-ralph on yolo not wired** | `cfg.Ralph.AutoRalphOnYolo` config flag exists but the implementer exit path doesn't check it |
+| **`ralph.Sched.IsActive()` never consulted** | Duplicate ralph session prevention not implemented |
+
+### (b) Config Flags: ⚠️ EXIST IN YAML but NOT USED
+```yaml
+# In fordjent.local.yaml via DefaultRalphConfig():
+ralph:
+  enabled: true                      # ← NOT checked anywhere
+  max_iterations_per_pr: 15          # ← NOT read
+  turn_budget_per_iteration: 20      # ← NOT read
+  cooldown_between_iterations: 5m    # ← NOT read
+  max_cost_per_pr_usd: 10.00         # ← NOT read (lifecycle tracks cost but never enforces)
+  summary_model: ""                  # ← NOT read
+  nudge_threshold_pct: 0.30          # ← NOT read
+  auto_ralph_on_yolo: true           # ← NOT checked
 ```
+The config struct is defined and default values exist, but `config.Ralph` is ONLY used in `fordjent.local.yaml` serialization — never read by any component.
 
-### What's Happening
-**Upstream** does NOT include `## Your Capabilities` / tool descriptions inside the `stable` system prompt. Tools are sent separately (via `ToolsDesc` field of `SystemPromptParts`).
-**Downstream** includes `## Your Capabilities` + `%s` (tool descriptions) directly inside the prompt template.
+### (c) Forgejo Prerequisites
+- **Label**: `ralph` label (to activate iterative mode)
+- **Label**: `ralph-completed` label (to signal AC met)
+- **Topic**: `fordjent-yolo` (for auto-escalation)
+- **No special user needed**: Ralph iterations run under the implementer role user (`djent-dev`)
 
-### Recommendation: **KEEP UPSTREAM**
-Same reason as conflict 4: tool descriptions change when tools are excluded (scoping), so including them in the system prompt breaks KV cache hits. The upstream approach sends tool descriptions as a separate `ToolsDesc` message.
+### (d) Known Gotchas
+
+#### From AGENTS.md (architectural)
+| Gap | Severity | Description |
+|-----|----------|-------------|
+| **Ralph completely dormant** | CRITICAL | No wiring to main.go, no tool registration, no scheduler start — d57b851 is the last commit for this feature and no subsequent commit wired it in |
+| **Duplicate ralph package** | MEDIUM | `internal/ralph/scheduler.go` and `internal/ralph/tracker.go` both define `RalphConfig` + `DefaultRalphConfig()` + `NewScheduler()` + 7 methods — `guard.go` also has `RalphConfig` + `DefaultRalphConfig()` + `Scheduler` + `NewScheduler()` + `Start()`/`Stop()` + `ShouldSpawn()` + `MarkActive()`/`MarkInactive()` + `IsActive()`. This looks like a merge conflict or refactoring leftover. |
+| **Lifecycle tracking only** | LOW | `ralph_sessions` table in `lifecycle.db` exists and has methods, but no code writes to it except `OnRalphAppendComplete()` which is never triggered |
+| **Spec immutability guard unused** | LOW | `SetRalphGuard()` in registry, `guard.go` has `IsSpecPath()` + `ValidateCommitDiff()` — but `SetRalphGuard()` is never called on any registry |
+
+#### From Bug Fixes 1-33
+No prior bug fixes touched Ralph. The last Ralph-related mention in AGENTS.md was under "Gap Fixes 4-5" and "Deep Analysis" sections, describing the design. No testing or debugging was done on live Ralph sessions because it was never wired.
 
 ---
 
-## Conflict 6: `internal/session/agent.go` (~after line 930 — `toolsDesc` argument)
+## Summary: Stress Test Readiness
 
-### The Block
+| Subsystem | Wiring Status | Can Test Now? | Blocker |
+|-----------|--------------|---------------|---------|
+| **PM Role** | ✅ Fully wired | Yes | PM prompt quality / model choice |
+| **OpenSpec Protocol** | ⚠️ Partially wired | Yes (spec PR detection + archival) | No auto spec-authoring PM; must create spec issues manually |
+| **Ralph Iterative** | ❌ Not wired | No | Scheduler not started, tools not registered, no session detection |
 
-```go
-<<<<<<< Updated upstream
-=======
-		toolsDesc,
->>>>>>> Stashed changes
-		a.cfg.Agent.CommitPrefix,
-		strings.Join(a.cfg.Security.ProtectedBranches, ", "),
-	)
+## Start Here: Files to Open for Stress Testing
 
-	return systemPromptParts{
-		Stable:    stable,
-		TurnInfo:  turnBudgetInfo,
-		ToolsDesc: toolsDesc,
-	}
-```
-
-### What's Happening
-**Upstream**: Returns `systemPromptParts{Stable, TurnInfo, ToolsDesc}` — three separate fields. Downstream's `toolsDesc` argument (the `%s` placeholder in the template below) would be passed into the `fmt.Sprintf(...)` call.
-**Downstream**: `toolsDesc` is one of the `fmt.Sprintf` arguments for the `stable` template. Since the downstream pattern is `return fmt.Sprintf(template, args...)`, the `toolsDesc` is embedded in the template.
-
-### Recommendation: **KEEP UPSTREAM**
-Again, tool descriptions must NOT be in the stable template. The upstream approach is correct: `ToolsDesc` goes into a separate field and is sent as a subsequent user message (handled by the agent runner), not baked into the system prompt.
-
----
-
-## Conflicts 7–15: `internal/session/agent_test.go` (9 identical pattern)
-
-All 9 test conflicts are the same structure:
-
-### Pattern
-
-```go
-<<<<<<< Updated upstream
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "ROLE", lifecycle.StateX, 0, 5)
-	if !strings.Contains(fullPrompt(prompt), "TEXT") {
-=======
-	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "ROLE", lifecycle.StateX)
-	if !strings.Contains(prompt, "TEXT") {
->>>>>>> Stashed changes
-```
-
-### Mapping
-
-| # | Line | Test Function | Role / State |
-|---|------|---------------|-------------|
-| 7 | ~328 | `TestBuildSystemPrompt_PlanningState` | implementer / StatePlanning |
-| 8 | ~355 | `TestBuildSystemPrompt_AutoMergeReviewer` | reviewer / StateMerging |
-| 9 | ~401 | `TestBuildSystemPrompt_DevOpsRole` | devops / StateOpened |
-| 10 | ~476 | ??? (unscoped) | — |
-| 11 | ~506 | `TestBuildSystemPrompt_TesterRole` | tester / StateOpened |
-| 12 | ~536 | `TestBuildSystemPrompt_PMRole` | pm / StateOpened |
-| 13 | ~851 | `TestBuildSystemPrompt_PolicyNoAutoMerge` | reviewer / StateOpened |
-| 14 | ~883 | `TestBuildSystemPrompt_PolicyRequireReview` | reviewer / StateOpened |
-| 15 | ~940 | `TestBuildSystemPrompt_PolicyYolo` | pm / StateOpened |
-
-*(Tests 10 and 12 appear to be the same test or similar — line counts suggest some overlap in my reading. The exact test at line 476 wasn't independently read but follows the identical pattern.)*
-
-### Recommendation: **KEEP UPSTREAM for ALL 9**
-
-Each test needs two changes:
-1. Add `0, 5` as the last two arguments to `buildSystemPrompt()` → `buildSystemPrompt(context.Background(), evt, false, "role", lifecycle.StateX, 0, 5)`
-2. Wrap the return with `fullPrompt(prompt)` → `fullPrompt(prompt)`
-
-The `fullPrompt()` helper (defined at `agent_test.go:22`) extracts the full combined string from `SystemPromptParts` for assertion purposes. Without it, `prompt` is now a struct, not a string.
-
----
-
-## Complete Resolution Strategy
-
-### Step 1: Keep upstream in `turn.go`
-- Lines ~408: Remove downstream lines, keep `"cached_tokens", usage.CachedTokens + usage.CacheReadTokens,` + `"cache_savings_usd", usage.CacheSavingsUSD,`
-
-### Step 2: Keep upstream in `agent.go`
-- Line ~180: Use 7-param `buildSystemPrompt` call
-- Line ~550: Keep 7-param signature + `systemPromptParts` return type
-- Line ~891: Keep upstream's `turnBudgetInfo` + `stable` split
-- "Your Capabilities" section: Remove downstream lines (don't embed tools in stable prompt)
-- Closing `fmt.Sprintf` / return: Remove downstream `toolsDesc` from args and return `systemPromptParts{}`
-
-### Step 3: Keep upstream in `agent_test.go`
-- Replace all downstream patterns with upstream pattern: add `0, 5` args + `fullPrompt()` wrapper
-- 9 test functions all need the same treatment
-
-### Verification
-
-After resolving, the signature should be:
-```go
-func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysisMode bool, role string, fsmState lifecycle.IssueState, turn, maxTurns int) systemPromptParts
-```
-
-And callers should pass `a.executor.CurrentTurn()` and `a.executor.MaxTurns()`.
-
-### What Downstream Lost (and should not lose)
-
-The only downstream-specific content in these conflict blocks is the embedded `## Your Capabilities` section with tool descriptions. This should **not** be kept in the system prompt (as upstream correctly identified), but the downstream branch should be checked to see if the tool descriptions are handled via a separate mechanism elsewhere. If the downstream branch sends tool descriptions via a separate mechanism (e.g., a subsequent user message), that mechanism must be preserved alongside the upstream's `ToolsDesc` field.
+1. **PM Role**: `internal/session/manager.go` — read `handleEvent()` for topic filtering + issue title detection; `buildRoleRegistry()` for PM tool list
+2. **OpenSpec**: `internal/speccycle/prmanager.go` — `IsSpecPR()` detection; `handleSpecPRMerged()` in manager.go:2218 — archival dispatch
+3. **Ralph**: `internal/ralph/scheduler.go` — start wiring; `internal/session/agent.go` registerTools; `internal/session/manager.go` handleEvent → Ralph activation; `cmd/fordjent/main.go` line 46 — add scheduler start
