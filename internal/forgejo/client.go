@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -838,10 +839,15 @@ func (c *Client) ListPRs(ctx context.Context, repo, state string) ([]PullRequest
 // ListOpenPRsByLabel lists open pull requests that have the specified label.
 // Used by the ralph scheduler to find PRs with the 'ralph' label.
 func (c *Client) ListOpenPRsByLabel(ctx context.Context, repo, label string) ([]PullRequest, error) {
+	// Forgejo expects label ID (integer), not name. Resolve the label name to ID.
+	labelID, err := c.GetLabelID(ctx, repo, label)
+	if err != nil {
+		return nil, fmt.Errorf("resolve label %q: %w", label, err)
+	}
 	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls")
 	query := url.Values{}
 	query.Set("state", "open")
-	query.Set("labels", label)
+	query.Set("labels", strconv.Itoa(labelID))
 	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err
@@ -1011,6 +1017,21 @@ func (c *Client) ListLabels(ctx context.Context, repo string) ([]Label, error) {
 		return nil, fmt.Errorf("decode labels: %w", err)
 	}
 	return labels, nil
+}
+
+// GetLabelID resolves a label name to its numeric ID.
+// Returns error if the label does not exist.
+func (c *Client) GetLabelID(ctx context.Context, repo, labelName string) (int, error) {
+	labels, err := c.ListLabels(ctx, repo)
+	if err != nil {
+		return 0, fmt.Errorf("list labels: %w", err)
+	}
+	for _, l := range labels {
+		if l.Name == labelName {
+			return int(l.ID), nil
+		}
+	}
+	return 0, fmt.Errorf("label %q not found in repo %s", labelName, repo)
 }
 
 // === FILES ===

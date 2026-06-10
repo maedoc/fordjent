@@ -2082,6 +2082,7 @@ func (m *Manager) ScanRalphPRs(ctx context.Context) {
 	}
 
 	repos := m.reposWithRalphLabels()
+	slog.Info("ralph scan: scanning repos", "repos", repos)
 	for _, repo := range repos {
 		m.scanRepoForRalph(ctx, repo)
 	}
@@ -2120,12 +2121,14 @@ func (m *Manager) reposWithRalphLabels() []string {
 func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 	prList, err := m.forgejoClient.ListOpenPRsByLabel(ctx, repo, "ralph")
 	if err != nil {
-		slog.Debug("ralph scan: failed to list PRs", "repo", repo, "error", err)
+		slog.Warn("ralph scan: failed to list PRs", "repo", repo, "error", err)
 		return
 	}
+	slog.Info("ralph scan: found ralph-labeled PRs", "repo", repo, "count", len(prList))
 
 	for _, pr := range prList {
 		prKey := fmt.Sprintf("%s/pulls/%d", repo, pr.Number)
+		slog.Info("ralph scan: checking PR", "pr", pr.Number, "prKey", prKey)
 
 		// Check if an iteration is already active
 		m.mu.RLock()
@@ -2138,7 +2141,7 @@ func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 		}
 		m.mu.RUnlock()
 		if active {
-			slog.Debug("ralph scan: iteration already active", "pr", pr.Number)
+			slog.Info("ralph scan: iteration already active", "pr", pr.Number)
 			continue
 		}
 
@@ -2147,6 +2150,7 @@ func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 		if m.lc != nil {
 			iterCount, _ = m.lc.CountRalphIterations(ctx, prKey)
 		}
+		slog.Info("ralph scan: iteration count", "pr", pr.Number, "iterCount", iterCount, "max", m.cfg.Ralph.MaxIterationsPerPR)
 
 		// Check iteration cap
 		if iterCount >= m.cfg.Ralph.MaxIterationsPerPR {
@@ -2161,7 +2165,7 @@ func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 		if m.lc != nil {
 			lastIter, err := m.lc.GetLastRalphIteration(ctx, prKey)
 			if err == nil && lastIter != nil && lastIter.Status == "running" {
-				slog.Debug("ralph scan: previous iteration still running", "pr", pr.Number)
+				slog.Info("ralph scan: previous iteration still running", "pr", pr.Number)
 				continue
 			}
 		}
@@ -2185,15 +2189,16 @@ func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 
 		// Create a synthetic IssueOpened event for the implementer session
 		// The session key includes -ralph-iN so the agent will detect it
-		evt := &event.Event{
-			Type:       event.IssueOpened,
-			Repository: repo,
-			Sender:     "ralph-scheduler",
-			IssueNumber: pr.Number,
-			PRNumber:   pr.Number,
+		ralphEvt := &event.Event{
+			Type:        event.IssueOpened,
+			Repository:  repo,
+			Sender:      "ralph-scheduler",
+			IssueNumber:  pr.Number,
+			PRNumber:    pr.Number,
+			SessionKey:  sessKey,
 		}
 
-		go m.handleEvent(ctx, evt)
+		go m.handleEvent(ctx, ralphEvt)
 	}
 }
 
