@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -46,7 +47,10 @@ type Session struct {
 	IsPMFollowUp     bool   // true if this is a PM re-activation follow-up session
 	IsScaffoldAnswer bool   // true if this session should answer scaffold questions
 	IsPRReviewFix    bool   // true if human commented on PR requesting fixes
+	IsArchival       bool   // true if this is a PM archival session triggered by ArchiveChangeRequested
+	ChangeName       string // for archival sessions: the change name to archive
 	TriggeringIssue  int    // the sub-issue that triggered the PM re-activation
+	IsCrashRecovery  bool   // true if this session was restored after a crash (no shutdown.json)
 
 	claimedReady bool // set when this session claimed a ready→in_progress transition
 
@@ -205,6 +209,10 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 	m.mqClient = mergequeue.NewClient(forgejoAdapter)
 	m.scheduler = scheduler.New(forgejoAdapter)
 	m.scheduler.SetForgejoClient(adminClient)
+	m.scheduler.SetBus(bus) // enable ArchiveChangeRequested dispatch
+	if cfg.Agent.MaxCascadeRounds > 0 {
+		m.scheduler.SetMaxCascadeRounds(cfg.Agent.MaxCascadeRounds)
+	}
 
 	// Wire spec PR manager for detecting spec PR merges
 	m.specPRManager = speccycle.NewSpecPRManager(adminClient)
@@ -242,6 +250,29 @@ func (m *Manager) restoreSessions() error {
 			m.store.Delete(rec.SessionKey)
 			continue
 		}
+
+		// Check for shutdown checkpoint
+		tp := readShutdownCheckpoint(rec.WorkDir)
+		if tp != nil {
+			switch tp.State {
+			case "completed":
+				slog.Info("skipping completed session (shutdown.json)", "session_key", rec.SessionKey)
+				m.store.Delete(rec.SessionKey)
+				deleteShutdownCheckpoint(rec.WorkDir)
+				continue
+			case "cancelled":
+				slog.Info("skipping cancelled session (shutdown.json)", "session_key", rec.SessionKey)
+				m.store.Delete(rec.SessionKey)
+				deleteShutdownCheckpoint(rec.WorkDir)
+				continue
+			case "failed":
+				// Failed sessions may be retried by the auto-retry system. Continue to restore.
+				deleteShutdownCheckpoint(rec.WorkDir)
+			}
+		}
+		// If no shutdown.json and the lifecycle shows 'working', this is a crash recovery.
+		// Verification steering will be enabled on the agent after creation.
+
 		// Skip completed/failed sessions — no need to restore idle goroutines
 		state, _ := m.lc.GetState(context.Background(), rec.SessionKey)
 		if state == lifecycle.StateCompleted || strings.HasPrefix(state, "failed") {
@@ -254,16 +285,20 @@ func (m *Manager) restoreSessions() error {
 		} else {
 			sessCtx, cancel = context.WithCancel(context.Background())
 		}
+		// If no shutdown checkpoint was found and lifecycle state is 'working',
+		// this is a crash recovery — the previous session was interrupted.
+		isCrashRecovery := tp == nil && state == lifecycle.StateWorking
 		sess := &Session{
-			Key:         rec.SessionKey,
-			Repository:  rec.Repository,
-			IssueNumber: rec.IssueNumber,
-			PRNumber:    rec.PRNumber,
-			WorkDir:     rec.WorkDir,
-			RepoDir:     rec.RepoDir,
-			LastActive:  rec.LastActive,
-			Cancel:      cancel,
-			events:      make(chan *event.Event, 64),
+			Key:             rec.SessionKey,
+			Repository:      rec.Repository,
+			IssueNumber:     rec.IssueNumber,
+			PRNumber:        rec.PRNumber,
+			WorkDir:         rec.WorkDir,
+			RepoDir:         rec.RepoDir,
+			LastActive:      rec.LastActive,
+			Cancel:          cancel,
+			IsCrashRecovery: isCrashRecovery,
+			events:          make(chan *event.Event, 64),
 		}
 		m.sessions[rec.SessionKey] = sess
 		go m.runSession(sessCtx, sess)
@@ -423,6 +458,24 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 				reactivateEvt.TriggeringIssue = pmr.TriggeringIssue
 				reactivateEvt.SessionKey = fmt.Sprintf("%s/issues/%d", evt.Repository, pmr.ParentIssueNumber)
 				m.bus.Publish(schedCtx, reactivateEvt)
+			}
+
+			// Lifecycle orchestration: check if all task issues for the
+			// change are closed. If so, dispatch ArchiveChangeRequested
+			// so the PM archives the change.
+			for _, pmr := range pmResults {
+				allClosed, changeName, checkErr := m.scheduler.CheckAllTasksClosed(schedCtx, evt.Repository, pmr.ParentIssueNumber)
+				if checkErr != nil {
+					slog.Warn("scheduler: failed to check all tasks closed",
+						"error", checkErr, "parent_issue", pmr.ParentIssueNumber, "repo", evt.Repository)
+					continue
+				}
+				if allClosed {
+					slog.Info("scheduler: all task issues closed for change, dispatching ArchiveChangeRequested",
+						"change", changeName, "parent_issue", pmr.ParentIssueNumber, "repo", evt.Repository)
+					m.scheduler.MarkTaskInTasksMd(schedCtx, evt.Repository, evt.PRNumber)
+					m.scheduler.DispatchArchiveChangeRequested(schedCtx, evt.Repository, changeName, pmr.ParentIssueNumber)
+				}
 			}
 
 			// Auto-requeue any blocked branches whose merge-gate may now be clear.
@@ -766,6 +819,31 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// ArchiveChangeRequested: when the scheduler detects that all task issues
+	// for a change are closed, it dispatches this internal event. Create a PM
+	// archival session to move the change directory to archive/.
+	if evt.Type == event.ArchiveChangeRequested {
+		changeName := evt.Change
+		if changeName == "" {
+			changeName = "unknown"
+		}
+		sessionKey := fmt.Sprintf("%s/archive/%s-%d", evt.Repository, changeName, time.Now().UnixNano())
+		slog.Info("ArchiveChangeRequested: creating PM archival session",
+			"change", changeName,
+			"repo", evt.Repository,
+			"session_key", sessionKey,
+		)
+		archiveEvt := event.NewEvent(event.ArchiveChangeRequested, evt.Repository, evt.IssueNumber, 0, "fordjent-scheduler", "archive")
+		archiveEvt.SessionKey = sessionKey
+		archiveEvt.Change = changeName
+		archiveEvt.Payload = map[string]interface{}{
+			"archive_change": true,
+			"change_name":    changeName,
+		}
+		m.handleEvent(ctx, archiveEvt)
+		return
+	}
+
 	// PM Reactivation: when the scheduler detects that all sub-issues of a PM
 	// parent are complete, it emits a PMReactivate event. Create a fresh
 	// follow-up session for the parent PM issue.
@@ -1029,6 +1107,8 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		IsPMFollowUp:    evt.Type == event.PMReactivate,
 		IsScaffoldAnswer: hasQuestionLabel(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber),
 		IsPRReviewFix:   evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" && !strings.Contains(evt.Sender, "fordjent") && !strings.Contains(evt.Sender, "djent"),
+		IsArchival:      evt.Type == event.ArchiveChangeRequested,
+		ChangeName:       evt.Change,
 		TriggeringIssue: evt.TriggeringIssue,
 		events:          make(chan *event.Event, 64),
 	}
@@ -1070,6 +1150,11 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 
 	// PM follow-up sessions always use the PM role
 	if sess.IsPMFollowUp {
+		role = "pm"
+	}
+
+	// PM archival sessions always use the PM role
+	if sess.IsArchival {
 		role = "pm"
 	}
 
@@ -1127,6 +1212,12 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 
 	agt := NewAgent(m.cfg, sess, m.mqClient, m.costTracker, m.lc, role, m.sandboxReporter, m.scheduler, m.policyDetector)
 
+	// Enable verification steering for crash-recovered sessions
+	if sess.IsCrashRecovery {
+		agt.SetVerificationSteering(true)
+		slog.Info("enabled verification steering for crash-recovered session", "session_key", sess.Key)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1135,6 +1226,10 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				lcCtx, lcCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				m.lc.OnSessionFailedError(lcCtx, sess.Repository, sess.IssueNumber, sess.Key, fmt.Errorf("session timed out after %v", m.cfg.Agent.SessionTimeout), m.cfg.Agent.SessionTimeout, m.roleToken(role))
 				lcCancel()
+				writeShutdownCheckpoint(sess.WorkDir, "failed", agt.LastToolName())
+			} else {
+				// Context cancelled — likely shutdownAll
+				writeShutdownCheckpoint(sess.WorkDir, "cancelled", agt.LastToolName())
 			}
 			// Revert claim on timeout
 			if sess.claimedReady && sess.IssueNumber > 0 {
@@ -1188,6 +1283,7 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						}
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
+					writeShutdownCheckpoint(sess.WorkDir, "failed", agt.LastToolName())
 				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime), m.roleToken(role))
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
@@ -1214,6 +1310,8 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 				}
 				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime), m.roleToken(role), m.cfg.FordjentBaseURL())
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
+				writeShutdownCheckpoint(sess.WorkDir, "completed", agt.LastToolName())
+				_ = m.store.SetCompletedAt(sess.Key, time.Now().UTC())
 			}
 
 			sess.mu.Lock()
@@ -1248,6 +1346,110 @@ func (m *Manager) logSessionTime(ctx context.Context, repo string, issueNumber i
 	}
 	if _, err := fc.AddTrackedTime(ctx, repo, issueNumber, int(dur.Seconds())); err != nil {
 		slog.Warn("failed to log session time", "error", err, "duration", dur, "role", role)
+	}
+}
+
+// shutdownCheckpoint is written to the session's work directory on exit.
+type shutdownCheckpoint struct {
+	State     string `json:"state"`    // "completed", "failed", "cancelled"
+	LastTool  string `json:"last_tool"` // name of the last tool executed
+	Timestamp string `json:"timestamp"`
+}
+
+// writeShutdownCheckpoint writes a shutdown.json to the session's work directory.
+// The file captures the final state, last tool name, and timestamp so that
+// restoreSessions can make informed decisions about whether to re-create a session.
+func writeShutdownCheckpoint(workDir string, state, lastTool string) {
+	if workDir == "" {
+		return
+	}
+	cp := shutdownCheckpoint{
+		State:     state,
+		LastTool:  lastTool,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		slog.Warn("failed to marshal shutdown checkpoint", "error", err)
+		return
+	}
+	cpPath := filepath.Join(workDir, "shutdown.json")
+	if err := os.WriteFile(cpPath, data, 0644); err != nil {
+		slog.Warn("failed to write shutdown checkpoint", "error", err, "path", cpPath)
+	}
+}
+
+// readShutdownCheckpoint reads the shutdown.json from a work directory.
+// Returns nil if the file doesn't exist (crash case).
+func readShutdownCheckpoint(workDir string) *shutdownCheckpoint {
+	if workDir == "" {
+		return nil
+	}
+	cpPath := filepath.Join(workDir, "shutdown.json")
+	data, err := os.ReadFile(cpPath)
+	if err != nil {
+		return nil // file missing = crash
+	}
+	var cp shutdownCheckpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return nil
+	}
+	return &cp
+}
+
+// deleteShutdownCheckpoint removes the shutdown.json from a work directory.
+func deleteShutdownCheckpoint(workDir string) {
+	if workDir == "" {
+		return
+	}
+	cpPath := filepath.Join(workDir, "shutdown.json")
+	_ = os.Remove(cpPath)
+}
+
+// pruneMergedBranches runs 'git branch --merged main' in a repo directory and
+// deletes any feature branches that have been merged. Excludes 'main' and the
+// current branch. Errors are logged non-fatally.
+func pruneMergedBranches(repoDir string) {
+	if repoDir == "" {
+		return
+	}
+	// Check if git repo exists
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		return
+	}
+
+	// Get list of merged branches
+	cmd := exec.Command("git", "-C", repoDir, "branch", "--merged", "main")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Warn("pruneMergedBranches: git branch --merged failed", "error", err, "dir", repoDir)
+		return
+	}
+
+	// Get current branch name (to avoid pruning it)
+	currentCmd := exec.Command("git", "-C", repoDir, "branch", "--show-current")
+	currentOutput, _ := currentCmd.CombinedOutput()
+	currentBranch := strings.TrimSpace(string(currentOutput))
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	pruned := 0
+	for _, line := range lines {
+		branch := strings.TrimSpace(line)
+		// Skip empty, main, master, and current branch
+		if branch == "" || branch == "main" || branch == "master" || branch == currentBranch {
+			continue
+		}
+		// Delete the merged feature branch
+		delCmd := exec.Command("git", "-C", repoDir, "branch", "-d", branch)
+		if delErr := delCmd.Run(); delErr != nil {
+			slog.Debug("pruneMergedBranches: failed to delete branch", "branch", branch, "error", delErr)
+		} else {
+			pruned++
+			slog.Info("pruneMergedBranches: deleted merged branch", "branch", branch, "dir", repoDir)
+		}
+	}
+	if pruned > 0 {
+		slog.Info("pruneMergedBranches: pruned merged branches", "count", pruned, "dir", repoDir)
 	}
 }
 
@@ -1553,11 +1755,31 @@ func (m *Manager) cleanupOldWorkDirs(ctx context.Context) {
 				_ = os.WriteFile(filepath.Join(archiveDir, "memory.jsonl"), data, 0644)
 			}
 		}
+		// Prune merged feature branches before removing the workdir
+		pruneMergedBranches(rec.RepoDir)
+
 		if err := os.RemoveAll(rec.WorkDir); err != nil {
 			slog.Warn("failed to clean up old workdir", "error", err, "dir", rec.WorkDir)
 		} else {
 			slog.Info("cleaned up old workdir", "session_key", rec.SessionKey, "dir", rec.WorkDir)
 		}
+	}
+
+	// Also prune merged branches for ALL sessions (not just old ones)
+	// If a session has been idle for >1 hour, prune its repo's merged branches.
+	m.mu.RLock()
+	sessionDirs := make(map[string]time.Time)
+	for _, sess := range m.sessions {
+		sess.mu.Lock()
+		idle := time.Since(sess.LastActive)
+		sess.mu.Unlock()
+		if idle > 1*time.Hour {
+			sessionDirs[sess.RepoDir] = sess.LastActive
+		}
+	}
+	m.mu.RUnlock()
+	for dir := range sessionDirs {
+		pruneMergedBranches(dir)
 	}
 }
 
@@ -1598,7 +1820,9 @@ func (m *Manager) shutdownAll() {
 
 	for key, sess := range m.sessions {
 		slog.Info("shutting down session", "session_key", key)
+		writeShutdownCheckpoint(sess.WorkDir, "cancelled", "")
 		sess.Cancel()
+		m.store.Delete(key)
 		delete(m.sessions, key)
 	}
 }
@@ -1823,6 +2047,31 @@ func (m *Manager) unblockSubIssues(ctx context.Context, repo string, parentNum i
 	if unblocked > 0 {
 		slog.Info("unblocked sub-issues after plan approval", "parent", parentNum, "count", unblocked, "repo", repo)
 	}
+}
+
+// OnRalphAppendComplete handles the ralph harness completion.
+// On ac_met: true, removes 'ralph' label, adds 'ralph-completed' label.
+// Does NOT queue reviewer directly — the routing table handles that on
+// the next event (e.g., a comment on the ralph-completed PR).
+func (m *Manager) OnRalphAppendComplete(ctx context.Context, repo string, prNumber int) error {
+	if m.forgejoClient == nil {
+		return nil
+	}
+
+	slog.Info("ralph completion: removing ralph label, adding ralph-completed",
+		"repo", repo, "pr", prNumber)
+
+	// Remove 'ralph' label
+	if err := m.forgejoClient.RemoveIssueLabel(ctx, repo, prNumber, "ralph"); err != nil {
+		slog.Warn("ralph completion: failed to remove ralph label", "error", err, "pr", prNumber)
+	}
+
+	// Add 'ralph-completed' label
+	if err := m.forgejoClient.AddIssueLabels(ctx, repo, prNumber, []string{"ralph-completed"}); err != nil {
+		slog.Warn("ralph completion: failed to add ralph-completed label", "error", err, "pr", prNumber)
+	}
+
+	return nil
 }
 
 // hasQuestionLabel checks if an issue has the "question" label.

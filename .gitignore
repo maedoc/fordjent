@@ -9,3 +9,10 @@ __pycache__/
 .env
 .env.local
 .ollama-cloud-token
+.env.rtx4
+fordjent.rtx4.yaml
+session.test
+*.test
+/testbed
+/testbed2
+/testbed3

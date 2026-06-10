@@ -23,6 +23,7 @@ type SessionRecord struct {
 	RepoDir     string
 	CreatedAt   time.Time
 	LastActive  time.Time
+	CompletedAt *time.Time // set when session transitions to completed/failed
 }
 
 func NewStore(dbPath string) (*Store, error) {
@@ -48,7 +49,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     work_dir     TEXT NOT NULL,
     repo_dir     TEXT NOT NULL,
     created_at   TEXT NOT NULL,
-    last_active  TEXT NOT NULL
+    last_active  TEXT NOT NULL,
+    completed_at TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_last_active ON sessions(last_active);
 `
@@ -57,13 +59,21 @@ CREATE INDEX IF NOT EXISTS idx_last_active ON sessions(last_active);
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 
+	// Migration: add completed_at column if missing (safe for existing DBs)
+	_ = db.Ping() // ensure connection
+	_, _ = db.Exec("ALTER TABLE sessions ADD COLUMN completed_at TEXT DEFAULT NULL")
+
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Create(rec *SessionRecord) error {
+	var completedAtVal interface{}
+	if rec.CompletedAt != nil {
+		completedAtVal = rec.CompletedAt.UTC().Format(time.RFC3339)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.SessionKey,
 		rec.Repository,
 		rec.IssueNumber,
@@ -72,6 +82,7 @@ func (s *Store) Create(rec *SessionRecord) error {
 		rec.RepoDir,
 		rec.CreatedAt.UTC().Format(time.RFC3339),
 		rec.LastActive.UTC().Format(time.RFC3339),
+		completedAtVal,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -81,13 +92,14 @@ func (s *Store) Create(rec *SessionRecord) error {
 
 func (s *Store) Get(sessionKey string) (*SessionRecord, error) {
 	row := s.db.QueryRow(
-		`SELECT session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active
+		`SELECT session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active, completed_at
 		 FROM sessions WHERE session_key = ?`,
 		sessionKey,
 	)
 
 	var rec SessionRecord
 	var createdAtStr, lastActiveStr string
+	var completedAtStr sql.NullString
 
 	err := row.Scan(
 		&rec.SessionKey,
@@ -98,6 +110,7 @@ func (s *Store) Get(sessionKey string) (*SessionRecord, error) {
 		&rec.RepoDir,
 		&createdAtStr,
 		&lastActiveStr,
+		&completedAtStr,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -118,12 +131,19 @@ func (s *Store) Get(sessionKey string) (*SessionRecord, error) {
 	}
 	rec.LastActive = lastActive
 
+	if completedAtStr.Valid {
+		cat, err := time.Parse(time.RFC3339, completedAtStr.String)
+		if err == nil {
+			rec.CompletedAt = &cat
+		}
+	}
+
 	return &rec, nil
 }
 
 func (s *Store) ListAll() ([]SessionRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active
+		`SELECT session_key, repository, issue_number, pr_number, work_dir, repo_dir, created_at, last_active, completed_at
 		 FROM sessions ORDER BY last_active DESC`,
 	)
 	if err != nil {
@@ -135,6 +155,7 @@ func (s *Store) ListAll() ([]SessionRecord, error) {
 	for rows.Next() {
 		var rec SessionRecord
 		var createdAtStr, lastActiveStr string
+		var completedAtStr sql.NullString
 
 		err := rows.Scan(
 			&rec.SessionKey,
@@ -145,6 +166,7 @@ func (s *Store) ListAll() ([]SessionRecord, error) {
 			&rec.RepoDir,
 			&createdAtStr,
 			&lastActiveStr,
+			&completedAtStr,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan session row: %w", err)
@@ -161,6 +183,13 @@ func (s *Store) ListAll() ([]SessionRecord, error) {
 			return nil, fmt.Errorf("parse last_active: %w", err)
 		}
 		rec.LastActive = lastActive
+
+		if completedAtStr.Valid {
+			cat, err := time.Parse(time.RFC3339, completedAtStr.String)
+			if err == nil {
+				rec.CompletedAt = &cat
+			}
+		}
 
 		records = append(records, rec)
 	}
@@ -229,6 +258,19 @@ func (s *Store) DeleteOlderThan(cutoff time.Time) (int64, error) {
 func (s *Store) Close() error {
 	if s.db != nil {
 		return s.db.Close()
+	}
+	return nil
+}
+
+// SetCompletedAt sets the completed_at timestamp for a session.
+func (s *Store) SetCompletedAt(sessionKey string, t time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE sessions SET completed_at = ? WHERE session_key = ?`,
+		t.UTC().Format(time.RFC3339),
+		sessionKey,
+	)
+	if err != nil {
+		return fmt.Errorf("set completed_at: %w", err)
 	}
 	return nil
 }

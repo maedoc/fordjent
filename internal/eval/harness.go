@@ -46,7 +46,6 @@ type HarnessConfig struct {
 	ForgejoPort    int
 	FordjentPort   int
 	WaferAPIKey    string
-	ScalewayAPIKey string
 	ProviderURL    string // Override LLM provider URL
 	ProviderModel  string // Override LLM model name
 	ProviderAPIKey string // Override LLM API key
@@ -62,7 +61,6 @@ func DefaultHarnessConfig() HarnessConfig {
 		ForgejoPort:    getEnvInt("EVAL_FORGEJO_PORT", 3000),
 		FordjentPort:   getEnvInt("EVAL_FORDJENT_PORT", 8080),
 		WaferAPIKey:    os.Getenv("EVAL_WAFER_API_KEY"),
-		ScalewayAPIKey: os.Getenv("EVAL_SCALEWAY_API_KEY"),
 		ProviderURL:    getEnvDefault("EVAL_PROVIDER_URL", ""),
 		ProviderModel:  getEnvDefault("EVAL_PROVIDER_MODEL", ""),
 		ProviderAPIKey: getEnvDefault("EVAL_PROVIDER_API_KEY", ""),

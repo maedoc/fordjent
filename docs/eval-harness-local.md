@@ -36,7 +36,7 @@ Required on the host:
 - Go 1.22+
 - Forgejo installed via Homebrew (`brew install forgejo`)
 - `sandbox-exec` (macOS built-in)
-- LLM provider API key (Wafer or Scaleway) in environment
+- LLM provider API key (Wafer) in environment
 
 The harness will:
 - Use `os/exec` to run `forgejo web` and `fordjent` under `sandbox-exec`
@@ -786,7 +786,6 @@ The harness reads these environment variables:
 | `EVAL_FORGEJO_PORT` | Forgejo HTTP port | `3000` |
 | `EVAL_FORDJENT_PORT` | Fordjent HTTP port | `8080` |
 | `EVAL_WAFER_API_KEY` | Wafer API key | (required) |
-| `EVAL_SCALEWAY_API_KEY` | Scaleway API key | (optional) |
 | `EVAL_TRIALS` | Number of trials per scenario | `5` |
 | `EVAL_TIMEOUT` | Max wait per trial | `15m` |
 | `EVAL_SKIP_SETUP` | Skip Forgejo/Fordjent setup (use existing) | `false` |
@@ -1008,7 +1007,6 @@ EVAL_SKIP_SETUP=true EVAL_SKIP_TEARDOWN=true \
 
 Environment variables:
 - `EVAL_WAFER_API_KEY` — Wafer API key for LLM provider
-- `EVAL_SCALEWAY_API_KEY` — (optional) Scaleway AI key
 - `EVAL_FORGEJO_PORT` — Forgejo port (default 3000)
 - `EVAL_FORDJENT_PORT` — Fordjent port (default 8080)
 - `EVAL_SKIP_SETUP` — Skip service startup, connect to existing

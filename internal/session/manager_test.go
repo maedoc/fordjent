@@ -256,9 +256,9 @@ func TestBuildCloneURL(t *testing.T) {
 		base, token, repo string
 		want              string
 	}{
-		{"https://git.example.com", "tok", "org/repo", "https://tok@git.example.com/org/repo.git"},
+		{"https://git.example.com", "tok", "org/repo", "https://fordjent-bot:tok@git.example.com/org/repo.git"},
 		{"http://localhost:3000", "", "org/repo", "http://localhost:3000/org/repo.git"},
-		{"https://git.example.com", "tok", "user/repo", "https://tok@git.example.com/user/repo.git"},
+		{"https://git.example.com", "tok", "user/repo", "https://fordjent-bot:tok@git.example.com/user/repo.git"},
 	}
 	for _, tt := range tests {
 		got := buildCloneURL(tt.base, tt.token, tt.repo)
@@ -298,8 +298,24 @@ func TestManager_RestoreSessions(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
+	// shutdownAll now deletes store records and writes shutdown.json with "cancelled"
+	// So after a clean shutdown, sessions should NOT be restored.
 	mgr1.shutdownAll()
 
+	// shutdownAll now deletes store records and writes shutdown.json with "cancelled"
+	// So after a clean shutdown, sessions should NOT be restored.
+	// Verify the shutdown.json was written
+	cp := readShutdownCheckpoint(sess1.WorkDir)
+	if cp == nil {
+		t.Fatal("expected shutdown.json to be written after shutdownAll")
+	}
+	if cp.State != "cancelled" {
+		t.Errorf("shutdown.json state = %q, want %q", cp.State, "cancelled")
+	}
+
+	// After restart, the session should NOT be restored because:
+	// 1. shutdownAll deleted the store record
+	// 2. Even if it didn't, shutdown.json says "cancelled" → skip
 	cfg2 := *cfg1
 	bus2 := event.NewBus()
 	mgr2, err := NewManager(&cfg2, bus2)
@@ -309,16 +325,10 @@ func TestManager_RestoreSessions(t *testing.T) {
 	defer mgr2.store.Close()
 
 	mgr2.mu.RLock()
-	restored, ok := mgr2.sessions["org/repo/issues/42"]
+	_, ok := mgr2.sessions["org/repo/issues/42"]
 	mgr2.mu.RUnlock()
-	if !ok {
-		t.Fatal("expected session to be restored from SQLite")
-	}
-	if restored.Key != sess1.Key {
-		t.Errorf("key mismatch: got %q, want %q", restored.Key, sess1.Key)
-	}
-	if restored.Repository != sess1.Repository {
-		t.Errorf("repo mismatch")
+	if ok {
+		t.Error("expected session NOT to be restored after clean shutdown")
 	}
 }
 

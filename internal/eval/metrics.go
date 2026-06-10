@@ -343,7 +343,7 @@ func (h *Harness) CountSystemRoleErrors() (int, error) {
 	content := string(data)
 	count := strings.Count(content, "Unexpected role")
 	count += strings.Count(content, "role 'system'")
-	count += strings.Count(content, "400 Bad Request") // Scaleway API rejection
+	count += strings.Count(content, "400 Bad Request") // Provider API rejection
 	return count, nil
 }
 

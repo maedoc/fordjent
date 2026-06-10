@@ -82,7 +82,7 @@ func (t *ContextTracker) Compact(messages []provider.Message) []provider.Message
 	}
 
 	// Build compacted context: drop old messages, keep compaction marker + recent turns.
-	// Use "user" role for marker to avoid Scaleway API strictness about system-after-tool.
+	// Use "user" role for marker to avoid provider API strictness about system-after-tool.
 	var compacted []provider.Message
 	compacted = append(compacted, provider.Message{
 		Role:    "user",

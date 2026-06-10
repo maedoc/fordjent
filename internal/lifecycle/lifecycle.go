@@ -380,6 +380,28 @@ func initSchema(db *sql.DB) error {
 		occurred_at  DATETIME NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_webhook_time ON webhook_deliveries(occurred_at);
+
+		CREATE TABLE IF NOT EXISTS ralph_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			pr_key TEXT NOT NULL,
+			iteration INTEGER NOT NULL,
+			session_key TEXT,
+			stage_awareness TEXT,
+			stage_act TEXT,
+			stage_assert TEXT,
+			stage_append TEXT,
+			committed_sha TEXT,
+			diff_stat TEXT,
+			status TEXT NOT NULL DEFAULT 'running',
+			cost_usd REAL DEFAULT 0.0,
+			tokens_in INTEGER DEFAULT 0,
+			tokens_out INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			completed_at DATETIME,
+			UNIQUE(pr_key, iteration)
+		);
+		CREATE INDEX IF NOT EXISTS idx_ralph_pr_key ON ralph_sessions(pr_key);
+		CREATE INDEX IF NOT EXISTS idx_ralph_status ON ralph_sessions(status);
 	`)
 	return err
 }
@@ -432,4 +454,139 @@ func (l *Lifecycle) RecordDelivery(ctx context.Context, eventType, action, repo 
 		Data: fmt.Sprintf(`{"event_type":%q,"action":%q,"repository":%q,"number":%d,"sender":%q,"status":%q,"error":%q,"timestamp":%q}`,
 			eventType, action, repo, number, sender, status, delErrStr, time.Now().UTC().Format(time.RFC3339)),
 	})
+}
+
+// --- Ralph session tracking ---
+
+// RalphRecord represents a ralph iteration record.
+type RalphRecord struct {
+	PRKey          string
+	Iteration      int
+	SessionKey     string
+	StageAwareness string
+	StageAct       string
+	StageAssert    string
+	StageAppend    string
+	CommittedSHA   string
+	DiffStat       string
+	Status         string // running, completed, failed_turns, failed_error
+	CostUSD        float64
+	TokensIn       int
+	TokensOut      int
+}
+
+// RecordRalphIteration inserts or updates a ralph iteration record.
+func (l *Lifecycle) RecordRalphIteration(ctx context.Context, rec *RalphRecord) error {
+	_, err := l.db.ExecContext(ctx, `
+		INSERT INTO ralph_sessions (pr_key, iteration, session_key, stage_awareness, stage_act, stage_assert,
+			stage_append, committed_sha, diff_stat, status, cost_usd, tokens_in, tokens_out)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(pr_key, iteration) DO UPDATE SET
+			session_key = excluded.session_key,
+			stage_awareness = COALESCE(excluded.stage_awareness, stage_awareness),
+			stage_act = COALESCE(excluded.stage_act, stage_act),
+			stage_assert = COALESCE(excluded.stage_assert, stage_assert),
+			stage_append = COALESCE(excluded.stage_append, stage_append),
+			committed_sha = COALESCE(excluded.committed_sha, committed_sha),
+			diff_stat = COALESCE(excluded.diff_stat, diff_stat),
+			status = excluded.status,
+			cost_usd = excluded.cost_usd,
+			tokens_in = excluded.tokens_in,
+			tokens_out = excluded.tokens_out,
+			completed_at = CASE WHEN excluded.status IN ('completed', 'failed_turns', 'failed_error')
+				THEN CURRENT_TIMESTAMP ELSE completed_at END
+	`, rec.PRKey, rec.Iteration, rec.SessionKey, rec.StageAwareness, rec.StageAct,
+		rec.StageAssert, rec.StageAppend, rec.CommittedSHA, rec.DiffStat, rec.Status,
+		rec.CostUSD, rec.TokensIn, rec.TokensOut)
+	return err
+}
+
+// GetLastRalphIteration returns the most recent ralph iteration for a PR key.
+func (l *Lifecycle) GetLastRalphIteration(ctx context.Context, prKey string) (*RalphRecord, error) {
+	var rec RalphRecord
+	err := l.db.QueryRowContext(ctx, `
+		SELECT pr_key, iteration, session_key, stage_awareness, stage_act, stage_assert,
+			stage_append, committed_sha, diff_stat, status, cost_usd, tokens_in, tokens_out
+		FROM ralph_sessions
+		WHERE pr_key = ?
+		ORDER BY iteration DESC LIMIT 1
+	`, prKey).Scan(&rec.PRKey, &rec.Iteration, &rec.SessionKey, &rec.StageAwareness,
+		&rec.StageAct, &rec.StageAssert, &rec.StageAppend, &rec.CommittedSHA,
+		&rec.DiffStat, &rec.Status, &rec.CostUSD, &rec.TokensIn, &rec.TokensOut)
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// GetRalphCost returns the total cost across all ralph iterations for a PR.
+func (l *Lifecycle) GetRalphCost(ctx context.Context, prKey string) (float64, error) {
+	var total float64
+	err := l.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(cost_usd), 0) FROM ralph_sessions WHERE pr_key = ?`,
+		prKey).Scan(&total)
+	return total, err
+}
+
+// ListStalledRalphSessions returns PR keys where the last 3 iterations all failed.
+func (l *Lifecycle) ListStalledRalphSessions(ctx context.Context) ([]string, error) {
+	rows, err := l.db.QueryContext(ctx, `
+		SELECT r1.pr_key
+		FROM ralph_sessions r1
+		WHERE r1.iteration = (SELECT MAX(iteration) FROM ralph_sessions WHERE pr_key = r1.pr_key)
+		  AND r1.status = 'failed_turns'
+		  AND r1.pr_key IN (
+		    SELECT pr_key FROM ralph_sessions WHERE status = 'failed_turns'
+		    GROUP BY pr_key HAVING COUNT(*) >= 3
+		    AND COUNT(*) = (SELECT COUNT(*) FROM ralph_sessions r2 WHERE r2.pr_key = ralph_sessions.pr_key AND r2.status = 'failed_turns'
+		      AND r2.iteration > (SELECT MAX(iteration) FROM ralph_sessions r3 WHERE r3.pr_key = ralph_sessions.pr_key AND r3.status != 'failed_turns'))
+		  )
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err == nil {
+			keys = append(keys, k)
+		}
+	}
+	return keys, rows.Err()
+}
+
+// CountRalphIterations returns the number of ralph iterations for a PR.
+func (l *Lifecycle) CountRalphIterations(ctx context.Context, prKey string) (int, error) {
+	var count int
+	err := l.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM ralph_sessions WHERE pr_key = ?`, prKey).Scan(&count)
+	return count, err
+}
+
+// GetLastNRalphIterations returns the last N ralph iteration records for a PR.
+func (l *Lifecycle) GetLastNRalphIterations(ctx context.Context, prKey string, n int) ([]*RalphRecord, error) {
+	rows, err := l.db.QueryContext(ctx, `
+		SELECT pr_key, iteration, session_key, stage_awareness, stage_act, stage_assert,
+			stage_append, committed_sha, diff_stat, status, cost_usd, tokens_in, tokens_out
+		FROM ralph_sessions
+		WHERE pr_key = ?
+		ORDER BY iteration DESC
+		LIMIT ?
+	`, prKey, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []*RalphRecord
+	for rows.Next() {
+		var rec RalphRecord
+		if err := rows.Scan(&rec.PRKey, &rec.Iteration, &rec.SessionKey, &rec.StageAwareness,
+			&rec.StageAct, &rec.StageAssert, &rec.StageAppend, &rec.CommittedSHA,
+			&rec.DiffStat, &rec.Status, &rec.CostUSD, &rec.TokensIn, &rec.TokensOut); err != nil {
+			continue
+		}
+		records = append(records, &rec)
+	}
+	return records, rows.Err()
 }

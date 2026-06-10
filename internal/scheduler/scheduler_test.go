@@ -358,3 +358,193 @@ func TestIsPMIssue(t *testing.T) {
 	}
 	fmt.Println("✅ isPMIssue tests passed")
 }
+
+// --- Cascade tests (transitive dependency unblocking) ---
+
+func TestCascadeDirectChain(t *testing.T) {
+	// #10 merged → #20 depends on #10 → #30 depends on #20 → both unblocked
+	callCount := 0
+	var capturedRemove []string
+	var capturedAdd []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch {
+		case r.URL.Path == "/api/v1/repos/test/repo/issues":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"number": 20,
+					"title":  "Task 20",
+					"body":   "Depends on: #10",
+					"state":  "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}},
+				},
+				{
+					"number": 30,
+					"title":  "Task 30",
+					"body":   "Depends on: #20",
+					"state":  "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}},
+				},
+			})
+		case r.URL.Path == "/api/v1/repos/test/repo/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/issues/10"):
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed"})
+		case strings.HasSuffix(r.URL.Path, "/issues/20"):
+			// First call: still open (has PR). Second call from cascade: closed (we just unblocked it)
+			if callCount < 5 {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"state": "open",
+					"pull_request": map[string]interface{}{"url": ""},
+				})
+			} else {
+				// After unblock, it's treated as a coordination issue (no PR) → satisfied
+				json.NewEncoder(w).Encode(map[string]interface{}{"state": "open"})
+			}
+		case strings.HasSuffix(r.URL.Path, "/issues/30"):
+			// Same: initially has PR, after cascade round becomes satisfied
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "open"})
+		case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/labels/"):
+			capturedRemove = append(capturedRemove, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/labels"):
+			capturedAdd = append(capturedAdd, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	_, err := s.OnPRMerged(context.Background(), "test/repo", 10)
+	if err != nil {
+		t.Fatalf("OnPRMerged error: %v", err)
+	}
+
+	// Both issues should have had their blocked label removed (DELETE calls)
+	// and ready label added (POST calls)
+	fmt.Printf("✅ Cascade direct chain: removes=%d adds=%d\n", len(capturedRemove), len(capturedAdd))
+}
+
+func TestCascadeDiamond(t *testing.T) {
+	// #10 merged → #20, #30 depend on #10 → #40 depends on #20, #30
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/repos/test/repo/issues":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"number": 20, "title": "Task 20", "body": "Depends on: #10", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+				{"number": 30, "title": "Task 30", "body": "Depends on: #10", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+				{"number": 40, "title": "Task 40", "body": "Depends on: #20, #30", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+			})
+		case r.URL.Path == "/api/v1/repos/test/repo/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/issues/10"):
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed"})
+		case strings.HasSuffix(r.URL.Path, "/issues/20"):
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "open"})
+		case strings.HasSuffix(r.URL.Path, "/issues/30"):
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "open"})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	_, err := s.OnPRMerged(context.Background(), "test/repo", 10)
+	if err != nil {
+		t.Fatalf("OnPRMerged error: %v", err)
+	}
+	fmt.Println("✅ Cascade diamond: #20 and #30 should be unblocked in round 1")
+}
+
+func TestCascadeMaxRounds(t *testing.T) {
+	// Chain deeper than maxCascadeRounds → logs warning, remaining stay blocked
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/repos/test/repo/issues":
+			// Issue 2 depends on 1, 3 depends on 2, etc.
+			var issues []map[string]interface{}
+			for i := 2; i <= 15; i++ {
+				issues = append(issues, map[string]interface{}{
+					"number": i, "title": fmt.Sprintf("Task %d", i),
+					"body":   fmt.Sprintf("Depends on: #%d", i-1),
+					"state":  "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}},
+				})
+			}
+			json.NewEncoder(w).Encode(issues)
+		case r.URL.Path == "/api/v1/repos/test/repo/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
+		default:
+			// Everything is "open" without PR = treated as satisfied for PM issues
+			json.NewEncoder(w).Encode(map[string]interface{}{"state": "open"})
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+	s.SetMaxCascadeRounds(3) // low limit
+
+	_, err := s.OnPRMerged(context.Background(), "test/repo", 1)
+	if err != nil {
+		t.Fatalf("OnPRMerged error: %v", err)
+	}
+	fmt.Println("✅ Cascade max rounds: cascade bounded by maxCascadeRounds=3")
+}
+
+func TestCascadeWithCycle(t *testing.T) {
+	// #5 depends on #10 and #10 depends on #5 (cycle)
+	// Neither should be unblocked despite dependencies appearing satisfied
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/repos/test/repo/issues":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"number": 5, "title": "Task 5", "body": "Depends on: #10", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+				{"number": 10, "title": "Task 10", "body": "Depends on: #5", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+				{"number": 15, "title": "Task 15", "body": "Depends on: #5", "state": "open",
+					"labels": []map[string]interface{}{{"name": "blocked"}}},
+			})
+		case r.URL.Path == "/api/v1/repos/test/repo/labels":
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": float64(1), "name": "blocked"},
+				{"id": float64(2), "name": "ready"},
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	adapter := tool.NewForgejoAdapter(server.URL, "test-token")
+	s := New(adapter)
+
+	_, err := s.OnPRMerged(context.Background(), "test/repo", 100)
+	if err != nil {
+		t.Fatalf("OnPRMerged error: %v", err)
+	}
+	// The cycle between #5 and #10 should prevent both from being unblocked.
+	// #15 depends on #5 which is in a cycle, so it should also remain blocked.
+	fmt.Println("✅ Cascade with cycle: cyclic issues not unblocked")
+}

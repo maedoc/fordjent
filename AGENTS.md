@@ -1298,7 +1298,11 @@ Three validation waves to verify the Bug 1–3 fixes (dual-label, session recove
 | `fordjent.local.yaml` | `max_turns_reviewer: 20` (Bug 22) |
 | `AGENTS.md` | This update |
 
-## Cloud Deployment on Scaleway (May 21, 2026)
+## Cloud Deployment on Scaleway (May 21, 2026) — REMOVED
+
+> The `deploy/` directory and Scaleway-specific deployment tooling were removed on 2026-06-09.
+> The cloud configs, Python CLI, and Scaleway SDK dependency are no longer part of the project.
+> Use local deployment (`scripts/bootstrap-local.sh`) or write custom deployment scripts for other providers.
 
 ### Architecture
 - **Instance**: DEV1-L (4 vCPU, 8GB RAM, ~€31/mo) on Scaleway `fr-par-2`
@@ -2141,3 +2145,86 @@ Reproduction is auto-detected when bash/git output contains `go run`, `go test`,
 | 1 | Transitive deps | LOW-MEDIUM | Scheduler only checks direct dependencies. A→B→C chains require manual unblocking at each level. PM issues without PRs are transitively satisfied (correct), but deep PM→impl chains aren't checked. |
 | 2 | Session restart protection | LOW | No `shutdown.json` checkpoint. On restart, agent replays previous tool calls from memory.jsonl. Tools are idempotent (write_file replaces, git creates new SHAs), so real risk is just wasted tokens. |
 | 3 | Stale cleanup | LOW | Feature branches and workDirs accumulate. `cleanupOldWorkDirs` handles 7-day-old completed sessions. `shutdownAll` doesn't clean workDirs or delete from sessions.db. No branch cleanup exists. |
+
+---
+
+## Ralph Iterative Refinement Mode (June 9, 2026)
+
+### What It Does
+Ralph is an iterative PR refinement engine. When an implementer session exhausts its turn budget without satisfying acceptance criteria, the ralph loop takes over: it spawns bounded iterations (fresh context window each time) that follow the 4-A protocol (awareness, act, assert, append) until AC are met or hard caps are reached.
+
+### Activation
+- **Yolo mode auto-escalation**: When `fordjent-yolo` topic is set and an implementer's PR doesn't satisfy AC, ralph is automatically activated.
+- **Manual**: Add the `ralph` label to any open PR.
+
+### The 4-A Protocol
+Each ralph iteration MUST call `ralph_update` in order:
+1. **awareness** — Read git log, PR comments, spec files. Understand the current state.
+2. **act** — Write/modify code to address remaining acceptance criteria.
+3. **assert** — Build and test changes. Verify they meet AC.
+4. **append** — Stage changes, write progress, commit, push.
+
+The harness enforces ordering: calling `append` before `assert` returns an error.
+
+### Session Keys
+Ralph iteration session keys follow the pattern: `repo/pulls/N-ralph-iM` where M is the iteration number (e.g., `fjadmin/testbed/pulls/42-ralph-i7`).
+
+### Progress Files
+Each iteration writes a progress markdown file to `.ralph/progress/pr-{N}-iteration-{M}.md` containing stage summaries. These files are committed to the PR branch and serve as the audit trail.
+
+### Spec Immutability
+During ralph sessions, spec files (`openspec/**/spec.md`) are **hard-blocked** from modification:
+- `write_file` rejects spec paths with an error
+- `git commit` validates the staged diff and rejects any commit touching spec files
+- Exception: reviewer sessions with the `ralph-completed` label can temporarily write to spec files (for TODO checkbox sync only)
+
+### Turn Nudging
+The harness injects escalating steering messages based on turn budget consumption:
+- 25% → nudge awareness
+- 50% → nudge act
+- 75% → nudge assert
+- Final 2 turns → urgent nudge to append
+
+### Configuration (`fordjent.local.yaml`)
+```yaml
+ralph:
+  enabled: true
+  max_iterations_per_pr: 20
+  turn_budget_per_iteration: 20
+  cooldown_between_iterations: 2m
+  max_cost_per_pr_usd: 5.00
+  nudge_threshold_pct: 0.25
+  summary_model: ""           # provider name for timeout summary; empty = default
+  auto_ralph_on_yolo: true    # auto-escalate incomplete PRs in yolo repos
+```
+
+### Failure Modes and Labels
+| Label | Meaning |
+|-------|--------|
+| `ralph` | Iterative refinement mode active |
+| `ralph-completed` | AC met; QA spec sync pending (temporary, removed after sync) |
+| `fordjent/failed:ralph-exceeded` | Max iterations per PR exceeded |
+| `fordjent/failed:ralph-stalled` | 3 consecutive iterations with no progress |
+| `fordjent/failed:ralph-budget` | Cost cap exceeded |
+
+### Recovery
+- **Timeout summary**: When a ralph iteration exhausts turns without reaching `append`, the harness calls a fast LLM to summarize the session's memory, stages whatever files exist, and commits with `ralph-iN [incomplete]:` prefix.
+- **Stall detection**: If the last 3 iterations all have `failed_turns` status and no new commits, the harness removes the `ralph` label and adds `fordjent/failed:ralph-stalled`.
+- **Budget cap**: Accumulated cost per PR is tracked in `ralph_sessions` table. If `max_cost_per_pr_usd` is exceeded, ralph is halted with `fordjent/failed:ralph-budget`.
+
+### QA Spec Sync
+After ralph completes (AC met, `ralph-completed` label added):
+1. Reviewer session reads `.ralph/progress/*.md` files
+2. Matches completed work to spec TODO checkboxes
+3. Updates checkboxes only (no scope changes)
+4. Commits with `docs:` prefix
+5. Removes `ralph-completed` label
+
+If no spec or no progress files exist, the reviewer logs a warning and proceeds with normal code review.
+
+### Debugging Tips
+- `docker exec fordjent cat /var/lib/fordjent/work/.../memory.jsonl | jq` — inspect session memory
+- `docker logs -f fordjent 2>&1 | grep ralph` — filter for ralph-specific log lines
+- `GET /status` JSON endpoint includes a `ralph` section with iteration counts and cost
+- Progress files are in the repo: `.ralph/progress/pr-{N}-iteration-{M}.md`
+- `ralph_sessions` table in `lifecycle.db` tracks iteration status and cost
