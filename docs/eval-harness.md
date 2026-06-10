@@ -228,17 +228,13 @@ UPDATE_BASELINE=1 go test ./internal/eval/... -v -run TestEvalBenchBugfix
 
 ## Provider Configuration
 
-The harness supports three LLM provider configurations:
+The harness supports two LLM provider configurations:
 
 1. **Custom endpoint** (default): Set `EVAL_PROVIDER_URL`, `EVAL_PROVIDER_MODEL`,
    and `EVAL_PROVIDER_API_KEY` environment variables. All roles use the same
    model: `"eval-provider"`.
 
-2. **Wafer (legacy)**: Hardcoded in `fordjent.yaml` — not recommended, returns 401.
-
-3. **Scaleway AI**: Set provider URL to `https://api.scaleway.ai/v1` with
-   appropriate API key. Requires system-role compatibility (Fordjent uses
-   `role: "user"` for all injected messages to avoid Scaleway's strict API).
+2. **Wafer**: Hardcoded in `fordjent.yaml`.
 
 ## Package Structure
 

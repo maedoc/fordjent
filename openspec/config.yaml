@@ -3,7 +3,7 @@ schema: spec-driven
 context: |
   Tech stack: Go 1.22+, Forgejo (Gitea v9), SQLite, sandbox-exec (macOS)
   Fordjent is a Go agent harness that connects to Forgejo via webhooks
-  and uses LLM providers (Wafer, Scaleway) to process issues.
+  and uses LLM providers (Wafer) to process issues.
   Runs natively on macOS with sandbox-exec profiles.
   Testing: Go standard library + httptest, no external test frameworks.
   Config: YAML (fordjent.local.yaml), environment variables

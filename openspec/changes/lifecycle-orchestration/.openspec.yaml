@@ -1,0 +1,24 @@
+schema: spec-driven
+context: |
+  Fordjent is a Go agent harness that coordinates multiple LLM agent roles
+  (PM, implementer, reviewer/djent-qa) through Forgejo webhooks. Each role
+  has craft specs defining HOW it works; this change introduces the lifecycle
+  orchestration spec that defines WHEN roles activate and WHAT they hand off.
+  Tech stack: Go 1.22+, Forgejo (Gitea v9), SQLite, sandbox-exec (macOS).
+  Testing: Go standard library + httptest.
+rules:
+  proposal:
+    - Keep proposals focused on WHY lifecycle orchestration is needed
+    - Reference the existing craft specs (pm-spec-authoring, ralph-scheduler, ralph-protocol)
+  design:
+    - Include the stage machine diagram
+    - Include the routing table
+    - Specify handoff rules with explicit artifacts
+  specs:
+    - Use SHALL/MUST/MAY language for requirements
+    - Each spec covers one capability
+    - Include acceptance criteria with GIVEN/WHEN/THEN scenarios
+  tasks:
+    - Break tasks into chunks of max 2 hours
+    - Each task references the spec it implements
+    - Order tasks by dependency: routing table → stage machine → handoff rules → archival trigger
