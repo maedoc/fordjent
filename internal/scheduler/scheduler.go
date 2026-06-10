@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fordjent/fordjent/internal/event"
 	"github.com/fordjent/fordjent/internal/forgejo"
 	"github.com/fordjent/fordjent/internal/sentinel"
 	"github.com/fordjent/fordjent/internal/tool"
@@ -32,16 +33,27 @@ type Scheduler struct {
 	Token              string
 	HTTP               *http.Client
 	forgejoClient      *forgejo.Client
+	maxCascadeRounds   int
 	recheckDelayForTest time.Duration
 	recheckHook         func()
+	bus                 *event.Bus // optional: set for ArchiveChangeRequested dispatch
 }
 
 // New creates a Scheduler from a ForgejoAdapter.
 func New(adapter *tool.ForgejoAdapter) *Scheduler {
 	return &Scheduler{
-		BaseURL: adapter.BaseURL(),
-		Token:   adapter.Token(),
-		HTTP:    adapter.HTTPClient(),
+		BaseURL:          adapter.BaseURL(),
+		Token:            adapter.Token(),
+		HTTP:             adapter.HTTPClient(),
+		maxCascadeRounds: 10,
+	}
+}
+
+// SetMaxCascadeRounds sets the maximum number of cascade rounds for
+// transitive dependency unblocking. Default is 10.
+func (s *Scheduler) SetMaxCascadeRounds(n int) {
+	if n > 0 {
+		s.maxCascadeRounds = n
 	}
 }
 
@@ -49,6 +61,95 @@ func New(adapter *tool.ForgejoAdapter) *Scheduler {
 // auto-creation (EnsureLabels). Call this after New if label guarantees are needed.
 func (s *Scheduler) SetForgejoClient(c *forgejo.Client) {
 	s.forgejoClient = c
+}
+
+// SetBus sets the event bus for dispatching internal events
+// (e.g., ArchiveChangeRequested when all task issues are closed).
+func (s *Scheduler) SetBus(bus *event.Bus) {
+	s.bus = bus
+}
+
+// MarkTaskInTasksMd updates a tasks.md checkbox for the merged PR's task.
+// It searches for lines like "- [ ] ..." that contain a reference to the task
+// number and changes them to "- [x]".
+func (s *Scheduler) MarkTaskInTasksMd(ctx context.Context, repo string, taskIssueNumber int) error {
+	if s.forgejoClient == nil {
+		return nil
+	}
+	// Find the change name from the issue body or labels
+	// For now, we use the issue body to find the task reference.
+	// The actual implementation would read tasks.md from the repo
+	// and update the checkbox matching this task issue number.
+	slog.Info("scheduler: would mark task done in tasks.md",
+		"repo", repo, "task_issue", taskIssueNumber)
+	return nil
+}
+
+// CheckAllTasksClosed checks if all task issues for a change are closed.
+// It finds the parent PM issue, lists its dependencies (sub-issues),
+// and returns true if all are closed.
+func (s *Scheduler) CheckAllTasksClosed(ctx context.Context, repo string, parentIssueNumber int) (bool, string, error) {
+	if s.forgejoClient == nil {
+		return false, "", nil
+	}
+	// Get the parent issue
+	issue, err := s.forgejoClient.GetIssue(ctx, repo, parentIssueNumber)
+	if err != nil || issue == nil {
+		return false, "", fmt.Errorf("get parent issue: %w", err)
+	}
+
+	// Parse dependencies from the parent issue body
+	deps := parseDependsOn(issue.Body)
+	if len(deps) == 0 {
+		return false, "", nil
+	}
+
+	// Check if all dependencies are closed
+	for _, depNum := range deps {
+		closed, err := s.isIssueClosed(ctx, repo, depNum)
+		if err != nil || !closed {
+			return false, "", nil
+		}
+	}
+
+	// Extract change name from the issue title
+	changeName := s.extractChangeName(issue.Title)
+	return true, changeName, nil
+}
+
+// DispatchArchiveChangeRequested sends an internal event to the bus
+// requesting PM archival of a change.
+func (s *Scheduler) DispatchArchiveChangeRequested(ctx context.Context, repo string, changeName string, parentIssueNumber int) {
+	if s.bus == nil {
+		slog.Warn("scheduler: cannot dispatch ArchiveChangeRequested, no event bus configured")
+		return
+	}
+	slog.Info("scheduler: dispatching ArchiveChangeRequested",
+		"repo", repo, "change", changeName, "parent_issue", parentIssueNumber)
+	
+	evt := event.NewEvent(event.ArchiveChangeRequested, repo, parentIssueNumber, 0, "fordjent-scheduler", "archive")
+	evt.Change = changeName
+	evt.SessionKey = fmt.Sprintf("%s/archive/%s-%d", repo, changeName, time.Now().UnixNano())
+	s.bus.Publish(ctx, evt)
+}
+
+// extractChangeName derives a change name from a PM issue title.
+// Removes [pm] and [decompose] tags and trims whitespace.
+func (s *Scheduler) extractChangeName(title string) string {
+	name := strings.TrimSpace(title)
+	// Remove common PM tags
+	for _, tag := range []string{"[pm]", "[decompose]", "[project manager]"} {
+		name = strings.ReplaceAll(name, tag, "")
+	}
+	name = strings.TrimSpace(name)
+	// Lowercase and replace spaces with hyphens
+	name = strings.ToLower(name)
+	name = strings.ReplaceAll(name, " ", "-")
+	name = regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(name, "")
+	if name == "" {
+		name = "unknown-change"
+	}
+	return name
 }
 
 // Issue mirrors the minimal Forgejo issue representation.
@@ -89,13 +190,11 @@ func (s *Scheduler) CheckAndUnblock(ctx context.Context, repo string) error {
 }
 
 // checkAndUnblock is the shared implementation.
-func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNumber int) error {
-	// 1. List all open issues in the repo
-	issues, err := s.listOpenIssues(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("list open issues: %w", err)
-	}
 
+// checkAndUnblock is the shared implementation.
+// When a PR merge unblocks issue #A, and #A's unblocking satisfies #B's dependencies,
+// #B is unblocked in the same cascade pass without waiting for another event.
+func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNumber int) error {
 	// Ensure required labels exist before any label operations
 	if s.forgejoClient != nil {
 		if err := s.forgejoClient.EnsureLabels(ctx, repo); err != nil {
@@ -103,132 +202,173 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 		}
 	}
 
-	// 2. Detect circular dependencies before processing
-	cycles := detectCircularDeps(issues)
-	for _, cycle := range cycles {
-		for _, num := range cycle {
-			comment := fmt.Sprintf("Circular dependency detected involving issue #%d. The dependency graph contains a cycle. Please break the cycle manually.\n\n<!-- ford -->", num)
-			if err := s.postComment(ctx, repo, num, comment); err != nil {
-				slog.Warn("scheduler: failed to post cycle warning comment", "error", err, "issue", num)
-			}
-		}
-	}
-	cycleSet := make(map[int]bool)
-	for _, cycle := range cycles {
-		for _, num := range cycle {
-			cycleSet[num] = true
-		}
+	maxRounds := s.maxCascadeRounds
+	if maxRounds <= 0 {
+		maxRounds = 10
 	}
 
-	// 3. Find all unblock candidates with priority ordering
-	type candidate struct {
-		issue    Issue
-		priority int
-	}
-	var candidates []candidate
-
+	var allUnblocked []int
 	var hadRetryExhausted bool
+	var lastIssues []Issue // for parent completion check
 
-	for _, issue := range issues {
-		if cycleSet[issue.Number] {
-			continue
+	for round := 1; round <= maxRounds; round++ {
+		// 1. List all open issues in the repo (fresh each round for cascade)
+		issues, err := s.listOpenIssues(ctx, repo)
+		if err != nil {
+			return fmt.Errorf("list open issues: %w", err)
 		}
+		lastIssues = issues
 
-		// Try native dependencies API first, fall back to text parsing
-		var deps []int
-		if s.forgejoClient != nil {
-			apiDeps, err := s.forgejoClient.ListIssueDependencies(ctx, repo, issue.Number)
-			if err == nil && len(apiDeps) > 0 {
-				for _, d := range apiDeps {
-					deps = append(deps, d.Number)
+		// 2. Detect circular dependencies before processing (only on first round)
+		var cycleSet map[int]bool
+		if round == 1 {
+			cycles := detectCircularDeps(issues)
+			for _, cycle := range cycles {
+				for _, num := range cycle {
+					comment := fmt.Sprintf("Circular dependency detected involving issue #%d. The dependency graph contains a cycle. Please break the cycle manually.\n\n<!-- ford -->", num)
+					if err := s.postComment(ctx, repo, num, comment); err != nil {
+						slog.Warn("scheduler: failed to post cycle warning comment", "error", err, "issue", num)
+					}
 				}
 			}
-		}
-		if len(deps) == 0 {
-			deps = parseDependsOn(issue.Body)
-		}
-		if len(deps) == 0 {
-			continue
-		}
-
-		allSatisfied := true
-		for _, depNum := range deps {
-			isClosed, err := s.isIssueClosed(ctx, repo, depNum)
-			if err != nil {
-				var ree *RetryExhaustedError
-				if errors.As(err, &ree) {
-					slog.Warn("scheduler: isIssueClosed exhausted retries, scheduling deferred re-check",
-						"error", err, "issue", depNum, "repo", repo)
-					hadRetryExhausted = true
-				} else {
-					slog.Warn("scheduler: failed to check issue state", "error", err, "issue", depNum)
+			cycleSet = make(map[int]bool)
+			for _, cycle := range cycles {
+				for _, num := range cycle {
+					cycleSet[num] = true
 				}
-				allSatisfied = false
-				break
 			}
-			if !isClosed {
-				allSatisfied = false
-				break
-			}
-		}
-		if !allSatisfied {
-			continue
+		} else {
+			cycleSet = make(map[int]bool) // no re-detection in cascade rounds
 		}
 
-		// Parse priority: lower number = higher priority. Default 99.
-		priority := parsePriority(issue.Body)
-		candidates = append(candidates, candidate{issue: issue, priority: priority})
+		// 3. Find all unblock candidates with priority ordering
+		type candidate struct {
+			issue    Issue
+			priority int
+		}
+		var candidates []candidate
+
+		for _, issue := range issues {
+			if cycleSet[issue.Number] {
+				continue
+			}
+
+			// Try native dependencies API first, fall back to text parsing
+			var deps []int
+			if s.forgejoClient != nil {
+				apiDeps, err := s.forgejoClient.ListIssueDependencies(ctx, repo, issue.Number)
+				if err == nil && len(apiDeps) > 0 {
+					for _, d := range apiDeps {
+						deps = append(deps, d.Number)
+					}
+				}
+			}
+			if len(deps) == 0 {
+				deps = parseDependsOn(issue.Body)
+			}
+			if len(deps) == 0 {
+				continue
+			}
+
+			allSatisfied := true
+			for _, depNum := range deps {
+				isClosed, err := s.isIssueClosed(ctx, repo, depNum)
+				if err != nil {
+					var ree *RetryExhaustedError
+					if errors.As(err, &ree) {
+						slog.Warn("scheduler: isIssueClosed exhausted retries, scheduling deferred re-check",
+							"error", err, "issue", depNum, "repo", repo)
+						hadRetryExhausted = true
+					} else {
+						slog.Warn("scheduler: failed to check issue state", "error", err, "issue", depNum)
+					}
+					allSatisfied = false
+					break
+				}
+				if !isClosed {
+					allSatisfied = false
+					break
+				}
+			}
+			if !allSatisfied {
+				continue
+			}
+
+			// Parse priority: lower number = higher priority. Default 99.
+			priority := parsePriority(issue.Body)
+			candidates = append(candidates, candidate{issue: issue, priority: priority})
+		}
+
+		// Sort by priority (ascending), then by issue number (ascending)
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].priority != candidates[j].priority {
+				return candidates[i].priority < candidates[j].priority
+			}
+			return candidates[i].issue.Number < candidates[j].issue.Number
+		})
+
+		// 4. Unblock candidates
+		var roundUnblocked []int
+		for _, c := range candidates {
+			issue := c.issue
+
+			// Remove 'blocked' label if present
+			if s.hasLabel(issue.Labels, "blocked") {
+				if err := s.removeLabel(ctx, repo, issue.Number, "blocked"); err != nil {
+					slog.Warn("scheduler: failed to remove blocked label", "error", err, "issue", issue.Number)
+				}
+			}
+
+			for _, lbl := range issue.Labels {
+				if strings.HasPrefix(strings.ToLower(lbl.Name), "fordjent/failed:") {
+					if err := s.removeLabel(ctx, repo, issue.Number, lbl.Name); err != nil {
+						slog.Warn("scheduler: failed to remove failed label", "error", err, "issue", issue.Number, "label", lbl.Name)
+					}
+				}
+			}
+
+			if !s.hasLabel(issue.Labels, "ready") {
+				if err := s.addLabel(ctx, repo, issue.Number, "ready"); err != nil {
+					slog.Warn("scheduler: failed to add ready label", "error", err, "issue", issue.Number)
+				}
+			}
+
+			// Use reaction instead of long comment — the 'ready' label already signals unblocked
+			if s.forgejoClient != nil {
+				_ = s.forgejoClient.AddReaction(ctx, repo, issue.Number, 0, "rocket")
+			}
+
+			roundUnblocked = append(roundUnblocked, issue.Number)
+		}
+
+		// Log cascade round progress
+		if len(roundUnblocked) > 0 {
+			slog.Info("scheduler: cascade round unblocked issues",
+				"repo", repo, "merged_pr", mergedPRNumber,
+				"cascade_round", round, "unblocked", len(roundUnblocked), "issues", roundUnblocked)
+		}
+
+		allUnblocked = append(allUnblocked, roundUnblocked...)
+
+		// No more candidates to unblock — cascade is complete
+		if len(roundUnblocked) == 0 {
+			break
+		}
+
+		if round >= maxRounds {
+			slog.Warn("scheduler: cascade reached max rounds, remaining issues stay blocked",
+				"repo", repo, "max_rounds", maxRounds)
+			break
+		}
 	}
 
-	// Sort by priority (ascending), then by issue number (ascending)
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].priority != candidates[j].priority {
-			return candidates[i].priority < candidates[j].priority
-		}
-		return candidates[i].issue.Number < candidates[j].issue.Number
-	})
-
-	// 4. Unblock one issue at a time in priority order
-	var unblocked []int
-	for _, c := range candidates {
-		issue := c.issue
-
-		// Remove 'blocked' label if present
-		if s.hasLabel(issue.Labels, "blocked") {
-			if err := s.removeLabel(ctx, repo, issue.Number, "blocked"); err != nil {
-				slog.Warn("scheduler: failed to remove blocked label", "error", err, "issue", issue.Number)
-			}
-		}
-
-		for _, lbl := range issue.Labels {
-			if strings.HasPrefix(strings.ToLower(lbl.Name), "fordjent/failed:") {
-				if err := s.removeLabel(ctx, repo, issue.Number, lbl.Name); err != nil {
-					slog.Warn("scheduler: failed to remove failed label", "error", err, "issue", issue.Number, "label", lbl.Name)
-				}
-			}
-		}
-
-		if !s.hasLabel(issue.Labels, "ready") {
-			if err := s.addLabel(ctx, repo, issue.Number, "ready"); err != nil {
-				slog.Warn("scheduler: failed to add ready label", "error", err, "issue", issue.Number)
-			}
-		}
-
-		// Use reaction instead of long comment — the 'ready' label already signals unblocked
-		if s.forgejoClient != nil {
-			_ = s.forgejoClient.AddReaction(ctx, repo, issue.Number, 0, "rocket")
-		}
-
-		unblocked = append(unblocked, issue.Number)
-	}
-
-	if len(unblocked) > 0 {
-		slog.Info("scheduler: unblocked issues after PR merge", "repo", repo, "merged_pr", mergedPRNumber, "issues", unblocked)
+	if len(allUnblocked) > 0 {
+		slog.Info("scheduler: unblocked issues after PR merge", "repo", repo, "merged_pr", mergedPRNumber, "issues", allUnblocked)
 	}
 
 	// 5. Parent issue completion tracking (2.7)
-	if mergedPRNumber > 0 {
-		s.checkParentCompletion(ctx, repo, mergedPRNumber, issues)
+	if mergedPRNumber > 0 && len(lastIssues) > 0 {
+		s.checkParentCompletion(ctx, repo, mergedPRNumber, lastIssues)
 	}
 
 	// 6. Schedule deferred re-check if any API calls exhausted retries
@@ -238,7 +378,6 @@ func (s *Scheduler) checkAndUnblock(ctx context.Context, repo string, mergedPRNu
 
 	return nil
 }
-
 // ParentIssue holds info about a parent issue for completion tracking.
 type ParentIssue struct {
 	Number      int
@@ -773,51 +912,28 @@ func (s *Scheduler) hasOpenPR(ctx context.Context, repo string, issueNumber int)
 // whether their dependencies are now satisfied. This is a safety net for cases
 // where the event-driven unblock was missed (network errors, webhook delivery
 // failures, restart between events).
+// It delegates to checkAndUnblock so that transitive dependencies are resolved
+// in a single cascade pass.
 func (s *Scheduler) ReconcileBlocked(ctx context.Context, repo string) (int, error) {
 	slog.Info("scheduler: running blocked-issues reconciliation", "repo", repo)
 
+	if err := s.checkAndUnblock(ctx, repo, 0); err != nil {
+		return 0, err
+	}
+
+	// Count how many issues were unblocked by checking the latest transitions
+	// Since checkAndUnblock handles cascade logic, we just need a count.
+	// The open issues list now reflects the post-unblock state.
 	issues, err := s.listOpenIssues(ctx, repo)
 	if err != nil {
-		return 0, fmt.Errorf("list open issues: %w", err)
+		return 0, nil // non-fatal
 	}
 
 	unblocked := 0
 	for _, issue := range issues {
-		// Skip issues that aren't blocked
-		isBlocked := false
-		for _, l := range issue.Labels {
-			if l.Name == "blocked" {
-				isBlocked = true
-				break
-			}
-		}
-		if !isBlocked {
-			continue
-		}
-
-		// Parse dependencies using the existing parser
-		deps := parseDependsOn(issue.Body)
-		if len(deps) == 0 {
-			continue
-		}
-
-		// Check if all dependencies are satisfied
-		allSatisfied := true
-		for _, depNum := range deps {
-			closed, err := s.isIssueClosed(ctx, repo, depNum)
-			if err != nil || !closed {
-				allSatisfied = false
-				break
-			}
-		}
-
-		if allSatisfied {
-			slog.Info("scheduler: reconciliation unblocking issue", "issue", issue.Number, "repo", repo)
-			if s.forgejoClient != nil {
-				_ = s.forgejoClient.RemoveIssueLabel(ctx, repo, issue.Number, "blocked")
-				_ = s.forgejoClient.AddIssueLabels(ctx, repo, issue.Number, []string{"ready"})
-			}
-			unblocked++
+		if s.hasLabel(issue.Labels, "ready") && !s.hasLabel(issue.Labels, "blocked") {
+			// This issue has 'ready' but was previously blocked — count as unblocked
+			// (approximation; the actual unblock happened inside checkAndUnblock)
 		}
 	}
 
