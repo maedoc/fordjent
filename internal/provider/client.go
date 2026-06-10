@@ -61,11 +61,27 @@ type Response struct {
 	StopReason string     `json:"stop_reason"`
 }
 
-// Usage tracks token consumption from the LLM API.
+// SystemPromptParts holds the stable and volatile parts of the system prompt.
+// Separating them allows the stable prefix to be cached by KV-cache providers
+// (NeuralWatt, OpenAI, Anthropic) while the volatile parts (turn counter, tool
+// descriptions) change each turn without invalidating the cache.
+type SystemPromptParts struct {
+	Stable    string // The main system prompt (cached across turns)
+	TurnInfo  string // Turn budget info (changes each turn)
+	ToolsDesc string // Tool descriptions (changes when tools are excluded)
+}
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	CachedTokens        int `json:"cached_tokens"`        // prompt tokens served from KV cache (NeuralWatt/OpenAI)
+	CacheReadTokens     int `json:"cache_read_tokens"`   // Anthropic-style cache read tokens
+	CacheCreationTokens int `json:"cache_creation_tokens"` // Anthropic-style cache creation tokens
+
+	// Extended metadata from provider-specific response fields
+	CacheSavingsUSD float64 `json:"cache_savings_usd"` // NeuralWatt: savings from caching
+	RequestCostUSD  float64 `json:"request_cost_usd"`  // NeuralWatt: actual cost of this request
+	EnergyJoules    float64 `json:"energy_joules"`     // NeuralWatt: energy consumed in joules
 }
 
 // Cost returns the estimated cost in USD for this usage.
@@ -85,10 +101,17 @@ type openAIRequest struct {
 }
 
 type messageJSON struct {
-	Role       string         `json:"role"`
-	Content    interface{}    `json:"content"`
-	ToolCalls  []toolCallJSON `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role        string              `json:"role"`
+	Content     interface{}         `json:"content"`
+	ToolCalls   []toolCallJSON      `json:"tool_calls,omitempty"`
+	ToolCallID  string              `json:"tool_call_id,omitempty"`
+	CacheControl *cacheControlJSON  `json:"cache_control,omitempty"`
+}
+
+// cacheControlJSON is the cache control hint for providers that support it.
+// OpenAI/NeuralWatt: {"type": "ephemeral"}, Anthropic: {"type": "ephemeral"}
+type cacheControlJSON struct {
+	Type string `json:"type"`
 }
 
 type toolJSON struct {
@@ -128,12 +151,41 @@ type openAIResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// Prompt tokens details — various providers put cached token counts here
+		PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details"`
 	} `json:"usage"`
+	// NeuralWatt-specific fields
+	Cost   *costResponse   `json:"cost,omitempty"`
+	Energy *energyResponse `json:"energy,omitempty"`
 	Error *struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 		Type    string `json:"type"`
 	} `json:"error,omitempty"`
+}
+
+// promptTokensDetails holds the cached token breakdown from various providers.
+// OpenAI: {"cached_tokens": N}, Anthropic: {"cache_read_tokens": N, "cache_creation_tokens": N}
+type promptTokensDetails struct {
+	CachedTokens        int `json:"cached_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
+}
+
+// costResponse holds NeuralWatt cost metadata.
+type costResponse struct {
+	RequestCostUSD     float64 `json:"request_cost_usd"`
+	CacheSavingsUSD    float64 `json:"cache_savings_usd"`
+	AllowanceRemaining float64 `json:"allowance_remaining_usd"`
+}
+
+// energyResponse holds NeuralWatt energy metadata.
+type energyResponse struct {
+	EnergyJoules float64 `json:"energy_joules"`
+	EnergyKWh    float64 `json:"energy_kwh"`
+	DurationSec  float64 `json:"duration_seconds"`
+	CarbonGCO2   float64 `json:"carbon_g_co2eq"`
+	GridID       string  `json:"grid_id"`
 }
 
 // Client is an LLM provider client using OpenAI-compatible API.
@@ -220,12 +272,17 @@ func (c *Client) Chat(ctx context.Context, systemPrompt string, messages []Messa
 func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []Message, tools []ToolDef) (*Response, *Usage, error) {
 	// Build request messages
 	var reqMessages []messageJSON
-	reqMessages = append(reqMessages, messageJSON{
-		Role:    "user",  // "user" role avoids Scaleway strictness about system messages
-		Content: systemPrompt,
-	})
 
-	for _, msg := range messages {
+	// System prompt: always include cache_control hint so the stable prefix gets cached.
+	// This is the biggest win — the system prompt is ~2-3K tokens and is 99% stable across turns.
+	sysMsg := messageJSON{
+		Role:    "user", // "user" role is used consistently for all injected messages across providers
+		Content: systemPrompt,
+		CacheControl: &cacheControlJSON{Type: "ephemeral"},
+	}
+	reqMessages = append(reqMessages, sysMsg)
+
+	for i, msg := range messages {
 		mj := messageJSON{
 			Role:       msg.Role,
 			Content:    msg.Content,
@@ -243,6 +300,15 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 				})
 			}
 		}
+
+		// Add cache_control hints on messages near the boundary of the likely cache window.
+		// The last few messages of each request are most likely to change; putting cache hints
+		// on earlier conversation messages helps providers that support prefix caching.
+		// Specifically: mark the last message before the new user input gets cache_control.
+		if i == len(messages)-1 && (mj.Role == "user" || mj.Role == "tool") {
+			mj.CacheControl = &cacheControlJSON{Type: "ephemeral"}
+		}
+
 		reqMessages = append(reqMessages, mj)
 	}
 
@@ -268,6 +334,33 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 	if len(reqTools) > 0 {
 		reqBody.Tools = reqTools
 	}
+
+	// Debug: log message structure for cache analysis
+	var msgSummary []string
+	for i, m := range reqMessages {
+		var contentLen int
+		switch v := m.Content.(type) {
+		case string:
+			contentLen = len(v)
+		default:
+			if m.Content != nil {
+				b, _ := json.Marshal(m.Content)
+				contentLen = len(b)
+			}
+		}
+		tcCount := len(m.ToolCalls)
+		var cc string
+		if m.CacheControl != nil {
+			cc = " [cc]"
+		}
+		summary := fmt.Sprintf("%d:%s(%d", i, m.Role, contentLen)
+		if tcCount > 0 {
+			summary += fmt.Sprintf(",%dTC", tcCount)
+		}
+		summary += ")" + cc
+		msgSummary = append(msgSummary, summary)
+	}
+	fmt.Printf("LLM-DEBUG msg_count=%d struct=%s tools=%d\n", len(reqMessages), strings.Join(msgSummary, " "), len(reqTools))
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -342,6 +435,22 @@ func (c *Client) chatOnce(ctx context.Context, systemPrompt string, messages []M
 		PromptTokens:     openaiResp.Usage.PromptTokens,
 		CompletionTokens: openaiResp.Usage.CompletionTokens,
 		TotalTokens:      openaiResp.Usage.TotalTokens,
+	}
+
+	// Extract cached token counts from prompt_tokens_details
+	if d := openaiResp.Usage.PromptTokensDetails; d != nil {
+		usage.CachedTokens = d.CachedTokens
+		usage.CacheReadTokens = d.CacheReadTokens
+		usage.CacheCreationTokens = d.CacheCreationTokens
+	}
+
+	// Extract NeuralWatt cost/energy metadata
+	if c := openaiResp.Cost; c != nil {
+		usage.RequestCostUSD = c.RequestCostUSD
+		usage.CacheSavingsUSD = c.CacheSavingsUSD
+	}
+	if e := openaiResp.Energy; e != nil {
+		usage.EnergyJoules = e.EnergyJoules
 	}
 
 	return result, usage, nil
