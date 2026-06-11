@@ -885,23 +885,6 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		return
 	}
 
-	// Role gate: require a role tag or label before creating a session
-	// Skip for green-light events (human already approved the issue via plan-approved/ready/implementing label).
-	if m.cfg.Agent.RequireRoleTag && evt.Type == event.IssueOpened && evt.IssueNumber > 0 && evt.Action != "green_light" {
-		issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
-		if err != nil || issue == nil {
-			_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, buildRoleGuidance())
-			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
-			return
-		}
-		role := detectRoleFromIssue(issue)
-		if role == "" {
-			_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.IssueNumber, buildRoleGuidance())
-			_ = m.forgejoClient.AddIssueLabels(ctx, evt.Repository, evt.IssueNumber, []string{"needs-role"})
-			return
-		}
-	}
-
 	// PR review fix: when a human comments on an open PR requesting changes,
 	// create a separate implementer session so the agent has write tools.
 	// The existing reviewer session (read-only) may still be running — we
