@@ -29,11 +29,11 @@ agent:
   max_turns_implementer: 50
   max_turns_reviewer: 20
   role_providers:
-    pm: local-gpu
-    reviewer: local-gpu
-    implementer: local-gpu
-    tester: local-gpu
-    devops: local-gpu
+    pm: neuralwatt-qwen
+    reviewer: neuralwatt-qwen
+    implementer: neuralwatt-qwen
+    tester: neuralwatt-qwen
+    devops: neuralwatt-qwen
   fallback_provider: local-gpu
   commit_prefix: '[agent-automation]'
   context_window: 131072
@@ -64,6 +64,18 @@ sandbox:
   violation_comment_threshold: 3
   allowed_write_dirs: []
 providers:
+- name: neuralwatt-qwen
+  api_base: https://api.neuralwatt.com/v1
+  api_key: ${NEURALWATT_API_KEY}
+  model: qwen3.6-35b
+  max_tokens: 16384
+  request_timeout: 120s
+  max_retries: 3
+  retry_base_delay: 2s
+  retry_max_delay: 30s
+  max_concurrent_llm_calls: 4
+  cost_per_1m_input_tokens: 0
+  cost_per_1m_output_tokens: 0
 - name: local-gpu
   api_base: http://172.18.0.1:8181/v1
   model: gemma-4-12b-it-UD-Q5_K_XL.gguf
@@ -120,7 +132,7 @@ database:
 scanner:
   enabled: true
   interval: 5m
-  repo: fjadmin/stress-test
+  repo: fjadmin/sklearn-bench
 auto_register:
   enabled: true
   webhook_url: ''
