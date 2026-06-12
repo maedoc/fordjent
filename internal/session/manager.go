@@ -1149,13 +1149,19 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			"repo", sess.Repository, "issue", sess.IssueNumber)
 	}
 
+	// Ralph sessions must use implementer role to write code on the PR branch.
+	if tool.IsRalphSession(sess.Key) {
+		role = "implementer"
+		slog.Info("ralph session: using implementer role", "session_key", sess.Key, "pr", sess.PRNumber)
+	}
+
 	// PR review fix: when a human commented on an open PR requesting changes,
 	// the agent should be an implementer (write tools) not a reviewer (read-only).
 	// This allows the agent to actually make the requested fixes.
 	if sess.IsPRReviewFix {
 		role = "implementer"
 		slog.Info("PR review fix session: using implementer role", "session_key", sess.Key, "pr", sess.PRNumber)
-	} else if sess.PRNumber > 0 && (role == "" || role == "implementer") {
+	} else if sess.PRNumber > 0 && !tool.IsRalphSession(sess.Key) && (role == "" || role == "implementer") {
 		role = "reviewer"
 	}
 
@@ -1266,9 +1272,15 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						}
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
+					if tool.IsRalphSession(sess.Key) {
+						m.lc.CompleteRalphIteration(ctx, sess.Key, "blocked", "")
+					}
 					writeShutdownCheckpoint(sess.WorkDir, "failed", agt.LastToolName())
 				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime), m.roleToken(role))
+					if tool.IsRalphSession(sess.Key) {
+						m.lc.CompleteRalphIteration(ctx, sess.Key, "failed_turns", "")
+					}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				} else {
 					slog.Error("agent processing failed",
@@ -1277,6 +1289,9 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						"session_key", sess.Key,
 					)
 					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err, time.Since(sess.StartTime), m.roleToken(role))
+					if tool.IsRalphSession(sess.Key) {
+						m.lc.CompleteRalphIteration(ctx, sess.Key, "failed_error", "")
+					}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				}
 				// Revert claim: if this session claimed a ready issue, release it back to ready
@@ -1292,6 +1307,9 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					}
 				}
 				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime), m.roleToken(role), m.cfg.FordjentBaseURL())
+				if tool.IsRalphSession(sess.Key) {
+					m.lc.CompleteRalphIteration(ctx, sess.Key, "completed", headSHA)
+				}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				writeShutdownCheckpoint(sess.WorkDir, "completed", agt.LastToolName())
 				_ = m.store.SetCompletedAt(sess.Key, time.Now().UTC())

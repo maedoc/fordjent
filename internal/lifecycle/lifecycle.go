@@ -590,3 +590,15 @@ func (l *Lifecycle) GetLastNRalphIterations(ctx context.Context, prKey string, n
 	}
 	return records, rows.Err()
 }
+
+// CompleteRalphIteration updates the status of a Ralph iteration record.
+// Called when a Ralph session finishes (success, failure, or timeout).
+func (l *Lifecycle) CompleteRalphIteration(ctx context.Context, sessionKey, status, committedSHA string) error {
+	if l.db == nil {
+		return nil
+	}
+	_, err := l.db.ExecContext(ctx,
+		`UPDATE ralph_sessions SET status = ?, committed_sha = ?, completed_at = CURRENT_TIMESTAMP WHERE session_key = ?`,
+		status, committedSHA, sessionKey)
+	return err
+}

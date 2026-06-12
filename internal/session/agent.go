@@ -252,6 +252,32 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		}
 	}
 
+	// Step 4b: Ralph iteration sessions — checkout the PR branch so writes land
+	// on the feature branch, not main. Inject context telling the agent to commit
+	// directly to this branch (no new PR).
+	if _, ralphPR, _, ok := tool.ParseRalphSessionKey(a.sess.Key); ok {
+		pr, err := a.forgejo.GetPR(ctx, evt.Repository, ralphPR)
+		if err == nil && pr.Head.Ref != "" {
+			repoDir := a.sess.RepoDir
+			fetchCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin", pr.Head.Ref)
+			if _, err := fetchCmd.CombinedOutput(); err != nil {
+				slog.Warn("ralph: failed to fetch PR branch", "branch", pr.Head.Ref, "error", err)
+			}
+			checkoutCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "checkout", "-B", pr.Head.Ref, "origin/"+pr.Head.Ref)
+			if _, err := checkoutCmd.CombinedOutput(); err != nil {
+				slog.Warn("ralph: failed to checkout PR branch", "branch", pr.Head.Ref, "error", err)
+			}
+			slog.Info("ralph: checked out PR branch", "branch", pr.Head.Ref, "session_key", a.sess.Key)
+			contextMessages = append(contextMessages, provider.Message{
+				Role: "user",
+				Content: fmt.Sprintf("[RALPH ITERATION] You are refining PR #%d '%s' on branch '%s'. Rules:\n1. MINIMAL FIXES ONLY — address the specific bug/issue in this PR. Do NOT refactor or rewrite unrelated code.\n2. Call ralph_update after each stage (awareness → act → assert → append).\n3. Once you reach 'append', your changes will auto-commit and push.\n4. Do NOT create a new PR.\n5. Complete in ≤10 turns.",
+					pr.Number, pr.Title, pr.Head.Ref),
+			})
+		} else if err != nil {
+			slog.Warn("ralph: failed to get PR details", "pr", ralphPR, "error", err)
+		}
+	}
+
 	// Step 5: Build the user message from the event
 	userMessage := a.eventToUserMessage(evt)
 
@@ -506,6 +532,15 @@ Update the issue comment with your reflection, then continue working.`,
 				a.addReaction(ctx, evt, "white_check_mark")
 				return nil
 			}
+		}
+
+		// Ralph completion: if the last tool was ralph_update and it signaled
+		// completion, end the session gracefully so extra turns aren't wasted.
+		if lastToolName == "ralph_update" && strings.Contains(lastToolOutput, "***RALPH ITERATION COMPLETE***") {
+			slog.Info("ralph iteration complete, ending session early",
+				"session_key", a.sess.Key, "turn", turn, "pr", a.ralphPRNum, "iteration", a.ralphIterNum)
+			a.addReaction(ctx, evt, "white_check_mark")
+			return nil
 		}
 
 		sig := buildTurnSignature(result.Response.ToolCalls)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -93,6 +94,37 @@ func (t *ralphUpdateTool) Execute(ctx context.Context, args json.RawMessage) (st
 	// If this is the append stage, trigger auto-commit
 	if params.Stage == "append" && t.tracker.IsComplete() {
 		resp += "\n\nAll 4 stages complete. Auto-commit will follow."
+
+		// Check for uncommitted changes before attempting commit
+		statusCmd := exec.Command("git", "-C", t.repoDir, "status", "--porcelain")
+		statusOut, _ := statusCmd.CombinedOutput()
+		if len(strings.TrimSpace(string(statusOut))) == 0 {
+			resp += "\n[Auto-commit: working tree clean — nothing to commit]"
+		} else {
+			// Auto-commit changes to the PR branch
+			addCmd := exec.Command("git", "-C", t.repoDir, "add", "-A")
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				slog.Warn("ralph auto-commit: git add failed", "error", err, "output", string(out), "repoDir", t.repoDir)
+				resp += "\n[Auto-commit: git add failed — please commit manually using git tool]"
+			} else {
+				commitCmd := exec.Command("git", "-C", t.repoDir, "commit", "-m", fmt.Sprintf("ralph: iteration %d changes", t.iterNum))
+				if out, err := commitCmd.CombinedOutput(); err != nil {
+					slog.Warn("ralph auto-commit: git commit failed", "error", err, "output", string(out))
+					resp += "\n[Auto-commit: git commit failed — please retry using git tool]"
+				} else {
+					pushCmd := exec.Command("git", "-C", t.repoDir, "push", "-u", "origin", "HEAD")
+					if out, err := pushCmd.CombinedOutput(); err != nil {
+						slog.Warn("ralph auto-commit: git push failed", "error", err, "output", string(out))
+						resp += "\n[Auto-commit: committed but push failed — please push using git tool]"
+					} else {
+						resp += "\n[Auto-commit: committed and pushed successfully]"
+					}
+				}
+			}
+		}
+
+		// Signal session completion so the agent loop can exit early
+		resp += "\n\n***RALPH ITERATION COMPLETE*** The fix has been committed and pushed. No further action needed."
 	}
 
 	return resp, nil
