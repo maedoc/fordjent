@@ -45,21 +45,26 @@ EXPOSE 8080
 ENTRYPOINT ["entrypoint.sh"]
 
 # =============================================================================
-# Full target: includes Go toolchain for verify gates (~320 MB)
-# Uses Alpine + build-base instead of Debian + build-essential.
-# Supports go build, go test, go vet, and CGO (for sqlite etc).
+# Full target: includes Go toolchain + Python scientific stack (~450 MB)
+# Uses Debian bookworm for glibc compatibility with sklearn/scipy wheels.
+# Supports go build/test, Python ML packages, and verify gates.
 # This is the default target.
 # =============================================================================
-FROM golang:1.25-alpine AS full
+FROM golang:1.25-bookworm AS full
 
-RUN apk add --no-cache build-base git ca-certificates curl bubblewrap python3 py3-pip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git ca-certificates curl bubblewrap \
+    python3 python3-pip python3-venv python3-dev && rm -rf /var/lib/apt/lists/*
 
 RUN bwrap --version
 
 # golangci-lint — only in the full image where verify gates run
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.64.8
 
-RUN adduser -D -h /var/lib/fordjent -s /bin/sh fordjent \
+# Pre-install scientific Python stack (sklearn, scipy have pre-built wheels on Debian)
+RUN pip3 install --break-system-packages numpy scipy scikit-learn matplotlib pytest
+
+RUN useradd -m -d /var/lib/fordjent -s /bin/sh fordjent \
     && mkdir -p /var/lib/fordjent/work /var/cache/go-build /var/cache/go-mod \
     && chown -R fordjent:fordjent /var/lib/fordjent /var/cache/go-build /var/cache/go-mod
 

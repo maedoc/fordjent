@@ -107,7 +107,8 @@ func (t *ralphUpdateTool) Execute(ctx context.Context, args json.RawMessage) (st
 				slog.Warn("ralph auto-commit: git add failed", "error", err, "output", string(out), "repoDir", t.repoDir)
 				resp += "\n[Auto-commit: git add failed — please commit manually using git tool]"
 			} else {
-				commitCmd := exec.Command("git", "-C", t.repoDir, "commit", "-m", fmt.Sprintf("ralph: iteration %d changes", t.iterNum))
+				commitMsg := t.buildCommitMessage()
+				commitCmd := exec.Command("git", "-C", t.repoDir, "commit", "-m", commitMsg)
 				if out, err := commitCmd.CombinedOutput(); err != nil {
 					slog.Warn("ralph auto-commit: git commit failed", "error", err, "output", string(out))
 					resp += "\n[Auto-commit: git commit failed — please retry using git tool]"
@@ -128,6 +129,38 @@ func (t *ralphUpdateTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	return resp, nil
+}
+
+// buildCommitMessage constructs a git commit message that includes test results
+// from the assert stage, enabling future iterations to learn from prior outcomes.
+func (t *ralphUpdateTool) buildCommitMessage() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ralph: iteration %d changes", t.iterNum)
+
+	stageMsgs := t.tracker.StageMessages()
+
+	// Include awareness summary (what was understood)
+	if msg, ok := stageMsgs["awareness"]; ok && msg != "" {
+		b.WriteString("\n\n## Awareness\n")
+		b.WriteString(msg)
+	}
+
+	// Include act summary (what was changed)
+	if msg, ok := stageMsgs["act"]; ok && msg != "" {
+		b.WriteString("\n\n## Act\n")
+		b.WriteString(msg)
+	}
+
+	// Include assert summary (test results — this is the learning signal)
+	if msg, ok := stageMsgs["assert"]; ok && msg != "" {
+		b.WriteString("\n\n## Assert (Test Results)\n")
+		b.WriteString(msg)
+	} else {
+		b.WriteString("\n\n## Assert\nNo tests were run in this iteration.")
+	}
+
+	b.WriteString("\n")
+	return b.String()
 }
 
 // ralphProgressTool writes progress files for ralph iterations.

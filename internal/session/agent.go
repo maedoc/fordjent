@@ -270,7 +270,7 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 			slog.Info("ralph: checked out PR branch", "branch", pr.Head.Ref, "session_key", a.sess.Key)
 			contextMessages = append(contextMessages, provider.Message{
 				Role: "user",
-				Content: fmt.Sprintf("[RALPH ITERATION] You are refining PR #%d '%s' on branch '%s'. Rules:\n1. MINIMAL FIXES ONLY — address the specific bug/issue in this PR. Do NOT refactor or rewrite unrelated code.\n2. Call ralph_update after each stage (awareness → act → assert → append).\n3. Once you reach 'append', your changes will auto-commit and push.\n4. Do NOT create a new PR.\n5. Complete in ≤10 turns.",
+				Content: fmt.Sprintf("[RALPH ITERATION] You are refining PR #%d '%s' on branch '%s'. Rules:\n1. MINIMAL FIXES ONLY — address the specific bug/issue in this PR. Do NOT refactor or rewrite unrelated code.\n2. Call ralph_update after each stage (awareness → act → assert → append).\n3. ASSERT stage: You MUST run the project test suite via the bash tool. Detect the test framework (pytest / go test / npm test / cargo test) and run it. Include pass/fail counts and any accuracy metrics in your assert message.\n4. Once you reach 'append', your changes will auto-commit and push. Test results from assert are automatically recorded in the commit message for future iterations to learn from.\n5. Do NOT create a new PR.\n6. Complete in ≤10 turns.",
 					pr.Number, pr.Title, pr.Head.Ref),
 			})
 		} else if err != nil {

@@ -591,6 +591,53 @@ func (l *Lifecycle) GetLastNRalphIterations(ctx context.Context, prKey string, n
 	return records, rows.Err()
 }
 
+// CleanupInterruptedRalphSessions marks all 'running' Ralph sessions as
+// 'interrupted'. This MUST be called once at startup before the Ralph
+// scheduler begins, because any 'running' session from a previous process
+// lifecycle is guaranteed to be dead (the in-memory session was lost on
+// restart / crash).
+//
+// Root cause: RecordRalphIteration writes 'running' at spawn time.
+// CompleteRalphIteration updates the status only when runSession finishes.
+// If the process dies mid-session (SIGKILL, OOM, container restart), the
+// status stays 'running' forever, blocking future iterations.
+func (l *Lifecycle) CleanupInterruptedRalphSessions(ctx context.Context) error {
+	if l.db == nil {
+		return nil
+	}
+	res, err := l.db.ExecContext(ctx,
+		`UPDATE ralph_sessions SET status = 'interrupted' WHERE status = 'running'`)
+	if err != nil {
+		return fmt.Errorf("cleanup interrupted ralph sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		slog.Info("ralph startup cleanup: marked interrupted sessions", "count", n)
+	}
+	return nil
+}
+
+// GetAllRalphPRKeys returns all unique PR keys that have any Ralph iteration
+// recorded in the lifecycle database.
+func (l *Lifecycle) GetAllRalphPRKeys(ctx context.Context) ([]string, error) {
+	if l.db == nil {
+		return nil, nil
+	}
+	rows, err := l.db.QueryContext(ctx, `SELECT DISTINCT pr_key FROM ralph_sessions`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err == nil {
+			keys = append(keys, k)
+		}
+	}
+	return keys, rows.Err()
+}
+
 // CompleteRalphIteration updates the status of a Ralph iteration record.
 // Called when a Ralph session finishes (success, failure, or timeout).
 func (l *Lifecycle) CompleteRalphIteration(ctx context.Context, sessionKey, status, committedSHA string) error {

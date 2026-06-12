@@ -192,6 +192,15 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 		return nil, fmt.Errorf("init lifecycle tracker: %w", err)
 	}
 
+	// Mark any 'running' Ralph sessions from previous process lifecycles as
+	// 'interrupted'. Without this, container restarts leave stale 'running'
+	// records that block the scheduler from spawning new iterations.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := lc.CleanupInterruptedRalphSessions(cleanupCtx); err != nil {
+		slog.Warn("ralph startup cleanup failed", "error", err)
+	}
+	cleanupCancel()
+
 	m := &Manager{
 		cfg:              cfg,
 		bus:              bus,
@@ -2115,6 +2124,37 @@ func (m *Manager) reposWithRalphLabels() []string {
 		}
 	}
 	m.mu.RUnlock()
+	// Also check repos from Ralph lifecycle records (catches repos with
+	// completed iterations that need follow-up)
+	if m.lc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		recs, err := m.lc.ListStalledRalphSessions(ctx)
+		if err == nil {
+			for _, prKey := range recs {
+				if idx := strings.Index(prKey, "/pulls/"); idx > 0 {
+					repo := prKey[:idx]
+					if !seen[repo] {
+						repos = append(repos, repo)
+						seen[repo] = true
+					}
+				}
+			}
+		}
+		// Also scan repos with any Ralph history
+		allRecs, err := m.lc.GetAllRalphPRKeys(ctx)
+		if err == nil {
+			for _, prKey := range allRecs {
+				if idx := strings.Index(prKey, "/pulls/"); idx > 0 {
+					repo := prKey[:idx]
+					if !seen[repo] {
+						repos = append(repos, repo)
+						seen[repo] = true
+					}
+				}
+			}
+		}
+	}
 	return repos
 }
 
@@ -2131,13 +2171,18 @@ func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
 		prKey := fmt.Sprintf("%s/pulls/%d", repo, pr.Number)
 		slog.Info("ralph scan: checking PR", "pr", pr.Number, "prKey", prKey)
 
-		// Check if an iteration is already active
+		// Check if an iteration is already active (and not completed)
 		m.mu.RLock()
 		active := false
 		for k := range m.sessions {
 			if strings.HasPrefix(k, prKey+"-ralph-i") {
-				active = true
-				break
+				// If shutdown.json says completed/failed, session is done
+				workDir := filepath.Join(m.cfg.Agent.WorkDir, strings.ReplaceAll(k, "/", string(filepath.Separator)))
+				cp := readShutdownCheckpoint(workDir)
+				if cp == nil || cp.State == "" { // still running
+					active = true
+					break
+				}
 			}
 		}
 		m.mu.RUnlock()
