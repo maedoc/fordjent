@@ -1029,6 +1029,10 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 
 			// Extract scope prefixes from issue title/body for write_file restriction
 			a.scopePrefixes = extractScopePrefixes(issue.Title + " " + issue.Body)
+			// PM and reviewer roles need openspec/ access for spec creation/review
+			if a.role == "pm" || a.role == "reviewer" {
+				a.scopePrefixes = append(a.scopePrefixes, "openspec/")
+			}
 			if len(a.scopePrefixes) > 0 {
 				a.tools.SetWriteScope(a.scopePrefixes)
 				a.tools.SetPRScope(a.scopePrefixes)
