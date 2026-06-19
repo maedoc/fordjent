@@ -106,8 +106,15 @@ func TestIsStale_AutoRebaseConflicts(t *testing.T) {
 func setupRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := exec.Command(gitPath, "-C", dir, "init").Run(); err != nil {
-		t.Fatalf("git init: %v", err)
+	// Use -b main so the default branch is 'main' (git 2.28+); on older git,
+	// the init succeeds without -b and the branch defaults to master, which
+	// the update-ref below would silently fail to resolve.
+	if err := exec.Command(gitPath, "-C", dir, "init", "-b", "main").Run(); err != nil {
+		if err := exec.Command(gitPath, "-C", dir, "init").Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+		// Rename master -> main for older git versions that don't support -b.
+		exec.Command(gitPath, "-C", dir, "branch", "-m", "main").Run()
 	}
 	writeFile(t, dir, "main.go", "package main\n")
 	exec.Command(gitPath, "-C", dir, "add", "main.go").Run()

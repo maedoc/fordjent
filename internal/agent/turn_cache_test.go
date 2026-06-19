@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/fordjent/fordjent/internal/config"
@@ -54,7 +55,10 @@ func TestTurnExecutor_SystemPromptStableAcrossTurns(t *testing.T) {
 	mockLLM := &cacheRecordingCompleter{}
 	tr := tool.NewRegistry()
 	tr.Register(&mockToolForCache{name: "read_file", desc: "Read a file"})
-	ct := cost.NewTracker(t.TempDir())
+	ct, cerr := cost.NewTracker(filepath.Join(t.TempDir(), "costs.db"))
+	if cerr != nil {
+		t.Fatalf("cost.NewTracker: %v", cerr)
+	}
 
 	te := NewTurnExecutor(cfg, mockLLM, tr, ct, "test/session", "org/repo", 50, "implementer")
 
@@ -108,7 +112,10 @@ func TestTurnExecutor_ToolsStableWhenNotExcluded(t *testing.T) {
 	tr := tool.NewRegistry()
 	tr.Register(&mockToolForCache{name: "read_file", desc: "Read a file"})
 	tr.Register(&mockToolForCache{name: "write_file", desc: "Write a file"})
-	ct := cost.NewTracker(t.TempDir())
+	ct, cerr := cost.NewTracker(filepath.Join(t.TempDir(), "costs.db"))
+	if cerr != nil {
+		t.Fatalf("cost.NewTracker: %v", cerr)
+	}
 
 	te := NewTurnExecutor(cfg, mockLLM, tr, ct, "test/session", "org/repo", 50, "implementer")
 
@@ -149,7 +156,10 @@ func TestTurnExecutor_EnergyLoggedInTurnResult(t *testing.T) {
 	mockLLM := &cacheRecordingCompleter{}
 	tr := tool.NewRegistry()
 	tr.Register(&mockToolForCache{name: "read_file", desc: "Read a file"})
-	ct := cost.NewTracker(t.TempDir())
+	ct, cerr := cost.NewTracker(filepath.Join(t.TempDir(), "costs.db"))
+	if cerr != nil {
+		t.Fatalf("cost.NewTracker: %v", cerr)
+	}
 
 	te := NewTurnExecutor(cfg, mockLLM, tr, ct, "test/session", "org/repo", 50, "implementer")
 

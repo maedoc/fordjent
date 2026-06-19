@@ -215,6 +215,30 @@ func TestGitToolEmptyCommand(t *testing.T) {
 	}
 }
 
+// TestGitToolToleratesSubcommandAsKey guards against the common LLM mistake
+// of passing the git subcommand as the JSON key (e.g. {"log": "--oneline -5"})
+// instead of under "command". This previously returned "empty command" and
+// caused infinite loops (see sklearn-bench issue #34 memory.jsonl).
+func TestGitToolToleratesSubcommandAsKey(t *testing.T) {
+	dir := setupTestRepo(t)
+	tool := NewGitTool(&testSessionInfo{repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
+
+	// {"log": "--oneline -5"} should be interpreted as "log --oneline -5"
+	// (it may error if the dir isn't a git repo yet, but must NOT return "empty command")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"log": "--oneline -5"}`))
+	if err != nil && strings.Contains(err.Error(), "empty command") {
+		t.Fatalf("git tool returned 'empty command' for {\"log\": ...} — tolerance fix regressed: %v", err)
+	}
+	_ = result
+
+	// {"status": ""} should be interpreted as "status" (the dir was git-init'd by setupTestRepo via NewGitTool? no — but should not be 'empty command')
+	result2, err2 := tool.Execute(context.Background(), json.RawMessage(`{"status": ""}`))
+	if err2 != nil && strings.Contains(err2.Error(), "empty command") {
+		t.Fatalf("git tool returned 'empty command' for {\"status\": ...} — tolerance fix regressed: %v", err2)
+	}
+	_ = result2
+}
+
 func TestReadFileTraversalBlocked(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0644)

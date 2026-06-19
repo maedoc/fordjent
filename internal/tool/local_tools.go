@@ -684,13 +684,39 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 
+	// Tolerate the common LLM mistake of passing the git subcommand as the
+	// JSON key instead of under "command" (e.g. {"log": "--oneline -10"} or
+	// {"status": ""}). If "command" is empty, scan for any other string-valued
+	// field and treat key+value as the command. This prevents infinite loops
+	// where the agent repeatedly gets "empty command" and never recovers.
+	cmdStr := params.Command
+	if strings.TrimSpace(cmdStr) == "" {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(args, &raw); err == nil {
+			for k, v := range raw {
+				if k == "command" {
+					continue
+				}
+				var sv string
+				if json.Unmarshal(v, &sv) == nil {
+					sub := strings.TrimSpace(sv)
+					if sub == "" {
+						cmdStr = k // e.g. {"status": ""} -> "status"
+					} else {
+						cmdStr = k + " " + sub // e.g. {"log": "--oneline -10"} -> "log --oneline -10"
+					}
+					break
+				}
+			}
+		}
+	}
+
 	// Security: block all push commands — agent must use forgejo_create_pr tool
-	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "push") ||
-		strings.HasPrefix(strings.TrimSpace(strings.ToLower(params.Command)), "git push") {
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(cmdStr)), "push") ||
+		strings.HasPrefix(strings.TrimSpace(strings.ToLower(cmdStr)), "git push") {
 		return "", fmt.Errorf("git push is not allowed. Use the forgejo_create_pr tool to submit changes via pull request")
 	}
 
-	cmdStr := params.Command
 	cmdLower := strings.TrimSpace(strings.ToLower(cmdStr))
 	isCommit := strings.HasPrefix(cmdLower, "commit") || strings.HasPrefix(cmdLower, "git commit")
 
