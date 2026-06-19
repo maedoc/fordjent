@@ -134,16 +134,8 @@ database:
 scanner:
   enabled: true
   interval: 5m
-  repo: fjadmin/sklearn-bench
+  repo: fjadmin/runner-test
 auto_register:
   enabled: true
   webhook_url: ''
 log_level: info
-
-ralph:
-  enabled: true
-  max_iterations_per_pr: 15
-  turn_budget_per_iteration: 20
-  cooldown_between_iterations: 2m
-  nudge_threshold_pct: 0.30
-  auto_ralph_on_yolo: true
