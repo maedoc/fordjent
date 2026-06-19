@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -677,12 +676,6 @@ func (c *Client) EnsureLabels(ctx context.Context, repo string) error {
 		{"role:reviewer", "fbca04"},
 		{"role:devops", "0e8a16"},
 		{"role:tester", "d93f0b"},
-		// Ralph labels — iterative refinement mode
-		{"ralph", "207de5"},
-		{"ralph-completed", "0e8a16"},
-		{"fordjent/failed:ralph-exceeded", "b60205"},
-		{"fordjent/failed:ralph-stalled", "b60205"},
-		{"fordjent/failed:ralph-budget", "b60205"},
 	}
 
 	// Fetch existing labels first to avoid creating duplicates
@@ -832,29 +825,6 @@ func (c *Client) ListPRs(ctx context.Context, repo, state string) ([]PullRequest
 	var prs []PullRequest
 	if err := json.Unmarshal([]byte(result), &prs); err != nil {
 		return nil, fmt.Errorf("decode PRs: %w", err)
-	}
-	return prs, nil
-}
-
-// ListOpenPRsByLabel lists open pull requests that have the specified label.
-// Used by the ralph scheduler to find PRs with the 'ralph' label.
-func (c *Client) ListOpenPRsByLabel(ctx context.Context, repo, label string) ([]PullRequest, error) {
-	// Forgejo expects label ID (integer), not name. Resolve the label name to ID.
-	labelID, err := c.GetLabelID(ctx, repo, label)
-	if err != nil {
-		return nil, fmt.Errorf("resolve label %q: %w", label, err)
-	}
-	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls")
-	query := url.Values{}
-	query.Set("state", "open")
-	query.Set("labels", strconv.Itoa(labelID))
-	result, err := c.doRequest(ctx, http.MethodGet, apiPath+"?"+query.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	var prs []PullRequest
-	if err := json.Unmarshal([]byte(result), &prs); err != nil {
-		return nil, fmt.Errorf("decode PRs by label: %w", err)
 	}
 	return prs, nil
 }

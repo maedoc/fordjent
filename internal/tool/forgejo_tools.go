@@ -534,7 +534,7 @@ func (t *forgejoCreatePRTool) SetScopePkgs(pkgs []string) {
 func (t *forgejoCreatePRTool) Name() string { return "forgejo_create_pr" }
 
 func (t *forgejoCreatePRTool) Description() string {
-	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead. IMPORTANT: This tool will verify that go build and go test pass before creating the PR. If tests fail, the PR will be blocked and you must fix the failures. The PR description body MUST include three sections: 1) '## Changes' listing every file modified and a one-line summary of what changed, 2) '## Testing' describing how the changes were verified (unit tests, manual checks, build steps), 3) '## Related' containing 'Closes #{issue number}' to link the PR to its originating issue and 'Depends on: #{parent}' if this work depends on another issue/PR."
+	return "Create a pull request from a head branch to a base branch. Use ONLY for submitting NEW code changes. If you are responding to a review on an existing PR, do NOT call this tool — push to the existing branch instead. IMPORTANT: This tool verifies that the project builds and tests pass BEFORE creating the PR. For Go: go build + go test must pass. For Python: pytest must pass (skipped only if pytest is missing or there are no tests). If tests fail, the PR will be BLOCKED — fix the failures before retrying. The PR description body MUST include three sections: 1) '## Changes' listing every file modified and a one-line summary of what changed, 2) '## Testing' describing how the changes were verified (unit tests, manual checks, build steps), 3) '## Related' containing 'Closes #{issue number}' to link the PR to its originating issue and 'Depends on: #{parent}' if this work depends on another issue/PR."
 }
 
 func (t *forgejoCreatePRTool) Parameters() map[string]interface{} {
@@ -733,12 +733,23 @@ func (t *forgejoCreatePRTool) Execute(ctx context.Context, args json.RawMessage)
 				}
 			}
 		case "python":
-			// Python: run pytest or unittest
+			// Python: run pytest. Test execution is MANDATORY before PR creation
+			// (lifted from the ralph 'assert' stage into the regular build gate).
+			// If pytest is unavailable or no tests exist, the gate is skipped with a warning —
+			// but actual test failures block the PR just like Go test failures do.
 			testCmd := exec.CommandContext(ctx, "python3", "-m", "pytest", "-x", "--tb=short")
 			testCmd.Dir = t.repoDir
-			if testOut, testErr := testCmd.CombinedOutput(); testErr != nil {
-				slog.Info("create_pr: python pytest failed (non-blocking)", "output", string(testOut), "error", testErr)
-				// Don't block PR creation for Python test failures — many projects lack pytest
+			testOut, testErr := testCmd.CombinedOutput()
+			outStr := strings.TrimSpace(string(testOut))
+			if testErr != nil {
+				// Distinguish "no pytest / no tests" from real test failures.
+				// "No module named pytest" or "no tests ran" → non-blocking (project has no tests yet).
+				if strings.Contains(outStr, "No module named pytest") ||
+					strings.Contains(outStr, "no tests ran") {
+					slog.Info("create_pr: python pytest not available or no tests", "output", outStr)
+				} else {
+					return "", fmt.Errorf("python pytest failed — all tests must pass before creating PR:\n%s", outStr)
+				}
 			}
 		default:
 			// For unknown languages, skip build/test gate

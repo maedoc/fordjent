@@ -17,11 +17,6 @@ import (
 	"github.com/fordjent/fordjent/internal/sandbox"
 )
 
-// ralphGuardChecker is implemented by ralph.Guard to check spec path immutability.
-type ralphGuardChecker interface {
-	IsSpecPath(p string) bool
-}
-
 // bashTool executes shell commands in the repository root directory.
 type bashTool struct {
 	repoDir       string
@@ -500,9 +495,6 @@ type writeFileTool struct {
 	commitPrefix    string
 	dryRun          bool
 	allowedPrefixes []string // if non-empty, paths must start with one of these prefixes relative to repo root
-	ralphGuard      ralphGuardChecker // if set, block writes to spec paths during ralph
-	isRalphSession  bool              // true when this tool is in a ralph session
-	isReviewerSync  bool              // true when reviewer is syncing spec TODOs with ralph-completed label
 }
 
 func NewWriteFileTool(info SessionInfo, cfg AgentConfig) *writeFileTool {
@@ -517,14 +509,6 @@ func NewWriteFileTool(info SessionInfo, cfg AgentConfig) *writeFileTool {
 // Each prefix is relative to the repo root (e.g., "openspec/changes/").
 func (t *writeFileTool) SetAllowedPrefixes(prefixes []string) {
 	t.allowedPrefixes = prefixes
-}
-
-// SetRalphGuard enables spec immutability enforcement during ralph sessions.
-// When set, writes to spec paths (openspec/**/spec.md) are blocked.
-func (t *writeFileTool) SetRalphGuard(guard ralphGuardChecker, isRalph, isReviewerSync bool) {
-	t.ralphGuard = guard
-	t.isRalphSession = isRalph
-	t.isReviewerSync = isReviewerSync
 }
 
 func (t *writeFileTool) Name() string { return "write_file" }
@@ -574,14 +558,6 @@ func (t *writeFileTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return fmt.Sprintf("[dry-run] Would write %d bytes to %s", len(params.Content), params.Path), nil
 	}
 
-	// Ralph spec immutability: block writes to spec paths during ralph sessions.
-	// Exception: reviewer sync (ralph-completed label) is allowed to check spec TODOs.
-	if t.ralphGuard != nil && t.isRalphSession && !t.isReviewerSync {
-		if t.ralphGuard.IsSpecPath(params.Path) {
-			return "", fmt.Errorf("spec files are immutable during ralph mode: %s", params.Path)
-		}
-	}
-
 	// Resolve symlinks and verify path containment + scope restrictions.
 	// This subsumes the old filepath.Clean + filepath.Join + prefix checks.
 	resolvedPath, err := resolveAndCheckPath(t.repoDir, params.Path, t.allowedPrefixes)
@@ -622,8 +598,6 @@ type gitTool struct {
 	violCounter *sandbox.ViolationCounter
 	sessionKey  string
 	gitUser     string // Forgejo username for remote URL credentials
-	ralphGuard  ralphCommitChecker // if set, validate spec immutability during ralph
-	isRalphSession bool             // true when in a ralph session
 }
 
 func NewGitTool(info SessionInfo, cfg AgentConfig) *gitTool {
@@ -644,17 +618,6 @@ func (t *gitTool) SetSandboxConfig(cfg sandbox.Config) {
 func (t *gitTool) SetViolationCounter(counter *sandbox.ViolationCounter, sessionKey string) {
 	t.violCounter = counter
 	t.sessionKey = sessionKey
-}
-
-// ralphCommitChecker is implemented by ralph.Guard to validate commit diffs.
-type ralphCommitChecker interface {
-	ValidateCommitDiff(diff string) error
-}
-
-// SetRalphGuard enables spec immutability enforcement for git commits during ralph.
-func (t *gitTool) SetRalphGuard(guard ralphCommitChecker, isRalph bool) {
-	t.ralphGuard = guard
-	t.isRalphSession = isRalph
 }
 
 func (t *gitTool) Name() string { return "git" }
@@ -732,17 +695,6 @@ func (t *gitTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 			if currentBranch == pb {
 				return "", fmt.Errorf("commit on protected branch %q blocked. Create a feature branch first (e.g., git checkout -b feature/my-feature). Only scaffold sessions may commit on main.", currentBranch)
 			}
-		}
-	}
-
-	// Ralph guard: check staged diff for spec modifications before committing.
-	// During ralph sessions, commits touching spec files are blocked.
-	if isCommit && t.ralphGuard != nil && t.isRalphSession {
-		diffCmd := exec.CommandContext(ctx, "git", "-C", t.repoDir, "diff", "--cached", "--name-only")
-		diffCmd.Dir = t.repoDir
-		diffOut, _ := diffCmd.CombinedOutput()
-		if err := t.ralphGuard.ValidateCommitDiff(string(diffOut)); err != nil {
-			return "", err
 		}
 	}
 

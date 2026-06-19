@@ -192,15 +192,6 @@ func NewManager(cfg *config.Config, bus *event.Bus) (*Manager, error) {
 		return nil, fmt.Errorf("init lifecycle tracker: %w", err)
 	}
 
-	// Mark any 'running' Ralph sessions from previous process lifecycles as
-	// 'interrupted'. Without this, container restarts leave stale 'running'
-	// records that block the scheduler from spawning new iterations.
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := lc.CleanupInterruptedRalphSessions(cleanupCtx); err != nil {
-		slog.Warn("ralph startup cleanup failed", "error", err)
-	}
-	cleanupCancel()
-
 	m := &Manager{
 		cfg:              cfg,
 		bus:              bus,
@@ -1158,19 +1149,13 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 			"repo", sess.Repository, "issue", sess.IssueNumber)
 	}
 
-	// Ralph sessions must use implementer role to write code on the PR branch.
-	if tool.IsRalphSession(sess.Key) {
-		role = "implementer"
-		slog.Info("ralph session: using implementer role", "session_key", sess.Key, "pr", sess.PRNumber)
-	}
-
 	// PR review fix: when a human commented on an open PR requesting changes,
 	// the agent should be an implementer (write tools) not a reviewer (read-only).
 	// This allows the agent to actually make the requested fixes.
 	if sess.IsPRReviewFix {
 		role = "implementer"
 		slog.Info("PR review fix session: using implementer role", "session_key", sess.Key, "pr", sess.PRNumber)
-	} else if sess.PRNumber > 0 && !tool.IsRalphSession(sess.Key) && (role == "" || role == "implementer") {
+	} else if sess.PRNumber > 0 && (role == "" || role == "implementer") {
 		role = "reviewer"
 	}
 
@@ -1281,15 +1266,9 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						}
 					}
 					m.lc.OnSessionBlocked(ctx, evt.Repository, evt.IssueNumber, sess.Key, branch)
-					if tool.IsRalphSession(sess.Key) {
-						m.lc.CompleteRalphIteration(ctx, sess.Key, "blocked", "")
-					}
 					writeShutdownCheckpoint(sess.WorkDir, "failed", agt.LastToolName())
 				} else if errors.Is(err, sentinel.ErrMaxTurnsReached) {
 					m.lc.OnSessionFailedMaxTurns(ctx, evt.Repository, evt.IssueNumber, sess.Key, time.Since(sess.StartTime), m.roleToken(role))
-					if tool.IsRalphSession(sess.Key) {
-						m.lc.CompleteRalphIteration(ctx, sess.Key, "failed_turns", "")
-					}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				} else {
 					slog.Error("agent processing failed",
@@ -1298,9 +1277,6 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 						"session_key", sess.Key,
 					)
 					m.lc.OnSessionFailedError(ctx, evt.Repository, evt.IssueNumber, sess.Key, err, time.Since(sess.StartTime), m.roleToken(role))
-					if tool.IsRalphSession(sess.Key) {
-						m.lc.CompleteRalphIteration(ctx, sess.Key, "failed_error", "")
-					}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				}
 				// Revert claim: if this session claimed a ready issue, release it back to ready
@@ -1316,9 +1292,6 @@ func (m *Manager) runSession(ctx context.Context, sess *Session) {
 					}
 				}
 				m.lc.OnSessionComplete(ctx, sess.Key, evt.Repository, evt.IssueNumber, role, headSHA, time.Since(sess.StartTime), m.roleToken(role), m.cfg.FordjentBaseURL())
-				if tool.IsRalphSession(sess.Key) {
-					m.lc.CompleteRalphIteration(ctx, sess.Key, "completed", headSHA)
-				}
 				m.logSessionTime(ctx, evt.Repository, evt.IssueNumber, role, sess.StartTime)
 				writeShutdownCheckpoint(sess.WorkDir, "completed", agt.LastToolName())
 				_ = m.store.SetCompletedAt(sess.Key, time.Now().UTC())
@@ -2059,196 +2032,6 @@ func (m *Manager) unblockSubIssues(ctx context.Context, repo string, parentNum i
 	}
 }
 
-// OnRalphAppendComplete handles the ralph harness completion.
-// On ac_met: true, removes 'ralph' label, adds 'ralph-completed' label.
-// Does NOT queue reviewer directly — the routing table handles that on
-// the next event (e.g., a comment on the ralph-completed PR).
-func (m *Manager) OnRalphAppendComplete(ctx context.Context, repo string, prNumber int) error {
-	if m.forgejoClient == nil {
-		return nil
-	}
-
-	slog.Info("ralph completion: removing ralph label, adding ralph-completed",
-		"repo", repo, "pr", prNumber)
-
-	// Remove 'ralph' label
-	if err := m.forgejoClient.RemoveIssueLabel(ctx, repo, prNumber, "ralph"); err != nil {
-		slog.Warn("ralph completion: failed to remove ralph label", "error", err, "pr", prNumber)
-	}
-
-	// Add 'ralph-completed' label
-	if err := m.forgejoClient.AddIssueLabels(ctx, repo, prNumber, []string{"ralph-completed"}); err != nil {
-		slog.Warn("ralph completion: failed to add ralph-completed label", "error", err, "pr", prNumber)
-	}
-
-	return nil
-}
-
-// ScanRalphPRs scans for open PRs with the 'ralph' label and spawns
-// the next ralph iteration if caps allow. Called by the ralph scheduler ticker.
-func (m *Manager) ScanRalphPRs(ctx context.Context) {
-	if m.forgejoClient == nil || !m.cfg.Ralph.Enabled {
-		return
-	}
-
-	repos := m.reposWithRalphLabels()
-	slog.Info("ralph scan: scanning repos", "repos", repos)
-	for _, repo := range repos {
-		m.scanRepoForRalph(ctx, repo)
-	}
-}
-
-// reposWithRalphLabels returns repos that might have ralph-labeled PRs.
-func (m *Manager) reposWithRalphLabels() []string {
-	var repos []string
-	seen := make(map[string]bool)
-	if m.cfg.Scanner.Repo != "" {
-		repos = append(repos, m.cfg.Scanner.Repo)
-		seen[m.cfg.Scanner.Repo] = true
-	}
-	// Also check repos from active sessions
-	m.mu.RLock()
-	for key := range m.sessions {
-		if idx := strings.Index(key, "/issues/"); idx > 0 {
-			repo := key[:idx]
-			if !seen[repo] {
-				repos = append(repos, repo)
-				seen[repo] = true
-			}
-		} else if idx := strings.Index(key, "/pulls/"); idx > 0 {
-			repo := key[:idx]
-			if !seen[repo] {
-				repos = append(repos, repo)
-				seen[repo] = true
-			}
-		}
-	}
-	m.mu.RUnlock()
-	// Also check repos from Ralph lifecycle records (catches repos with
-	// completed iterations that need follow-up)
-	if m.lc != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		recs, err := m.lc.ListStalledRalphSessions(ctx)
-		if err == nil {
-			for _, prKey := range recs {
-				if idx := strings.Index(prKey, "/pulls/"); idx > 0 {
-					repo := prKey[:idx]
-					if !seen[repo] {
-						repos = append(repos, repo)
-						seen[repo] = true
-					}
-				}
-			}
-		}
-		// Also scan repos with any Ralph history
-		allRecs, err := m.lc.GetAllRalphPRKeys(ctx)
-		if err == nil {
-			for _, prKey := range allRecs {
-				if idx := strings.Index(prKey, "/pulls/"); idx > 0 {
-					repo := prKey[:idx]
-					if !seen[repo] {
-						repos = append(repos, repo)
-						seen[repo] = true
-					}
-				}
-			}
-		}
-	}
-	return repos
-}
-
-// scanRepoForRalph checks a single repo for ralph-labeled PRs and spawns iterations.
-func (m *Manager) scanRepoForRalph(ctx context.Context, repo string) {
-	prList, err := m.forgejoClient.ListOpenPRsByLabel(ctx, repo, "ralph")
-	if err != nil {
-		slog.Warn("ralph scan: failed to list PRs", "repo", repo, "error", err)
-		return
-	}
-	slog.Info("ralph scan: found ralph-labeled PRs", "repo", repo, "count", len(prList))
-
-	for _, pr := range prList {
-		prKey := fmt.Sprintf("%s/pulls/%d", repo, pr.Number)
-		slog.Info("ralph scan: checking PR", "pr", pr.Number, "prKey", prKey)
-
-		// Check if an iteration is already active (and not completed)
-		m.mu.RLock()
-		active := false
-		for k := range m.sessions {
-			if strings.HasPrefix(k, prKey+"-ralph-i") {
-				// If shutdown.json says completed/failed, session is done
-				workDir := filepath.Join(m.cfg.Agent.WorkDir, strings.ReplaceAll(k, "/", string(filepath.Separator)))
-				cp := readShutdownCheckpoint(workDir)
-				if cp == nil || cp.State == "" { // still running
-					active = true
-					break
-				}
-			}
-		}
-		m.mu.RUnlock()
-		if active {
-			slog.Info("ralph scan: iteration already active", "pr", pr.Number)
-			continue
-		}
-
-		// Count existing iterations from lifecycle DB
-		var iterCount int
-		if m.lc != nil {
-			iterCount, _ = m.lc.CountRalphIterations(ctx, prKey)
-		}
-		slog.Info("ralph scan: iteration count", "pr", pr.Number, "iterCount", iterCount, "max", m.cfg.Ralph.MaxIterationsPerPR)
-
-		// Check iteration cap
-		if iterCount >= m.cfg.Ralph.MaxIterationsPerPR {
-			slog.Info("ralph scan: max iterations exceeded", "pr", pr.Number, "iterations", iterCount)
-			continue
-		}
-
-		// Check cooldown — if the last iteration is still running, skip.
-		// If completed, we rely on the cooldown timer (the scheduler tick interval
-		// itself acts as the cooldown boundary — we don't spawn faster than the
-		// ticker interval).
-		if m.lc != nil {
-			lastIter, err := m.lc.GetLastRalphIteration(ctx, prKey)
-			if err == nil && lastIter != nil && lastIter.Status == "running" {
-				slog.Info("ralph scan: previous iteration still running", "pr", pr.Number)
-				continue
-			}
-		}
-
-		iterNum := iterCount + 1
-		sessKey := fmt.Sprintf("%s-ralph-i%d", prKey, iterNum)
-		slog.Info("ralph scan: spawning iteration", "pr", pr.Number, "iteration", iterNum, "key", sessKey)
-
-		// Record the iteration in the lifecycle DB
-		if m.lc != nil {
-			rec := &lifecycle.RalphRecord{
-				PRKey:      prKey,
-				Iteration:  iterNum,
-				SessionKey: sessKey,
-				Status:     "running",
-			}
-			if err := m.lc.RecordRalphIteration(ctx, rec); err != nil {
-				slog.Warn("ralph scan: failed to record iteration", "error", err)
-			}
-		}
-
-		// Create a synthetic IssueOpened event for the implementer session
-		// The session key includes -ralph-iN so the agent will detect it
-		ralphEvt := &event.Event{
-			Type:        event.IssueOpened,
-			Repository:  repo,
-			Sender:      "ralph-scheduler",
-			IssueNumber:  pr.Number,
-			PRNumber:    pr.Number,
-			SessionKey:  sessKey,
-		}
-
-		go m.handleEvent(ctx, ralphEvt)
-	}
-}
-
-// hasQuestionLabel checks if an issue has the "question" label.
 func hasQuestionLabel(ctx context.Context, client *forgejo.Client, repo string, issueNumber int) bool {
 	if client == nil || issueNumber == 0 {
 		return false

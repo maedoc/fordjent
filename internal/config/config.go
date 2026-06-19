@@ -25,7 +25,6 @@ type Config struct {
 	SessionKeyTemplate string           `yaml:"session_key_template"`
 	Security           SecurityConfig   `yaml:"security"`
 	Memory             MemoryConfig     `yaml:"memory"`
-	Ralph              RalphConfig      `yaml:"ralph"`
 	Database           DatabaseConfig   `yaml:"database"`
 	LogLevel           string           `yaml:"log_level"`
 }
@@ -146,18 +145,6 @@ type MemoryConfig struct {
 	CompactionPath string `yaml:"compaction_path"`
 }
 
-// RalphConfig holds configuration for the ralph iterative refinement system.
-type RalphConfig struct {
-	Enabled                   bool          `yaml:"enabled"`
-	MaxIterationsPerPR        int           `yaml:"max_iterations_per_pr"`
-	TurnBudgetPerIteration    int           `yaml:"turn_budget_per_iteration"`
-	CooldownBetweenIterations time.Duration `yaml:"cooldown_between_iterations"`
-	MaxCostPerPRUSD           float64       `yaml:"max_cost_per_pr_usd"`
-	NudgeThresholdPct         float64       `yaml:"nudge_threshold_pct"`
-	SummaryModel              string        `yaml:"summary_model"`
-	AutoRalphOnYolo            bool          `yaml:"auto_ralph_on_yolo"`
-}
-
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
 }
@@ -235,16 +222,6 @@ func Load(path string) (*Config, error) {
 			Enabled:        true,
 			CompactionCron: "0 2 * * *",
 			CompactionPath: "docs/issues",
-		},
-		Ralph: RalphConfig{
-			Enabled:                   true,
-			MaxIterationsPerPR:        20,
-			TurnBudgetPerIteration:    20,
-			CooldownBetweenIterations: 2 * time.Minute,
-			MaxCostPerPRUSD:          5.00,
-			NudgeThresholdPct:        0.25,
-			SummaryModel:             "",
-			AutoRalphOnYolo:          true,
 		},
 		Database: DatabaseConfig{Path: ""},
 		AutoRegister: AutoRegisterConfig{

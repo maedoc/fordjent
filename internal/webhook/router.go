@@ -49,7 +49,7 @@ type Router struct {
 // handles which event. No component may create sessions independently;
 // all Fordjent session creation SHALL flow through this routing table.
 type RouteResult struct {
-	Role       string // "pm", "implementer", "reviewer", "ralph"
+	Role       string // "pm", "implementer", "reviewer"
 	SessionKey string // e.g. "fjadmin/testbed/pulls/42"
 	IsFix      bool   // true for pulls/N-fix sessions
 }
@@ -77,18 +77,16 @@ func NewRouteTable(forgejoClient *forgejo.Client) *RouteTable {
 // |----------|----------------------------------- |-------------------------------------------------|------------------|-------------------|
 // | 1        | issue_comment.created              | PR labels: spec-proposed or spec-approved        | pulls/N          | pm                |
 // | 2        | pull_request_review_comment.created| PR labels: spec-proposed or spec-approved        | pulls/N          | pm                |
-// | 3        | issue_comment.created              | PR labels: ralph                                 | pulls/N-ralph-iM | implementer (ralph)|
-// | 4        | issue_comment.created              | PR labels: ralph-completed                       | pulls/N          | reviewer          |
-// | 5        | pull_request_review_comment.created| PR labels: changes_requested or actionable body   | pulls/N-fix      | implementer       |
-// | 6        | issue_comment.created              | Human sender, is PR, no spec/ralph labels         | pulls/N          | reviewer          |
-// | 7        | pull_request_review_comment.created| PR labels none of above                          | pulls/N          | reviewer          |
-// | 8        | pull_request.merged                | Any                                               | pulls/N          | scheduler         |
+// | 3        | pull_request_review_comment.created| PR labels: changes_requested or actionable body   | pulls/N-fix      | implementer       |
+// | 4        | issue_comment.created              | Human sender, is PR, no spec labels              | pulls/N          | reviewer          |
+// | 5        | pull_request_review_comment.created| PR labels none of above                          | pulls/N          | reviewer          |
+// | 6        | pull_request.merged                | Any                                               | pulls/N          | scheduler         |
 // | 9        | issue.closed                       | Issue is a task issue linked to change            | issues/N         | scheduler         |
 // | 10       | (derived)                          | All task issues for change closed                 | issues/<parent>  | pm                |
 func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult, bool) {
 	prLabels := rt.fetchPRLabels(ctx, evt)
 
-	// Rule 10: ArchiveChangeRequested — all task issues closed
+	// Rule 8: ArchiveChangeRequested — all task issues closed
 	if evt.Type == event.ArchiveChangeRequested {
 		return RouteResult{
 			Role:       "pm",
@@ -99,7 +97,6 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 	// Rule 1: issue_comment.created on spec PR → PM
 	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 {
 		if hasLabel(prLabels, "spec-proposed") || hasLabel(prLabels, "spec-approved") {
-			rt.warnMultipleLabels(prLabels, evt)
 			return RouteResult{
 				Role:       "pm",
 				SessionKey: fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber),
@@ -117,28 +114,7 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}
 	}
 
-	// Rule 3: issue_comment.created on ralph-labeled PR → Implementer (Ralph)
-	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 {
-		if hasLabel(prLabels, "ralph") {
-			rt.warnMultipleLabels(prLabels, evt)
-			return RouteResult{
-				Role:       "implementer",
-				SessionKey: fmt.Sprintf("%s/pulls/%d-ralph", evt.Repository, evt.PRNumber),
-			}, true
-		}
-	}
-
-	// Rule 4: issue_comment.created on ralph-completed PR → Reviewer
-	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 {
-		if hasLabel(prLabels, "ralph-completed") {
-			return RouteResult{
-				Role:       "reviewer",
-				SessionKey: fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber),
-			}, true
-		}
-	}
-
-	// Rule 5: pull_request_review_comment with changes_requested → Implementer fix
+	// Rule 3: pull_request_review_comment with changes_requested → Implementer fix
 	if evt.Type == event.PullRequestReviewComment && evt.PRNumber > 0 {
 		if hasLabel(prLabels, "changes_requested") || rt.isActionableReview(evt) {
 			return RouteResult{
@@ -149,7 +125,7 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}
 	}
 
-	// Rule 6: issue_comment.created on normal PR (human, no spec/ralph) → Reviewer
+	// Rule 4: issue_comment.created on normal PR (human, no spec) → Reviewer
 	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 {
 		sender := evt.Sender
 		isAgent := strings.Contains(sender, "fordjent") || strings.Contains(sender, "djent")
@@ -161,7 +137,7 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}
 	}
 
-	// Rule 7: pull_request_review_comment on normal PR → Reviewer
+	// Rule 5: pull_request_review_comment on normal PR → Reviewer
 	if evt.Type == event.PullRequestReviewComment && evt.PRNumber > 0 {
 		return RouteResult{
 			Role:       "reviewer",
@@ -169,7 +145,7 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}, true
 	}
 
-	// Rule 8: pull_request.merged → Scheduler
+	// Rule 6: pull_request.merged → Scheduler
 	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
 		return RouteResult{
 			Role:       "scheduler",
@@ -177,7 +153,7 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}, true
 	}
 
-	// Rule 9: issue.closed on task issue → Scheduler
+	// Rule 7: issue.closed on task issue → Scheduler
 	if evt.Type == event.IssueClosed && evt.IssueNumber > 0 {
 		return RouteResult{
 			Role:       "scheduler",
@@ -233,20 +209,6 @@ func (rt *RouteTable) isActionableReview(evt *event.Event) bool {
 		}
 	}
 	return false
-}
-
-// warnMultipleLabels logs a warning if a PR has labels that could match
-// multiple routing-table rules (e.g. both spec-proposed and ralph), which
-// indicates a possible configuration error.
-func (rt *RouteTable) warnMultipleLabels(labels []string, evt *event.Event) {
-	// Spec labels: spec-proposed, spec-approved
-	// Lifecycle labels: ralph, ralph-completed
-	hasSpecLabel := hasLabel(labels, "spec-proposed") || hasLabel(labels, "spec-approved")
-	hasRalphLabel := hasLabel(labels, "ralph") || hasLabel(labels, "ralph-completed")
-	if hasSpecLabel && hasRalphLabel {
-		slog.Warn("routing table: PR has both spec and ralph labels, higher-priority rule wins",
-			"pr", evt.PRNumber, "repo", evt.Repository, "labels", labels)
-	}
 }
 
 // ApplyRoute sets the Role, SessionKey, and IsFix fields on the event based on
@@ -394,11 +356,6 @@ func (r *Router) handleStatus(w http.ResponseWriter, req *http.Request) {
 		lifecycleDB := filepath.Join(r.cfg.Agent.WorkDir, "lifecycle.db")
 		if data, err := queryLifecycleDB(lifecycleDB); err == nil {
 			resp["lifecycle"] = data
-		}
-
-		// Ralph sessions summary
-		if data, err := queryRalphSessionsDB(lifecycleDB); err == nil {
-			resp["ralph"] = data
 		}
 	}
 
@@ -763,60 +720,6 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 		}
 	}
 	result["recent_turns"] = turns
-
-	return result, nil
-}
-
-// queryRalphSessionsDB queries the ralph_sessions table for status dashboard.
-func queryRalphSessionsDB(dbPath string) (map[string]interface{}, error) {
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_journal_mode=WAL")
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	result := map[string]interface{}{}
-
-	var totalIterations, activeIterations, failedIterations int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM ralph_sessions`).Scan(&totalIterations)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM ralph_sessions WHERE status = 'running'`).Scan(&activeIterations)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM ralph_sessions WHERE status IN ('failed_turns', 'failed_error')`).Scan(&failedIterations)
-
-	result["total_iterations"] = totalIterations
-	result["active_iterations"] = activeIterations
-	result["failed_iterations"] = failedIterations
-
-	// Recent ralph sessions
-	recent := []map[string]interface{}{}
-	rows, err := db.Query(`SELECT pr_key, iteration, status, cost_usd, committed_sha, created_at, completed_at
-		FROM ralph_sessions ORDER BY created_at DESC LIMIT 20`)
-	if err == nil && rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var prKey, status, sha, createdAt, completedAt string
-			var iteration int
-			var costUSD float64
-			_ = rows.Scan(&prKey, &iteration, &status, &costUSD, &sha, &createdAt, &completedAt)
-			entry := map[string]interface{}{
-				"pr_key": prKey,
-				"iteration": iteration,
-				"status": status,
-				"cost_usd": costUSD,
-				"committed_sha": sha,
-				"created_at": createdAt,
-			}
-			if completedAt != "" {
-				entry["completed_at"] = completedAt
-			}
-			recent = append(recent, entry)
-		}
-	}
-	result["recent_sessions"] = recent
-
-	// Total cost
-	var totalCost float64
-	_ = db.QueryRow(`SELECT COALESCE(SUM(cost_usd), 0) FROM ralph_sessions`).Scan(&totalCost)
-	result["total_cost_usd"] = totalCost
 
 	return result, nil
 }

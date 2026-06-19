@@ -28,12 +28,14 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   max_turns_reviewer: 20
+  # All roles use the local Gemma 4 12B model (llama.cpp server on host, :8181).
+  # NeuralWatt is intentionally disabled (not referenced by any role or fallback).
   role_providers:
-    pm: neuralwatt-qwen
-    reviewer: neuralwatt-qwen
-    implementer: neuralwatt-qwen
-    tester: neuralwatt-qwen
-    devops: neuralwatt-qwen
+    pm: local-gpu
+    reviewer: local-gpu
+    implementer: local-gpu
+    tester: local-gpu
+    devops: local-gpu
   fallback_provider: local-gpu
   commit_prefix: '[agent-automation]'
   context_window: 131072

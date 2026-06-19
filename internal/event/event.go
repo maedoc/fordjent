@@ -41,7 +41,7 @@ type Event struct {
 	Sender          string                 `json:"sender"`
 	Action          string                 `json:"action"`
 	SessionKey      string                 `json:"session_key"`
-	Role            string                 `json:"role,omitempty"`              // set by routing table: pm, implementer, reviewer, ralph
+	Role            string                 `json:"role,omitempty"`              // set by routing table: pm, implementer, reviewer
 	Change          string                 `json:"change,omitempty"`            // for internal events like ArchiveChangeRequested
 	Payload         map[string]interface{} `json:"payload"`
 }

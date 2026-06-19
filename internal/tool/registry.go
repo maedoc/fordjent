@@ -207,28 +207,3 @@ func (r *Registry) SetPRScope(scopePrefixes []string) {
 		}
 	}
 }
-
-// RalphGuardChecker is implemented by ralph.Guard.
-type RalphGuardChecker interface {
-	IsSpecPath(p string) bool
-	ValidateCommitDiff(diff string) error
-}
-
-// SetRalphGuard enables spec immutability enforcement for ralph sessions.
-// When isRalph=true, write_file blocks spec paths and git commit validates
-// staged diffs against spec patterns. When isReviewerSync=true, spec writes
-// are temporarily allowed (QA spec sync exception).
-func (r *Registry) SetRalphGuard(guard RalphGuardChecker, isRalph, isReviewerSync bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if wf, ok := r.tools["write_file"]; ok {
-		if wt, ok := wf.(*writeFileTool); ok {
-			wt.SetRalphGuard(guard, isRalph, isReviewerSync)
-		}
-	}
-	if gt, ok := r.tools["git"]; ok {
-		if g, ok := gt.(*gitTool); ok {
-			g.SetRalphGuard(guard, isRalph)
-		}
-	}
-}
