@@ -145,6 +145,257 @@ func TestCreatePRToolExecute(t *testing.T) {
 	}
 }
 
+// TestSubmitReviewToolExecute_Approve verifies that state=approved posts the
+// review and removes an existing changes_requested label.
+func TestSubmitReviewToolExecute_Approve(t *testing.T) {
+	var reviewBody map[string]string
+	var removeLabelCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.EscapedPath()
+		switch p {
+		case "/api/v1/repos/org/repo/pulls/7/reviews":
+			if r.Method == http.MethodGet {
+				// Duplicate-review dedup probe (A2): returns empty list = no existing review.
+				json.NewEncoder(w).Encode([]map[string]interface{}{})
+				return
+			}
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST for reviews, got %s", r.Method)
+			}
+			json.NewDecoder(r.Body).Decode(&reviewBody)
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 99, "state": "approved"})
+		case "/api/v1/repos/org/repo/labels":
+			// RemoveIssueLabel queries label list to resolve label ID.
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"id": 42, "name": "changes_requested"}})
+		case "/api/v1/repos/org/repo/issues/7/labels/42":
+			if r.Method != http.MethodDelete {
+				t.Errorf("expected DELETE for label removal, got %s", r.Method)
+			}
+			removeLabelCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected path: %s %s", r.Method, p)
+		}
+	}))
+	defer server.Close()
+
+	tool := NewSubmitReviewTool(newTestAdapter(server), "djent-qa")
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo",
+		"pr_number": 7,
+		"state": "approved",
+		"body": "LGTM"
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewBody["event"] != "approved" {
+		t.Errorf("expected event=approved, got %q", reviewBody["event"])
+	}
+	if !removeLabelCalled {
+		t.Error("approved review should remove changes_requested label")
+	}
+	if !strings.Contains(result, "approved") {
+		t.Errorf("result should mention state, got %q", result)
+	}
+}
+
+// TestSubmitReviewToolExecute_RequestChanges verifies that
+// state=changes_requested posts the review AND adds the label.
+func TestSubmitReviewToolExecute_RequestChanges(t *testing.T) {
+	var reviewBody map[string]string
+	var addLabelCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.EscapedPath()
+		switch p {
+		case "/api/v1/repos/org/repo/pulls/7/reviews":
+			if r.Method == http.MethodGet {
+				json.NewEncoder(w).Encode([]map[string]interface{}{})
+				return
+			}
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
+			json.NewDecoder(r.Body).Decode(&reviewBody)
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 99, "state": "changes_requested"})
+		case "/api/v1/repos/org/repo/labels":
+			// AddIssueLabels validates id first via ListLabels
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"id": 42, "name": "changes_requested"}})
+		case "/api/v1/repos/org/repo/issues/7":
+			// AddIssueLabels calls GetIssue to check existing labels
+			json.NewEncoder(w).Encode(map[string]interface{}{"number": 7, "labels": []interface{}{}})
+		case "/api/v1/repos/org/repo/issues/7/labels":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST for label add, got %s", r.Method)
+			}
+			addLabelCalled = true
+			json.NewEncoder(w).Encode([]map[string]string{{"name": "changes_requested"}})
+		default:
+			t.Errorf("unexpected path: %s %s", r.Method, p)
+		}
+	}))
+	defer server.Close()
+
+	tool := NewSubmitReviewTool(newTestAdapter(server), "djent-qa")
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo",
+		"pr_number": 7,
+		"state": "changes_requested",
+		"body": "Add tests"
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewBody["event"] != "changes_requested" {
+		t.Errorf("expected event=changes_requested, got %q", reviewBody["event"])
+	}
+	if !addLabelCalled {
+		t.Error("changes_requested review should add the changes_requested label")
+	}
+}
+
+// TestSubmitReviewToolExecute_InvalidState verifies the state validator.
+func TestSubmitReviewToolExecute_InvalidState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP call should have been made, got %s %s", r.Method, r.URL.EscapedPath())
+	}))
+	defer server.Close()
+
+	tool := NewSubmitReviewTool(newTestAdapter(server), "djent-qa")
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo",
+		"pr_number": 7,
+		"state": "bogus",
+		"body": "x"
+	}`))
+	if err == nil {
+		t.Fatal("expected error for invalid state")
+	}
+	if !strings.Contains(err.Error(), "invalid state") {
+		t.Errorf("expected 'invalid state' error, got %v", err)
+	}
+}
+
+// TestSubmitReviewTool_DedupSuppressesDuplicateApproved is the A2 scenario
+// "duplicate-submission guard": when the model calls forgejo_submit_review
+// (state=approved) twice in the same session, the second call SHOULD return
+// the same success JSON without hitting the Forgejo API. Backing evidence:
+// GEMMA-FAILURE-ANALYSIS.md (pulls/14 submitted `approved` 3× in a row).
+func TestSubmitReviewTool_DedupSuppressesDuplicateApproved(t *testing.T) {
+	reviewsPostCount := 0
+	labelsTouchCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.EscapedPath()
+		switch {
+		case p == "/api/v1/repos/org/repo/pulls/7/reviews" && r.Method == http.MethodGet:
+			// First call: report NO review existingdjent-qa review exists.
+			if reviewsPostCount == 0 {
+				json.NewEncoder(w).Encode([]map[string]interface{}{})
+			} else {
+				json.NewEncoder(w).Encode([]map[string]interface{}{{
+					"id": 99, "state": "APPROVED",
+					"user": map[string]interface{}{"login": "djent-qa"},
+				}})
+			}
+		case p == "/api/v1/repos/org/repo/pulls/7/reviews" && r.Method == http.MethodPost:
+			reviewsPostCount++
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 99, "state": "approved"})
+		case strings.Contains(p, "/issues/7/labels"):
+			labelsTouchCount++
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(p, "/labels"):
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"id": 1, "name": "changes_requested"}})
+		case strings.Contains(p, "/issues/7"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state": "open", "labels": []interface{}{}, "number": 7, "title": "PR",
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		}
+	}))
+	defer server.Close()
+
+	tool := NewSubmitReviewTool(newTestAdapter(server), "djent-qa")
+
+	// First call — submits to Forgejo.
+	res1, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo", "pr_number": 7, "state": "approved", "body": "LGTM"
+	}`))
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	if !strings.Contains(res1, `"duplicate":false`) {
+		t.Errorf("first submit result should be duplicate=false; got: %s", res1)
+	}
+	if reviewsPostCount != 1 {
+		t.Errorf("expected exactly 1 POST /reviews on first submit, got %d", reviewsPostCount)
+	}
+	firstLabelTouches := labelsTouchCount
+
+	// Second call — should return the same success, NOT hit the API, NOT touch labels.
+	res2, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo", "pr_number": 7, "state": "approved", "body": "LGTM again"
+	}`))
+	if err != nil {
+		t.Fatalf("duplicate submit: %v", err)
+	}
+	if !strings.Contains(res2, `"duplicate":true`) {
+		t.Errorf("duplicate submit result should be duplicate=true; got: %s", res2)
+	}
+	if reviewsPostCount != 1 {
+		t.Errorf("expected NO additional POST /reviews on duplicate submit; got total %d", reviewsPostCount)
+	}
+	if labelsTouchCount != firstLabelTouches {
+		t.Errorf("expected NO label side-effects on duplicate submit; labels touched %d more times", labelsTouchCount-firstLabelTouches)
+	}
+}
+
+// TestSubmitReviewTool_DifferentStatesNotDeduplicated is the A2 scenario
+// "different state is not a duplicate": submitted `approved`, then
+// `changes_requested` for the same PR → both calls execute normally.
+func TestSubmitReviewTool_DifferentStatesNotDeduplicated(t *testing.T) {
+	reviewsPostCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.EscapedPath()
+		switch {
+		case p == "/api/v1/repos/org/repo/pulls/7/reviews" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode([]map[string]interface{}{}) // no existing reviews
+		case p == "/api/v1/repos/org/repo/pulls/7/reviews" && r.Method == http.MethodPost:
+			reviewsPostCount++
+			json.NewEncoder(w).Encode(map[string]interface{}{"id": 100 + reviewsPostCount, "state": "approved"})
+		case strings.Contains(p, "/issues/7/labels"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(p, "/labels"):
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"id": 1, "name": "changes_requested"}})
+		case strings.Contains(p, "/issues/7"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"state": "open", "labels": []interface{}{}, "number": 7, "title": "PR",
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		}
+	}))
+	defer server.Close()
+
+	tool := NewSubmitReviewTool(newTestAdapter(server), "djent-qa")
+
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo", "pr_number": 7, "state": "approved", "body": "LGTM"
+	}`)); err != nil {
+		t.Fatalf("approved submit: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"repository": "org/repo", "pr_number": 7, "state": "changes_requested", "body": "needs work"
+	}`)); err != nil {
+		t.Fatalf("changes_requested submit: %v", err)
+	}
+	if reviewsPostCount != 2 {
+		t.Errorf("expected both submits to POST to Forgejo (got %d); a different state must NOT be deduplicated", reviewsPostCount)
+	}
+}
+
 func TestSearchCodeToolEscapesQuery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("q") != "func main()" {

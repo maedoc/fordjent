@@ -356,6 +356,73 @@ func TestBuildSystemPrompt_PRReviewMode(t *testing.T) {
 	}
 }
 
+// TestBuildSystemPrompt_CIFailureInjection verifies that a CheckRunCompleted
+// event with conclusion=failure adds the CI Failure block to the implementer's
+// system prompt — including the check name and run URL.
+func TestBuildSystemPrompt_CIFailureInjection(t *testing.T) {
+	srv := newTestAgentServer(t, []string{"role:implementer"})
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Forgejo:   config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Agent:     config.AgentConfig{MaxSessions: 10, WorkDir: t.TempDir(), IdleTimeout: 1 * time.Hour, MaxTurns: 5, CommitPrefix: "[agent]"},
+		Providers:  []config.ProviderConfig{{Name: "test", APIBase: "http://localhost/v1", APIKey: "test", Model: "test", MaxTokens: 100}},
+		Memory:    config.MemoryConfig{Enabled: false},
+		Security:  config.SecurityConfig{},
+	}
+
+	sess := &Session{Key: "org/repo/pulls/7-fix", Repository: "org/repo", PRNumber: 7, IssueNumber: 7, WorkDir: t.TempDir(), RepoDir: t.TempDir()}
+	agent := NewAgent(cfg, sess, nil, nil, nil, "implementer", nil, nil, nil)
+
+	evt := event.NewEvent(event.CheckRunCompleted, "org/repo", 7, 7, "runner", "completed")
+	evt.PRNumber = 7
+	evt.CheckName = "CI"
+	evt.CheckConclusion = "failure"
+	evt.CheckURL = "https://forgejo.local/org/repo/actions/runs/42"
+	evt.HeadSHA = "abc123"
+	evt.SessionKey = "org/repo/pulls/7-fix"
+
+	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "implementer", lifecycle.StateOpened, 0, 5)
+	full := fullPrompt(prompt)
+	if !strings.Contains(full, "CI Failure (ACTION REQUIRED)") {
+		t.Error("expected CI Failure block in system prompt")
+	}
+	if !strings.Contains(full, "CI") {
+		t.Error("expected check name 'CI' in CI Failure block")
+	}
+	if !strings.Contains(full, "https://forgejo.local/org/repo/actions/runs/42") {
+		t.Error("expected check URL in CI Failure block")
+	}
+}
+
+// TestIsFailedCICheckEvent verifies the scope predicate used by the prompt builder.
+func TestIsFailedCICheckEvent(t *testing.T) {
+	cases := []struct {
+		evtType   event.Type
+		conclusion string
+		want       bool
+	}{
+		{event.CheckRunCompleted, "failure", true},
+		{event.CheckRunCompleted, "cancelled", true},
+		{event.CheckRunCompleted, "action_required", true},
+		{event.CheckRunCompleted, "timed_out", true},
+		{event.CheckRunCompleted, "success", false},
+		{event.CheckRunCompleted, "pending", false},
+		{event.CheckRunCompleted, "", false},
+		{event.WorkflowRunCompleted, "failure", true},
+		{event.WorkflowRunCompleted, "success", false},
+		{event.IssueCommentCreated, "failure", false},
+		{event.PullRequestReview, "failure", false},
+	}
+	for _, c := range cases {
+		evt := event.NewEvent(c.evtType, "org/repo", 0, 0, "x", "completed")
+		evt.CheckConclusion = c.conclusion
+		if got := isFailedCICheckEvent(evt); got != c.want {
+			t.Errorf("event=%s conclusion=%s: got %v want %v", c.evtType, c.conclusion, got, c.want)
+		}
+	}
+}
+
 func TestBuildSystemPrompt_AutomergeReviewerPrompt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/issues/") && !strings.Contains(r.URL.Path, "/comments") && !strings.Contains(r.URL.Path, "/labels") {
@@ -551,6 +618,36 @@ func TestParseClosingRefs(t *testing.T) {
 				if v != tt.expected[i] {
 					t.Errorf("at index %d: expected %d, got %d", i, tt.expected[i], v)
 				}
+			}
+		})
+	}
+}
+
+// TestIsReviewerClassEvent verifies the A1 fix predicate — the four event types
+// that MUST trigger a PR-head branch checkout before the LLM loop starts so the
+// reviewer can read files only present on the PR branch. See
+// GEMMA-FAILURE-ANALYSIS.md A1 and the `spec-driven-review` spec delta
+// (Requirement: Reviewer session repo checked out on PR head branch).
+func TestIsReviewerClassEvent(t *testing.T) {
+	cases := []struct {
+		name string
+		t    event.Type
+		want bool
+	}{
+		{"IssueCommentCreated", event.IssueCommentCreated, true},
+		{"PullRequestReviewComment", event.PullRequestReviewComment, true},
+		{"ReviewRequested (yolo auto-spawn)", event.ReviewRequested, true},
+		{"PullRequestOpened (yolo auto-spawn trigger)", event.PullRequestOpened, true},
+		{"IssueOpened should NOT trigger", event.IssueOpened, false},
+		{"Push should NOT trigger", event.Push, false},
+		{"CheckRunCompleted should NOT trigger", event.CheckRunCompleted, false},
+		{"PullRequestMerged should NOT trigger", event.PullRequestMerged, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isReviewerClassEvent(tc.t)
+			if got != tc.want {
+				t.Errorf("isReviewerClassEvent(%v) = %v, want %v", tc.t, got, tc.want)
 			}
 		})
 	}
@@ -873,9 +970,10 @@ func TestBuildSystemPrompt_PolicyYolo(t *testing.T) {
 
 	evt := event.NewEvent(event.IssueCommentCreated, "org/repo", 10, 10, "alice", "created")
 	prompt := agent.buildSystemPrompt(context.Background(), evt, false, "reviewer", lifecycle.StateOpened, 0, 5)
-	// Yolo mode: reviewer should be told to merge bot PRs immediately
-	if !strings.Contains(fullPrompt(prompt), "call forgejo_merge_pr IMMEDIATELY") {
-		t.Error("yolo reviewer prompt should tell reviewer to merge bot PRs immediately")
+	// Yolo mode: reviewer should be told to approve bot PRs (which the gated
+	// automerge watcher then merges) instead of calling forgejo_merge_pr directly.
+	if !strings.Contains(fullPrompt(prompt), "forgejo_submit_review(state=\"approved\")") {
+		t.Error("yolo reviewer prompt should tell reviewer to approve bot PRs via forgejo_submit_review")
 	}
 }
 

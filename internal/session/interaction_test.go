@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +40,35 @@ type interactionForgejo struct {
 	repoFiles     []string
 	openIssues    []map[string]interface{}
 	createdIssues []string
+
+	// Gated-automerge fixtures: if ciCheckConclusion is non-empty and
+	// ciCheckHeadSHA matches the PR's head SHA, the fake returns a check-runs
+	// payload with the given conclusion. reviewState / reviewUser control the
+	// ListPRReviews response (single review). topics returns from /topics.
+	// prUser controls the PR's author (handleGetPR returns user.login=prUser).
+	ciCheckConclusion string
+	ciCheckName       string
+	ciCheckHeadSHA     string
+	prHeadSHA          string
+	prUser             string
+	reviewState        string
+	reviewUser         string
+	topics             []string
+	mergeCalls         int
+
+	// Per-issue overrides keyed by issue number.Used by the A3 bug-report
+	// dependency pre-flight test to simulate one issue referencing another by #N
+	// and the referenced issue being an open PR. When a number has an entry
+	// here, handleGetIssue returns its data instead of the default fields.
+	issueOverrides map[int]issueOverride
+}
+
+// issueOverride is the body of an issueOverrides entry.
+type issueOverride struct {
+	Title string
+	Body  string
+	State string
+	IsPR  bool
 }
 
 func newInteractionForgejo(t *testing.T) *interactionForgejo {
@@ -79,8 +110,16 @@ func (f *interactionForgejo) handler(w http.ResponseWriter, r *http.Request) {
 		f.handleGitTrees(w, r)
 	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && strings.Contains(path, "/files"):
 		f.handlePRFiles(w, r)
-	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && !strings.Contains(path, "/files"):
+	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && strings.HasSuffix(path, "/reviews"):
+		f.handleListPRReviews(w, r)
+	case r.Method == http.MethodPost && strings.Contains(path, "/pulls/") && strings.HasSuffix(path, "/merge"):
+		f.handleMergePR(w, r)
+	case r.Method == http.MethodGet && strings.Contains(path, "/pulls/") && !strings.Contains(path, "/files") && !strings.Contains(path, "/merge") && !strings.Contains(path, "/reviews"):
 		f.handleGetPR(w, r)
+	case r.Method == http.MethodGet && strings.Contains(path, "/commits/") && strings.HasSuffix(path, "/check-runs"):
+		f.handleListCheckRuns(w, r)
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/topics"):
+		f.handleRepoTopics(w, r)
 	case r.Method == http.MethodGet && strings.Contains(path, "/issues/") &&
 		!strings.Contains(path, "/comments") && !strings.Contains(path, "/labels"):
 		f.handleGetIssue(w, r)
@@ -110,20 +149,43 @@ func (f *interactionForgejo) handleGetIssue(w http.ResponseWriter, r *http.Reque
 	f.mu.Lock()
 	issueLabels := mergeLabels(f.issueLabels, f.addedLabels, nil)
 	roleLabels := buildLabelObjects(issueLabels)
+	// Default values; overridable per-issue number (issueOverrides) — used by
+	// the A3 bug-report dependency pre-flight test.
 	title := f.issueTitle
 	state := f.issueState
 	isPR := f.isPR
+	body := "Test body"
+	// Parse the issue number from the request path so we can override
+	// per-issue (e.g. trigger issue vs. referenced dependency issue).
+	if m := issueNumRe.FindStringSubmatch(r.URL.Path); m != nil {
+		var n int
+		for _, ch := range m[1] {
+			if ch >= '0' && ch <= '9' {
+				n = n*10 + int(ch-'0')
+			}
+		}
+		if ov, ok := f.issueOverrides[n]; ok {
+			title = ov.Title
+			state = ov.State
+			isPR = ov.IsPR
+			body = ov.Body
+		}
+	}
 	f.mu.Unlock()
 
 	resp := map[string]interface{}{
 		"number": 42,
 		"title":  title,
-		"body":   "Test body",
+		"body":   body,
 		"state":  state,
 		"labels": roleLabels,
 	}
 	if isPR {
 		resp["is_pull_request"] = true
+		resp["pull_request"] = map[string]interface{}{
+			"url":      "http://forgejo.local/repo/pulls/42",
+			"html_url": "http://forgejo.local/repo/pulls/42",
+		}
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -134,16 +196,28 @@ func (f *interactionForgejo) handleGetPR(w http.ResponseWriter, r *http.Request)
 	prState := f.prState
 	prHeadRef := f.prHeadRef
 	prMerged := f.prMerged
+	prHeadSHA := f.prHeadSHA
+	prUser := f.prUser
 	f.mu.Unlock()
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"number": 7,
-		"title":  title,
-		"state":  prState,
-		"head":   map[string]interface{}{"ref": prHeadRef, "label": prHeadRef},
-		"base":   map[string]interface{}{"ref": "main", "label": "main"},
-		"merged": prMerged,
-	})
+	resp := map[string]interface{}{
+		"number":  7,
+		"title":   title,
+		"state":   prState,
+		"head":    map[string]interface{}{"ref": prHeadRef, "label": prHeadRef, "sha": prHeadSHA},
+		"base":    map[string]interface{}{"ref": "main", "label": "main"},
+		"merged":  prMerged,
+	}
+	if prUser != "" {
+		resp["user"] = map[string]interface{}{"login": prUser, "id": 99}
+	}
+	if prState == "open" && !prMerged {
+		// Behave like a mergeable PR by default; individual tests can override by
+		// setting prState to "closed" or prMerged=true.
+		resp["mergeable"] = true
+		resp["has_conflicts"] = false
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (f *interactionForgejo) handlePostComment(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +228,60 @@ func (f *interactionForgejo) handlePostComment(w http.ResponseWriter, r *http.Re
 	f.mu.Unlock()
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+}
+
+func (f *interactionForgejo) handleListPRReviews(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	state := f.reviewState
+	user := f.reviewUser
+	f.mu.Unlock()
+	if state == "" {
+		// No reviews — return an empty array rather than nil so the JSON
+		// unmarshals to a zero-length (not nil) slice, matching Forgejo.
+		_ = json.NewEncoder(w).Encode([]map[string]interface{}{})
+		return
+	}
+	_ = json.NewEncoder(w).Encode([]map[string]interface{}{{
+		"id":    1,
+		"state": state,
+		"body":  "review body",
+		"user":  map[string]interface{}{"login": user, "id": 99},
+	}})
+}
+
+func (f *interactionForgejo) handleListCheckRuns(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	conc := f.ciCheckConclusion
+	name := f.ciCheckName
+	sha := f.ciCheckHeadSHA
+	f.mu.Unlock()
+	if conc == "" {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"check_runs": []interface{}{}})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"check_runs": []map[string]interface{}{{
+			"id":         int64(1),
+			"name":       name,
+			"head_sha":   sha,
+			"status":     "completed",
+			"conclusion": conc,
+		}},
+	})
+}
+
+func (f *interactionForgejo) handleRepoTopics(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	topics := append([]string{}, f.topics...)
+	f.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"topics": topics})
+}
+
+func (f *interactionForgejo) handleMergePR(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.mergeCalls++
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
 }
 
 func (f *interactionForgejo) handleListLabels(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +331,19 @@ func (f *interactionForgejo) handleAddLabels(w http.ResponseWriter, r *http.Requ
 
 func (f *interactionForgejo) handleRemoveLabel(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
-	label := parts[len(parts)-1]
+	last := parts[len(parts)-1]
+	label := last
+	// Forgejo's DELETE /issues/{N}/labels/{id} uses the numeric label ID, but
+	// our test asserts on label NAMES. Map the ID back to a name by consulting
+	// the merged label list (same order and ID assignment as handleListLabels).
+	if id, err := strconv.ParseInt(last, 10, 64); err == nil {
+		f.mu.Lock()
+		all := mergeLabels(f.issueLabels, f.addedLabels, f.createdLabels)
+		if idx := int(id) - 1; idx >= 0 && idx < len(all) {
+			label = all[idx]
+		}
+		f.mu.Unlock()
+	}
 	f.mu.Lock()
 	f.removedLabels = append(f.removedLabels, label)
 	f.mu.Unlock()
@@ -266,6 +406,11 @@ func (f *interactionForgejo) handleCreateIssue(w http.ResponseWriter, r *http.Re
 		"state":  "open",
 	})
 }
+
+// issueNumRe matches the trailing issue number in a Forgejo API issue/PR path
+// (e.g. /api/v1/repos/org/repo/issues/42 or .../pulls/42). Used by the A3
+// bug-report-dep-block override path in interactionForgejo.handleGetIssue.
+var issueNumRe = regexp.MustCompile(`/issues/(\d+)$`)
 
 func mergeLabels(base, added, created []string) []string {
 	all := append([]string{}, base...)
@@ -918,11 +1063,11 @@ func TestPRCommentRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	defer mgr.shutdownAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	go mgr.Run(ctx)
-	defer cancel()
 
 	// Simulate PR comment webhook
 	evt := event.NewEvent(event.IssueCommentCreated, "fjadmin/testbed", 42, 7, "human", "created")
@@ -948,6 +1093,351 @@ func TestPRCommentRouting(t *testing.T) {
 	}
 	if sess.PRNumber != 7 {
 		t.Errorf("expected PRNumber=7, got %d", sess.PRNumber)
+	}
+}
+
+// TestPRCommentRouting_DjentQAReachesImplementer: previously djent-* senders were
+// excluded from the implementer-fix path, which silenced the djent-qa reviewer's
+// change requests. Per the rework-loop change, djent-qa actionable comments now
+// route to pulls/N-fix* the same way human comments do.
+func TestPRCommentRouting_DjentQAReachesImplementer(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"implementing"}, "open", func(f *interactionForgejo) {
+		f.issueTitle = "[implementer] Test djent-qa routing"
+		f.isPR = true
+		f.prHeadRef = "feature/test-branch"
+		f.repoFiles = []string{"go.mod", "main.go"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxTurns = 5
+	cfg.Agent.MaxSessions = 5
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+	defer cancel()
+
+	// Simulate a djent-qa review comment WITHOUT the self-marker.
+	evt := event.NewEvent(event.IssueCommentCreated, "fjadmin/testbed", 42, 7, "djent-qa", "created")
+	evt.SessionKey = "fjadmin/testbed/pulls/7"
+	evt.Payload = map[string]interface{}{
+		"comment": map[string]interface{}{"body": "Add a test for empty input."},
+	}
+
+	mgr.handleEvent(ctx, evt)
+
+	// Session should be marked IsPRReviewFix (implementer override), regardless
+	// that the sender is djent-qa (the marker-based filter would have dropped it
+	// at router level if it had been a cost-summary comment, so we don't test
+	// that here; we test that an actionable djent-qa comment reaches a fix session).
+	var sess *Session
+	var exists bool
+	mgr.mu.RLock()
+	for k, s := range mgr.sessions {
+		if strings.HasPrefix(k, "fjadmin/testbed/pulls/7-fix") || k == "fjadmin/testbed/pulls/7" {
+			sess = s
+			exists = true
+			break
+		}
+	}
+	mgr.mu.RUnlock()
+	if !exists {
+		t.Fatal("djent-qa actionable comment should create a pulls/N-fix* session")
+	}
+	if !sess.IsPRReviewFix {
+		t.Error("djent-qa actionable comment should mark session as IsPRReviewFix=true (implementer elevation)")
+	}
+}
+
+// TestEvaluateAutomerge_GreenCIAndApprovedYolo_Merges verifies the happy
+// path: yolo repo, CI green, single djent-qa approved review, no conflicts.
+// The automerge label is removed after the merge call.
+func TestEvaluateAutomerge_GreenCIAndApprovedYolo_Merges(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"automerge"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "success"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		f.reviewState = "approved"
+		f.reviewUser = "djent-qa"
+		f.topics = []string{"fordjent-yolo"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 1 {
+		t.Errorf("expected 1 merge call, got %d", f.mergeCalls)
+	}
+	// automerge label should have been removed
+	removed := false
+	for _, l := range f.removedLabels {
+		if l == "automerge" {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("expected automerge label to be removed after merge")
+	}
+}
+
+// TestEvaluateAutomerge_PendingCI_DoesNotMerge verifies the gate waits for CI.
+func TestEvaluateAutomerge_PendingCI_DoesNotMerge(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"automerge"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "pending"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		f.reviewState = "approved"
+		f.reviewUser = "djent-qa"
+		f.topics = []string{"fordjent-yolo"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+	bus := event.NewBus()
+	mgr, _ := NewManager(cfg, bus)
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 0 {
+		t.Errorf("expected 0 merge calls with pending CI, got %d", f.mergeCalls)
+	}
+}
+
+// TestEvaluateAutomerge_FailingCI_DoesNotMerge verifies the gate blocks.
+func TestEvaluateAutomerge_FailingCI_DoesNotMerge(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"automerge"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "failure"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		f.reviewState = "approved"
+		f.reviewUser = "djent-qa"
+		f.topics = []string{"fordjent-yolo"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+	bus := event.NewBus()
+	mgr, _ := NewManager(cfg, bus)
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 0 {
+		t.Errorf("expected 0 merge calls with failing CI, got %d", f.mergeCalls)
+	}
+}
+
+// TestEvaluateAutomerge_ChangesRequestedLabel_BlocksMerge verifies that the
+// changes_requested label keeps the gate closed even when CI is green.
+func TestEvaluateAutomerge_ChangesRequestedLabel_BlocksMerge(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"automerge", "changes_requested"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "success"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		f.reviewState = "approved"
+		f.reviewUser = "djent-qa"
+		f.topics = []string{"fordjent-yolo"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+	bus := event.NewBus()
+	mgr, _ := NewManager(cfg, bus)
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 0 {
+		t.Errorf("expected 0 merge calls with changes_requested label, got %d", f.mergeCalls)
+	}
+}
+
+// TestEvaluateAutomerge_NoYoloNoReview_DoesNotMerge verifies that non-yolo
+// repos without any approved review do not auto-merge.
+func TestEvaluateAutomerge_NoYoloNoReview_DoesNotMerge(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{"automerge"}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "success"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		// reviewState == "" → no reviews at all
+		f.topics = nil // non-yolo
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+	bus := event.NewBus()
+	mgr, _ := NewManager(cfg, bus)
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 0 {
+		t.Errorf("expected 0 merge calls for non-yolo without review, got %d", f.mergeCalls)
+	}
+}
+
+// TestEvaluateAutomerge_NoAutomergeLabel_NoOp verifies a no-op when the PR
+// has no automerge label (so we don't accidentally merge PRs the implementer
+// didn't intend to auto-merge).
+func TestEvaluateAutomerge_NoAutomergeLabel_NoOp(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields([]string{}, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/x"
+		f.prHeadSHA = "abc123"
+		f.ciCheckConclusion = "success"
+		f.ciCheckName = "CI"
+		f.ciCheckHeadSHA = "abc123"
+		f.reviewState = "approved"
+		f.reviewUser = "djent-qa"
+		f.topics = []string{"fordjent-yolo"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+	bus := event.NewBus()
+	mgr, _ := NewManager(cfg, bus)
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.evaluateAutomerge(ctx, "fjadmin/testbed", 7, "test")
+
+	if f.mergeCalls != 0 {
+		t.Errorf("expected 0 merge calls without automerge label, got %d", f.mergeCalls)
+	}
+}
+
+// TestYoloPRSpawn_DevPRInYoloRepoSpawnsReviewer verifies the yolo auto-spawn:
+// a pull_request.opened event on a yolo repo authored by djent-dev produces
+// a reviewer session keyed pulls/N.
+func TestYoloPRSpawn_DevPRInYoloRepoSpawnsReviewer(t *testing.T) {
+	f := newInteractionForgejo(t)
+	defer f.Close()
+
+	f.setFields(nil, "open", func(f *interactionForgejo) {
+		f.isPR = true
+		f.prHeadRef = "feature/yolo"
+		f.prHeadSHA = "abc123"
+		f.prUser = "djent-dev"
+		f.topics = []string{"fordjent-yolo"}
+		f.issueTitle = "[implementer] Yolo feature"
+		f.repoFiles = []string{"go.mod", "main.go"}
+	})
+
+	cfg := testConfig(t, f.URL(), true)
+	cfg.Agent.EnableScaffoldDetection = false
+	cfg.Agent.MaxSessions = 5
+	cfg.Agent.MaxTurns = 3
+
+	bus := event.NewBus()
+	mgr, err := NewManager(cfg, bus)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	// Simulate a pull_request.opened webhook from Forgejo with djent-dev as author.
+	opened := event.NewEvent(event.PullRequestOpened, "fjadmin/testbed", 7, 7, "djent-dev", "opened")
+	opened.PRNumber = 7
+	opened.SessionKey = "fjadmin/testbed/pulls/7"
+
+	mgr.handleEvent(ctx, opened)
+
+	// handleEvent synchronously dispatches the synthetic ReviewRequested event
+	// (also synchronously), which creates a session keyed pulls/7 (the
+	// reviewer session key is the same — the router resolves the role).
+	mgr.mu.RLock()
+	var found bool
+	for k, s := range mgr.sessions {
+		if k == "fjadmin/testbed/pulls/7" && s != nil {
+			found = true
+			break
+		}
+	}
+	mgr.mu.RUnlock()
+	if !found {
+		t.Error("expected a pulls/7 reviewer session to be created after yolo PR open")
 	}
 }
 
@@ -1066,6 +1556,7 @@ func TestFSMQuestionLabelTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	defer mgr.shutdownAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

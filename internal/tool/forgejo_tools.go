@@ -1135,6 +1135,173 @@ func (t *forgejoMergePRTool) checkSpecRef(ctx context.Context, repo string, prNu
 	return ""
 }
 
+// --- forgejo_submit_review ---
+
+// forgejoSubmitReviewTool posts a formal review on a pull request, used by
+// the djent-qa reviewer role. The review state drives the rework loop:
+//   - approved:           clears the `changes_requested` label if present
+//   - changes_requested:  adds the `changes_requested` label so routing rule 3
+//     routes the implementer to a pulls/N-fix session
+//   - commented:          posts a non-binding review, leaves labels untouched
+//
+// The tool does NOT merge — gated automerge is the manager's responsibility.
+type forgejoSubmitReviewTool struct {
+	adapter        *ForgejoAdapter
+	reviewerLogin  string // Forgejo username the reviewer is authenticated as (from config role_users.reviewer); empty disables the duplicate-review check
+}
+
+// NewSubmitReviewTool returns a forgejo_submit_review tool. `reviewerLogin`
+// is the username the reviewer is authenticated as (cfg.Forgejo.RoleUsers["reviewer"]);
+// the tool uses it for the pre-submit duplicate-review check (LatestReviewByUser).
+// Pass empty string to disable the deduplication guard.
+func NewSubmitReviewTool(adapter *ForgejoAdapter, reviewerLogin string) *forgejoSubmitReviewTool {
+	return &forgejoSubmitReviewTool{adapter: adapter, reviewerLogin: reviewerLogin}
+}
+
+func (t *forgejoSubmitReviewTool) Name() string { return "forgejo_submit_review" }
+
+func (t *forgejoSubmitReviewTool) Description() string {
+	return `Submit a formal review on a pull request. Use this for decisive reviews: approve when the implementation is correct, or request changes when issues must be fixed. Replaces bare forgejo_comment for verdicts.
+
+- state="approved": posts an APPROVED review and clears the changes_requested label if present (gated automerge will fire on the next qualifying event).
+- state="changes_requested": posts a REQUEST_CHANGES review and adds the changes_requested label (routing will spawn the implementer fix session).
+- state="commented": posts a non-binding review comment. No labels touched. Use for clarifying questions only.
+
+Do NOT call forgejo_merge_pr after this — the gated automerge watcher merges when CI is green and a review is approved.`
+}
+
+func (t *forgejoSubmitReviewTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repository": map[string]interface{}{
+				"type":        "string",
+				"description": "Repository in owner/repo format",
+			},
+			"pr_number": map[string]interface{}{
+				"type":        "integer",
+				"description": "Pull request number to review",
+			},
+			"state": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"approved", "changes_requested", "commented"},
+				"description": "Review verdict",
+			},
+			"body": map[string]interface{}{
+				"type":        "string",
+				"description": "Review body (markdown). For changes_requested: list the specific required changes.",
+			},
+		},
+		"required": []string{"repository", "pr_number", "state", "body"},
+	}
+}
+
+func (t *forgejoSubmitReviewTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Repository string `json:"repository"`
+		PRNumber   int    `json:"pr_number"`
+		State      string `json:"state"`
+		Body       string `json:"body"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+
+	// Normalize state to the lowercase Forgejo webhook convention the rest of
+	// Fordjent's routing code expects.
+	state := strings.ToLower(strings.TrimSpace(params.State))
+	switch state {
+	case "approved", "changes_requested", "commented":
+		// ok
+	default:
+		return "", fmt.Errorf("invalid state %q: must be approved / changes_requested / commented", params.State)
+	}
+
+	client := t.adapter.Client()
+
+	// A2 — duplicate-submission guard (see GEMMA-FAILURE-ANALYSIS.md).
+	// Smaller models (e.g. Gemma4-12B) sometimes call forgejo_submit_review
+	// multiple times for the same state after a successful first submit
+	// (evidence: pulls/14 in the gemma-stress test submitted `approved` 3×).
+	// If we can identify the reviewer's own login, check that no review with
+	// the requested state already exists from that user. If it does, return
+	// the same success schema that a fresh submit would have produced without
+	// re-hitting Forgejo — a NULL-success — so the model stops re-submitting.
+	if t.reviewerLogin != "" {
+		if existing, derr := client.ListPRReviews(ctx, params.Repository, params.PRNumber); derr == nil {
+			latest := forgejo.LatestReviewByUser(existing, t.reviewerLogin)
+			if latest != nil && strings.EqualFold(latest.State, forgejoReviewStateFromAPI(state)) && latest.ID != 0 {
+				slog.Info("forgejo_submit_review: duplicate submission suppressed",
+					"pr", params.PRNumber, "state", state, "reviewer", t.reviewerLogin,
+					"duplicate", true, "existing_review_id", latest.ID)
+				return submitReviewSuccessJSON(params.PRNumber, state, true), nil
+			}
+		} else {
+			slog.Debug("forgejo_submit_review: could not list existing reviews for dedup check",
+				"pr", params.PRNumber, "error", derr)
+		}
+	}
+
+	if _, err := client.SubmitReview(ctx, params.Repository, params.PRNumber, state, params.Body); err != nil {
+		return "", fmt.Errorf("submit review: %w", err)
+	}
+
+	// Label side-effects per spec.
+	switch state {
+	case "approved":
+		// Best-effort: clear changes_requested if present. Errors are
+		// non-fatal — the review itself was the primary effect.
+		if err := client.RemoveIssueLabel(ctx, params.Repository, params.PRNumber, "changes_requested"); err != nil {
+			slog.Debug("submit_review: changes_requested label was not present (no removal needed)",
+				"pr", params.PRNumber, "error", err)
+		}
+	case "changes_requested":
+		if err := client.AddIssueLabels(ctx, params.Repository, params.PRNumber, []string{"changes_requested"}); err != nil {
+			slog.Warn("submit_review: failed to add changes_requested label", "pr", params.PRNumber, "error", err)
+		}
+	}
+
+	return submitReviewSuccessJSON(params.PRNumber, state, false), nil
+}
+
+// forgejoReviewStateFromAPI maps the lowercase Forgejo webhook convention
+// (the state argument the model passes) to the uppercased form Forgejo returns
+// in ListPRReviews. Forgejo returns "APPROVED" / "REQUEST_CHANGES" / "COMMENTED";
+// the model passes "approved" / "changes_requested" / "commented".
+func forgejoReviewStateFromAPI(state string) string {
+	switch state {
+	case "approved":
+		return "APPROVED"
+	case "changes_requested":
+		return "REQUEST_CHANGES"
+	case "commented":
+		return "COMMENTED"
+	}
+	return strings.ToUpper(state)
+}
+
+// submitReviewSuccessJSON renders the structured success result for the
+// forgejo_submit_review tool. The schema is machine-actionable so smaller
+// models stop re-submitting after a successful call (see A2 in
+// GEMMA-FAILURE-ANALYSIS.md). `duplicate` is true when the call returned
+// success without contacting Forgejo because an existing review was found.
+func submitReviewSuccessJSON(pr int, state string, duplicate bool) string {
+	note := "Review submitted and labels updated. Do NOT call this tool again with the same state for this PR in this session."
+	if duplicate {
+		note = "A review with this state already exists on this PR from your user. No new submission was made. Do NOT call this tool again with the same state for this PR in this session."
+	}
+	out := map[string]interface{}{
+		"status":           "ok",
+		"pr":               pr,
+		"state":            state,
+		"action_required":  false,
+		"duplicate":         duplicate,
+		"note":              note,
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
+}
+
 // --- forgejo_ping_parent ---
 
 type forgejoPingParentTool struct {

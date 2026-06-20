@@ -74,6 +74,7 @@ type AgentConfig struct {
 	EnableLifecycle         bool          `yaml:"enable_lifecycle"`
 	EnableStaleGate         bool          `yaml:"enable_stale_gate"`
 	EnableScaffoldDetection bool          `yaml:"enable_scaffold_detection"`
+	EnableBugReportDepBlock bool          `yaml:"enable_bug_report_dep_block"` // A3: pre-flight block implementer sessions whose bug-report issue references an open unmerged PR
 	EnableSessionRecovery   bool          `yaml:"enable_session_recovery"`
 	EnableContextInjection  bool          `yaml:"enable_context_injection"`
 	EnableAutoCollaborator  bool          `yaml:"enable_auto_collaborator"`
@@ -99,6 +100,13 @@ type AgentConfig struct {
 	MaxSessionRetries     int               `yaml:"max_session_retries"`
 	AutoRetryDelay        time.Duration     `yaml:"auto_retry_delay"`
 	MaxCascadeRounds      int               `yaml:"max_cascade_rounds"`
+
+	// MaxReworkAttempts bounds the per-PR dev↔QA ping-pong. Counted in
+	// pulls/N-fix session spawns per PR (failed CI reviews + changes_requested
+	// reviews + human PR comments). Once the cap is reached the manager labels
+	// the PR `fordjent/failed:rework-exhausted` + `blocked` and stops
+	// auto-spawning further _fix sessions for it.
+	MaxReworkAttempts     int               `yaml:"max_rework_attempts"`
 }
 
 type BudgetConfig struct {
@@ -179,6 +187,7 @@ func Load(path string) (*Config, error) {
 			EnableLifecycle:         true,
 			EnableStaleGate:         true,
 			EnableScaffoldDetection: true,
+			EnableBugReportDepBlock: true,
 			EnableSessionRecovery:   true,
 			EnableContextInjection:  true,
 			EnableAutoCollaborator:  true,
@@ -194,6 +203,7 @@ func Load(path string) (*Config, error) {
 			MaxSessionRetries:      2,
 			AutoRetryDelay:         5 * time.Minute,
 			MaxCascadeRounds:      10,
+			MaxReworkAttempts:      3,
 		},
 		Budget: BudgetConfig{
 			Enabled:        false,

@@ -635,6 +635,16 @@ func (c *Client) PostIssueComment(ctx context.Context, repo string, issueNumber 
 	return err
 }
 
+// EditIssueBody replaces the issue body with the given text. Used by the
+// bug-report dependency pre-flight (A3) to append a `Depends on: #N` directive
+// to an issue's body so the scheduler recognises the dependency and unblocks
+// the issue when the referenced PR merges.
+func (c *Client) EditIssueBody(ctx context.Context, repo string, issueNumber int, body string) error {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "issues", fmt.Sprintf("%d", issueNumber))
+	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, map[string]string{"body": body})
+	return err
+}
+
 // AddCollaborator adds a user as a collaborator to a repository with the given permission (read, write, admin).
 func (c *Client) AddCollaborator(ctx context.Context, repo, username, permission string) error {
 	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "collaborators", url.PathEscape(username))
@@ -1311,3 +1321,67 @@ func (c *Client) ListPRReviews(ctx context.Context, repo string, number int) ([]
 	}
 	return reviews, nil
 }
+
+// SubmitReview posts a formal review on a pull request. `state` is one of
+// "approved", "changes_requested", "commented" — matching the values that
+// the webhook payload will round-trip back as `review.state`.
+func (c *Client) SubmitReview(ctx context.Context, repo string, number int, state, body string) (*Review, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "pulls", fmt.Sprintf("%d", number), "reviews")
+	result, err := c.doRequest(ctx, http.MethodPost, apiPath, map[string]string{
+		"event": state,
+		"body":  body,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var review Review
+	if err := json.Unmarshal([]byte(result), &review); err != nil {
+		return nil, fmt.Errorf("unmarshal review: %w", err)
+	}
+	return &review, nil
+}
+
+// CheckRun represents a Forgejo/Gitea Actions check run.
+type CheckRun struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	HeadSHA    string `json:"head_sha"`
+	Status     string `json:"status"`     // "queued" / "in_progress" / "completed"
+	Conclusion string `json:"conclusion"` // when status=completed: "success"/"failure"/...
+	HTMLURL    string `json:"html_url"`
+}
+
+// ListCommitCheckRuns returns check runs for a given commit SHA. Forgejo/Gitea
+// exposes this via the status-check-runs API; falls back to combined statuses
+// when check-runs endpoint is not present in older Forgejo versions.
+func (c *Client) ListCommitCheckRuns(ctx context.Context, repo, sha string) ([]CheckRun, error) {
+	apiPath := path.Join("/api/v1/repos", EscapeRepoPath(repo), "commits", sha, "check-runs")
+	result, err := c.doRequest(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		CheckRuns []CheckRun `json:"check_runs"`
+	}
+	if err := json.Unmarshal([]byte(result), &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal check-runs: %w", err)
+	}
+	return resp.CheckRuns, nil
+}
+
+// LatestReviewByUser returns the most recent review (highest ID) authored by
+// the given user login. Returns nil if no review by that user exists.
+// Used by the gated automerge watcher to find djent-qa's latest verdict.
+func LatestReviewByUser(reviews []Review, login string) *Review {
+	var latest *Review
+	for i := range reviews {
+		r := &reviews[i]
+		if r.User != nil && r.User.Login == login {
+			if latest == nil || r.ID > latest.ID {
+				latest = r
+			}
+		}
+	}
+	return latest
+}
+

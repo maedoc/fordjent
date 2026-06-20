@@ -28,8 +28,8 @@ agent:
   max_turns_pm: 15
   max_turns_implementer: 50
   max_turns_reviewer: 20
-  # All roles use the local Gemma 4 12B model (llama.cpp server on host, :8181).
-  # NeuralWatt is intentionally disabled (not referenced by any role or fallback).
+  # All roles use ONLY the local Gemma 4 12B model (llama.cpp server on host, :8181).
+  # No external providers are configured.
   role_providers:
     pm: local-gpu
     reviewer: local-gpu
@@ -44,12 +44,16 @@ agent:
   enable_lifecycle: true
   enable_stale_gate: true
   enable_scaffold_detection: true
+  enable_bug_report_dep_block: true   # A3: auto-block bug-report issues that reference open unmerged PRs
   enable_session_recovery: true
   enable_context_injection: true
   enable_auto_collaborator: true
   enable_auto_retry: true
   max_session_retries: 2
   auto_retry_delay: 5m
+  # Max per-PR rework attempts before labeling `fordjent/failed:rework-exhausted`
+  # + `blocked`. Covers failed CI / changes_requested / human PR comment spawns.
+  max_rework_attempts: 3
   require_role_tag: true
   session_timeout: 60m
   git_name: Fordjent Dev Agent
@@ -66,50 +70,18 @@ sandbox:
   violation_comment_threshold: 3
   allowed_write_dirs: []
 providers:
-- name: neuralwatt-qwen
-  api_base: https://api.neuralwatt.com/v1
-  api_key: ${NEURALWATT_API_KEY}
-  model: qwen3.6-35b
-  max_tokens: 16384
-  request_timeout: 120s
-  max_retries: 3
-  retry_base_delay: 2s
-  retry_max_delay: 30s
-  max_concurrent_llm_calls: 4
-  cost_per_1m_input_tokens: 0
-  cost_per_1m_output_tokens: 0
 - name: local-gpu
+  # ONLY provider configured — all roles (pm/implementer/reviewer/tester/devops)
+  # route here. Talks to the local llama.cpp server (Gemma 4 12B Q5_K_XL) on the
+  # host at :8181, reached from inside the container via the docker bridge gateway.
   api_base: http://172.18.0.1:8181/v1
   model: gemma-4-12b-it-UD-Q5_K_XL.gguf
   max_tokens: 16384
-  request_timeout: 60s
+  request_timeout: 120s
   max_retries: 3
   retry_base_delay: 2s
   retry_max_delay: 30s
-  cost_per_1m_input_tokens: 0
-  cost_per_1m_output_tokens: 0
-- name: wafer-qwen
-  api_base: https://pass.wafer.ai/v1
-  api_key: ${WAFER_API_KEY}
-  model: Qwen3.5-397B-A17B
-  max_tokens: 32768
-  request_timeout: 90s
-  max_retries: 5
-  retry_base_delay: 3s
-  retry_max_delay: 60s
-  max_concurrent_llm_calls: 3
-  cost_per_1m_input_tokens: 0
-  cost_per_1m_output_tokens: 0
-- name: wafer-glm
-  api_base: https://pass.wafer.ai/v1
-  api_key: ${WAFER_API_KEY}
-  model: GLM-5.1
-  max_tokens: 32768
-  request_timeout: 120s
-  max_retries: 5
-  retry_base_delay: 3s
-  retry_max_delay: 60s
-  max_concurrent_llm_calls: 3
+  max_concurrent_llm_calls: 2
   cost_per_1m_input_tokens: 0
   cost_per_1m_output_tokens: 0
 events:

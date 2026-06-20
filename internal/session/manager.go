@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ type Session struct {
 	mu     sync.Mutex
 	busy   bool
 	events chan *event.Event
+	wg     sync.WaitGroup // tracks the runSession goroutine for clean shutdown
 }
 
 // isBusy returns whether the session is currently processing events.
@@ -301,6 +303,7 @@ func (m *Manager) restoreSessions() error {
 			events:          make(chan *event.Event, 64),
 		}
 		m.sessions[rec.SessionKey] = sess
+		sess.wg.Add(1)
 		go m.runSession(sessCtx, sess)
 		slog.Info("restored session from database", "session_key", rec.SessionKey, "last_active", rec.LastActive)
 
@@ -656,6 +659,29 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// A3 — Bug-report dependency pre-flight (see GEMMA-FAILURE-ANALYSIS.md).
+	// Implements the `bug-report-dependency-block` capability spec: scan the
+	// issue body for #N references and, if any referenced issue is an open,
+	// unmerged PR, auto-block this issue (label + Depends on + marker comment)
+	// instead of letting the implementer burn turns looking for code that
+	// isn't on main yet.
+	//
+	// Skipped for PM/review/decompose titles (those roles don't implement).
+	//
+	// Gated on both IssueOpened AND IssueEdited: an edit (automated or human)
+	// that leaves the bug-report referencing an open unmerged PR still needs
+	// to stay blocked. The apply path is idempotent (re-posts the marker
+	// comment only if no prior marker comment exists).
+	if m.cfg.Agent.EnableBugReportDepBlock &&
+		(evt.Type == event.IssueOpened || evt.Type == event.IssueEdited) &&
+		evt.IssueNumber > 0 && evt.PRNumber == 0 && evt.Action != "green_light" {
+		if blocked, err := m.checkBugReportDependencyBlock(ctx, evt); err != nil {
+			slog.Warn("bug-report-dep-block: check failed", "error", err, "issue", evt.IssueNumber, "repo", evt.Repository)
+		} else if blocked {
+			return
+		}
+	}
+
 	// Spec lifecycle labels: if this is a PR with spec-proposed label and it's now merged,
 	// transition from spec-proposed to spec-approved.
 	if evt.Type == event.PullRequestMerged && evt.PRNumber > 0 {
@@ -759,51 +785,58 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		return
 	}
 
-	// Automerge label detection on PRs
+	// Automerge label detection on PRs.
+	//
+	// The previous behavior here was to merge immediately when the label
+	// appeared. Per the rework-loop change, the manager instead evaluates
+	// the gate (CI green + recent review approved + mergeable + no
+	// changes_requested label) and merges only when all conditions hold.
+	// Evaluation is also re-triggered by check_run.completed,
+	// issue_comment.created, and pull_request_review events (see below).
 	if evt.Type == event.PullRequestLabelUpdated && evt.PRNumber > 0 {
-		pr, err := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
-		if err == nil && pr.State != "closed" {
-			issue, issueErr := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.PRNumber)
-			if issueErr == nil && issue != nil {
-				hasAutomerge := false
-				for _, l := range issue.Labels {
-					if l.Name == "automerge" {
-						hasAutomerge = true
-						break
-					}
-				}
-				if hasAutomerge {
-					slog.Info("automerge label detected on PR, attempting direct merge", "pr", evt.PRNumber, "repo", evt.Repository)
-					// Try to merge the PR directly via API. No LLM session needed.
-					// Try multiple merge styles as a workaround for Forgejo v9 405 errors.
-					if m.forgejoClient != nil {
-						prDetail, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
-						if prErr == nil && prDetail.State == "open" && !prDetail.HasConflicts {
-							// Try each merge style in order; Forgejo v9 accepts some but not all
-							for _, style := range []string{"merge", "squash", "rebase-merge"} {
-								mergeErr := m.forgejoClient.MergePR(ctx, evt.Repository, evt.PRNumber, style)
-								if mergeErr == nil {
-									slog.Info("automerge: direct merge succeeded", "pr", evt.PRNumber, "style", style, "repo", evt.Repository)
-									return
-								}
-								slog.Debug("automerge: merge style failed, trying next", "pr", evt.PRNumber, "style", style, "error", mergeErr)
-							}
-							// All styles failed — the automerge label is already on the PR.
-							// Forgejo's native auto-merge may handle it if configured on the server.
-							// Post a comment for visibility and skip the reviewer session.
-							slog.Warn("automerge: all API merge styles failed, label is set for Forgejo native auto-merge", "pr", evt.PRNumber)
-							if m.forgejoClient != nil {
-								_ = m.forgejoClient.PostIssueComment(ctx, evt.Repository, evt.PRNumber, "⚠️ Auto-merge via API failed. The 'automerge' label is set — Forgejo will merge automatically when checks pass, or a human can merge manually.")
-							}
-							return
-						} else {
-								slog.Warn("automerge: PR not mergeable", "pr", evt.PRNumber, "error", prErr, "state", prDetail.State, "conflicts", prDetail.HasConflicts)
-							}
-						}
-					}
-			}
+		if m.hasAutomergeLabel(ctx, evt.Repository, evt.PRNumber) {
+			m.evaluateAutomerge(ctx, evt.Repository, evt.PRNumber, "label_updated")
 		}
 		return
+	}
+
+	// Gated automerge re-evaluation on events that may have just satisfied the gate.
+	// These events are also routed to their primary role via RouteTable (e.g.
+	// failed check_run → implementer fix), but the manager also prods the gate
+	// here so a green CI + approved review can merge without waiting for
+	// another event. evaluateAutomerge is a no-op if the PR doesn't have the
+	// automerge label.
+	if evt.PRNumber > 0 {
+		switch evt.Type {
+		case event.CheckRunCompleted, event.WorkflowRunCompleted, event.IssueCommentCreated, event.PullRequestReview:
+			m.evaluateAutomerge(ctx, evt.Repository, evt.PRNumber, string(evt.Type))
+		}
+	}
+
+	// Yolo reviewer auto-spawn: when `djent-dev` opens a PR on a repo with
+	// the `fordjent-yolo` topic, dispatch a synthetic `ReviewRequested` event
+	// in-process so the djent-qa reviewer session is spawned. This replaces the
+	// previous behavior where yolo repos merged the instant the `automerge`
+	// label was applied. The reviewer then approves (gated automerge fires) or
+	// requests changes (implementer fix session fires).
+	if evt.Type == event.PullRequestOpened && evt.PRNumber > 0 && m.isYoloRepo(ctx, evt.Repository) {
+		pr, prErr := m.forgejoClient.GetPR(ctx, evt.Repository, evt.PRNumber)
+		if prErr == nil && pr.User != nil && (pr.User.Login == "djent-dev" || strings.HasPrefix(pr.User.Login, "fordjent")) {
+			slog.Info("yolo: auto-spawning reviewer session for new dev PR",
+				"pr", evt.PRNumber, "repo", evt.Repository, "author", pr.User.Login)
+			reviewEvt := event.NewEvent(event.ReviewRequested, evt.Repository, evt.PRNumber, evt.PRNumber, "fordjent-manager", "review")
+			reviewEvt.PRNumber = evt.PRNumber
+			reviewEvt.Role = "reviewer" // synthetic event routes directly (no router ApplyRoute step)
+			reviewEvt.SessionKey = fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber)
+			reviewEvt.Payload = map[string]interface{}{
+				"review_requested": true,
+				"pr_number":        evt.PRNumber,
+			}
+			// Re-handle in-process (NOT via webhook) — routes via the routing
+			// table to the reviewer role.
+			m.handleEvent(ctx, reviewEvt)
+			return
+		}
 	}
 
 	// Session recovery: if a scheduler unblocks an issue whose session died, re-trigger.
@@ -938,6 +971,19 @@ func (m *Manager) handleEvent(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	// Rework cap: if this is a new `pulls/N-fix` session trigger (failed CI,
+	// changes_requested review, or human PR comment) and no `_fix` session is
+	// already active for the PR, increment the per-PR rework counter. If the
+	// counter exceeds MaxReworkAttempts, do NOT spawn the session — label the
+	// PR `fordjent/failed:rework-exhausted` + `blocked` and post a comment.
+	if isFixTriggerEvent(evt) && evt.PRNumber > 0 && strings.HasSuffix(evt.SessionKey, "-fix") {
+		if !m.hasActiveFixSession(evt.Repository, evt.PRNumber) {
+			if m.exhaustedRework(ctx, evt.Repository, evt.PRNumber) {
+				return
+			}
+		}
+	}
+
 	sess, err := m.getOrCreate(ctx, evt)
 	if err != nil {
 		slog.Error("failed to create session", "error", err, "session_key", evt.SessionKey)
@@ -988,6 +1034,390 @@ func buildCloneURL(baseURL, token, repo string) string {
 	return fmt.Sprintf("%s/%s.git", baseURL, repo)
 }
 
+// hasAutomergeLabel reports whether the given PR (resolved through the issue
+// API, since PRs and issues share a number space in Forgejo) carries the
+// `automerge` label. Errors fall back to false.
+func (m *Manager) hasAutomergeLabel(ctx context.Context, repo string, prNumber int) bool {
+	if m.forgejoClient == nil || prNumber <= 0 {
+		return false
+	}
+	issue, err := m.forgejoClient.GetIssue(ctx, repo, prNumber)
+	if err != nil || issue == nil {
+		return false
+	}
+	for _, l := range issue.Labels {
+		if l.Name == "automerge" {
+			return true
+		}
+	}
+	return false
+}
+
+// evaluateAutomerge is the gated-merge entry point. It is called whenever:
+//   - the `automerge` label was added to the PR (label_updated), or
+//   - a CI check_run / workflow_run completed on the PR, or
+//   - a (non-marker) PR comment was posted, or
+//   - a pull_request_review event arrived.
+//
+// The merge fires only when ALL gate conditions hold:
+//  1. PR carries the `automerge` label (otherwise it is a no-op),
+//  2. all check_runs on the head SHA have conclusion `success`,
+//  3. there is no `changes_requested` PR label,
+//  4. the most recent djent-qa review (in yolo repos) or any reviewer's
+//     review (non-yolo repos) has state `approved`, OR no review exists yet
+//     AND the repo is non-yolo (in which case a human must approve -- we wait),
+//  5. the PR is `mergeable` with no conflicts.
+//
+// The merge itself uses the multi-style fallback (merge / squash / rebase-merge)
+// to work around Forgejo v9 405 errors on individual styles.
+//
+// On success the `automerge` label is removed so the PR is not re-merged if
+// the manager sees a duplicate event.
+//
+// All non-fatal cases (gate not satisfied, API errors) are logged at debug or
+// warn level and silently return; the manager relies on the next qualifying
+// event to retry.
+func (m *Manager) evaluateAutomerge(ctx context.Context, repo string, prNumber int, trigger string) {
+	if m.forgejoClient == nil || prNumber <= 0 {
+		return
+	}
+	if !m.hasAutomergeLabel(ctx, repo, prNumber) {
+		return
+	}
+
+	pr, err := m.forgejoClient.GetPR(ctx, repo, prNumber)
+	if err != nil || pr == nil {
+		slog.Debug("automerge: could not fetch PR", "pr", prNumber, "trigger", trigger, "error", err)
+		return
+	}
+	if pr.State != "open" || pr.Merged {
+		return
+	}
+
+	// Block gate: changes_requested label means the reviewer already punted
+	// the PR back to the implementer. We MUST NOT merge.
+	issue, err := m.forgejoClient.GetIssue(ctx, repo, prNumber)
+	if err != nil || issue == nil {
+		slog.Debug("automerge: could not fetch issue for labels", "pr", prNumber, "error", err)
+		return
+	}
+	for _, l := range issue.Labels {
+		if l.Name == "changes_requested" {
+			slog.Debug("automerge: blocked by changes_requested label", "pr", prNumber)
+			return
+		}
+	}
+
+	if pr.HasConflicts || !pr.Mergeable {
+		slog.Debug("automerge: PR not mergeable", "pr", prNumber, "mergeable", pr.Mergeable, "has_conflicts", pr.HasConflicts)
+		return
+	}
+
+	// CI gate: every check run on the head SHA must be success. If we cannot
+	// fetch check runs at all (older Forgejo), fall back to treating CI as
+	// unknown and DO NOT merge (fail-safe — the CI may still be running).
+	headSHA := pr.Head.SHA
+	if headSHA == "" {
+		slog.Warn("automerge: PR has no head SHA, cannot verify CI", "pr", prNumber)
+		return
+	}
+	checks, checkErr := m.forgejoClient.ListCommitCheckRuns(ctx, repo, headSHA)
+	if checkErr != nil {
+		slog.Debug("automerge: could not list check runs", "pr", prNumber, "error", checkErr)
+		return
+	}
+	if len(checks) == 0 {
+		slog.Debug("automerge: no check runs yet — waiting for CI to start", "pr", prNumber)
+		return
+	}
+	for _, c := range checks {
+		if c.Conclusion != "success" {
+			slog.Debug("automerge: check not green yet", "pr", prNumber, "check", c.Name, "conclusion", c.Conclusion)
+			return
+		}
+	}
+
+	// Review gate: in yolo repos the most recent djent-qa review must be
+	// approved; in non-yolo repos accept any approved review (usually human).
+	yolo := m.isYoloRepo(ctx, repo)
+	reviews, reviewErr := m.forgejoClient.ListPRReviews(ctx, repo, prNumber)
+	if reviewErr != nil {
+		slog.Warn("automerge: could not list reviews", "pr", prNumber, "error", reviewErr)
+		return
+	}
+	approved := false
+	if yolo {
+		qa := forgejo.LatestReviewByUser(reviews, "djent-qa")
+		if qa != nil && strings.EqualFold(qa.State, "approved") {
+			approved = true
+		}
+	} else {
+		for _, r := range reviews {
+			if strings.EqualFold(r.State, "approved") {
+				approved = true
+				break
+			}
+		}
+	}
+	if !approved {
+		slog.Debug("automerge: no qualifying approved review yet", "pr", prNumber, "yolo", yolo)
+		return
+	}
+
+	// All gates passed — attempt the merge with style fallback.
+	slog.Info("automerge: gate satisfied, merging", "pr", prNumber, "repo", repo, "trigger", trigger)
+	for _, style := range []string{"merge", "squash", "rebase-merge"} {
+		if mergeErr := m.forgejoClient.MergePR(ctx, repo, prNumber, style); mergeErr == nil {
+			slog.Info("automerge: merged", "pr", prNumber, "style", style, "trigger", trigger)
+			// Clear the automerge label so we don't re-process on duplicate events.
+			if rmErr := m.forgejoClient.RemoveIssueLabel(ctx, repo, prNumber, "automerge"); rmErr != nil {
+				slog.Debug("automerge: could not remove automerge label (non-fatal)", "pr", prNumber, "error", rmErr)
+			}
+			return
+		}
+	}
+	slog.Warn("automerge: all merge styles failed", "pr", prNumber, "repo", repo)
+}
+
+// isYoloRepo reports whether the given repo has the `fordjent-yolo`
+// topic configured. Used by evaluateAutomerge to decide whether a djent-qa
+// approved review is required (yolo) or any approved review suffices (non-yolo).
+// Errors fall back to false (treat as non-yolo, require human approval).
+func (m *Manager) isYoloRepo(ctx context.Context, repo string) bool {
+	if m.forgejoClient == nil || repo == "" {
+		return false
+	}
+	topics, err := m.forgejoClient.GetRepoTopics(ctx, repo)
+	if err != nil {
+		return false
+	}
+	for _, t := range topics {
+		if t == "fordjent-yolo" {
+			return true
+		}
+	}
+	return false
+}
+
+// issueRefRe matches references to issues/PRs anywhere in free-form text:
+//   - `#N`         (standalone)
+//   - `issue #N`   (case-insensitive)
+//   - `PR #N`      (case-insensitive)
+//   - `pull_request #N`, `pull request #N`
+//
+// Captures the digits only. Excludes close/fix/resolve keywords (those are
+// handled separately by parseClosingRefs in agent.go).
+//
+// The optional prefix group is followed by `\s*#N`. The trailing `\b` does
+// the digit-boundary check; the LEADING boundary is left to the `
+// (?:^|[^A-Za-z0-9])` lookahead-ish group (Go's stdlib regexp is RE2, no
+// lookbehind, so we use a non-capturing alternation that matches the char
+// before the optional prefix or the start of string).
+var issueRefRe = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?:issue|pr|pull\s*request|pull-request)?\s*#(\d{1,7})\b`)
+
+// extractBugReportRefs returns the unique issue/PR numbers referenced via
+// `#N` syntax anywhere in the title or body of a bug-report issue. Used by
+// the A3 pre-flight (checkBugReportDependencyBlock) to look up dependencies.
+func extractBugReportRefs(title, body string) []int {
+	text := title + "\n" + body
+	matches := issueRefRe.FindAllStringSubmatch(text, -1)
+	seen := make(map[int]bool)
+	var refs []int
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		num, err := strconv.Atoi(m[1])
+		if err != nil || num <= 0 || seen[num] {
+			continue
+		}
+		seen[num] = true
+		refs = append(refs, num)
+	}
+	return refs
+}
+
+// checkBugReportDependencyBlock implements the A3 fix
+// (GEMMA-FAILURE-ANALYSIS.md, `bug-report-dependency-block` spec).
+//
+// For non-PM issues, scans the issue title+body for #N references and, for
+// each reference, queries Forgejo to check whether the referenced issue is
+// an open, unmerged PR. If so, this issue is auto-blocked (label + Depends on
+// body append + marker comment) and the function returns true — the caller
+// skips session creation.
+//
+// Multiple references short-circuit on the first blocking dep found; the
+// others would be picked up by the scheduler's transitive unblock path when
+// the first dep merges.
+func (m *Manager) checkBugReportDependencyBlock(ctx context.Context, evt *event.Event) (bool, error) {
+	if m.forgejoClient == nil {
+		return false, nil
+	}
+	title := extractIssueTitle(evt)
+	lowerTitle := strings.ToLower(title)
+	if strings.Contains(lowerTitle, "[pm]") ||
+		strings.Contains(lowerTitle, "[project manager]") ||
+		strings.Contains(lowerTitle, "[decompose]") ||
+		strings.Contains(lowerTitle, "[review]") {
+		return false, nil
+	}
+	issue, err := m.forgejoClient.GetIssue(ctx, evt.Repository, evt.IssueNumber)
+	if err != nil {
+		return false, fmt.Errorf("get trigger issue: %w", err)
+	}
+	refs := extractBugReportRefs(title, issue.Body)
+	if len(refs) == 0 {
+		return false, nil
+	}
+	for _, refN := range refs {
+		refIssue, rerr := m.forgejoClient.GetIssue(ctx, evt.Repository, refN)
+		if rerr != nil {
+			slog.Debug("bug-report-dep-block: could not look up referenced issue", "ref", refN, "error", rerr)
+			continue
+		}
+		// Pre-existing convention (Bug Fix 27): a referenced issue WITHOUT a PR field
+		// is a coordination/PM issue — not blocking.
+		if refIssue.PullRequest == nil ||
+			(refIssue.PullRequest.URL == "" && refIssue.PullRequest.HTMLURL == "") {
+			continue
+		}
+		// A closed PR (merged or rejected) — dependency is satisfied, not blocking.
+		if strings.EqualFold(refIssue.State, "closed") {
+			continue
+		}
+		// Open PR found — this is exactly the case A3 guards against.
+		slog.Info("bug-report-dep-block: blocking issue with unmerged dependency",
+			"issue", evt.IssueNumber, "repo", evt.Repository, "blocked_by_pr", refN)
+		if blockErr := m.applyBugReportBlock(ctx, evt.Repository, evt.IssueNumber, issue.Body, refN, refIssue.Title); blockErr != nil {
+			slog.Warn("bug-report-dep-block: failed to apply block — falling back to allowing session",
+				"issue", evt.IssueNumber, "error", blockErr)
+			return false, blockErr
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// applyBugReportBlock performs the three side-effects for the A3 auto-block:
+// label, body edit (Depends on append), and marker comment.
+func (m *Manager) applyBugReportBlock(ctx context.Context, repo string, issueNumber int, currentBody string, depPR int, depPRTitle string) error {
+	// 1) Label the issue `blocked` if not already present (AddIssueLabels is
+	//    deduplicated client-side per Bug Fix 21).
+	if err := m.forgejoClient.AddIssueLabels(ctx, repo, issueNumber, []string{"blocked"}); err != nil {
+		return fmt.Errorf("add blocked label: %w", err)
+	}
+	// 2) Append `Depends on: #N` to the body if not already present (idempotent).
+	depDirective := fmt.Sprintf("Depends on: #%d", depPR)
+	if !strings.Contains(currentBody, depDirective) {
+		newBody := strings.TrimRight(currentBody, "\n") + "\n\n" + depDirective + "\n"
+		if err := m.forgejoClient.EditIssueBody(ctx, repo, issueNumber, newBody); err != nil {
+			return fmt.Errorf("edit issue body: %w", err)
+		}
+	}
+	// 3) Post an auto-block comment with the agent marker so isAgentEvent filters
+	//    the resulting issue_comment.created webhook (prevents self-trigger).
+	//    Idempotent: skip posting if a marker-tagged block comment already
+	//    exists on the issue (so an IssueEdited webhook firing after the
+	//    body edit doesn't post a duplicate).
+	alreadyHasBlockComment := false
+	if existing, err := m.forgejoClient.ListComments(ctx, repo, issueNumber); err == nil {
+		for _, c := range existing {
+			if strings.Contains(c.Body, "<!-- ford -->") && strings.Contains(c.Body, "Automatically blocked by Fordjent") {
+				alreadyHasBlockComment = true
+				break
+			}
+		}
+	}
+	if !alreadyHasBlockComment {
+		comment := fmt.Sprintf("Automatically blocked by Fordjent: this issue references open PR #%d (\"%s\") which has not yet been merged.\nThe issue will be unblocked automatically when PR #%d merges.\n\n<!-- ford -->",
+			depPR, depPRTitle, depPR)
+		if err := m.forgejoClient.PostIssueComment(ctx, repo, issueNumber, comment); err != nil {
+			return fmt.Errorf("post block comment: %w", err)
+		}
+	}
+	return nil
+}
+
+// isFixTriggerEvent reports whether the event is one that spawns (or would
+// spawn) a pulls/N-fix implementer session: a failed CI check, a
+// changes_requested formal review, a review comment on a labelled PR, or
+// a non-marker issue_comment on an open PR. Used by the rework cap.
+func isFixTriggerEvent(evt *event.Event) bool {
+	switch evt.Type {
+	case event.CheckRunCompleted, event.WorkflowRunCompleted:
+		return isFailedCheckConclusion(evt.CheckConclusion)
+	case event.PullRequestReview:
+		return evt.ReviewState == "changes_requested"
+	case event.PullRequestReviewComment:
+		return true // changes_requested or actionable-body path in routing rules 3
+	case event.IssueCommentCreated:
+		return evt.PRNumber > 0
+	}
+	return false
+}
+
+// isFailedCheckConclusion mirrors internal/webhook's isFailedConclusion for the
+// session package — a check_run/workflow_run conclusion that justifies a
+// rework attempt (failure, cancelled, action_required, timed_out).
+func isFailedCheckConclusion(conclusion string) bool {
+	switch conclusion {
+	case "failure", "cancelled", "action_required", "timed_out":
+		return true
+	}
+	return false
+}
+
+// hasActiveFixSession reports whether any leans session keyed `repo/pulls/N-fix*`
+// is currently tracked by the manager. Used to decide whether to increment the
+// rework counter — existing active sessions are reused (kicked), not counted.
+func (m *Manager) hasActiveFixSession(repo string, prNumber int) bool {
+	if prNumber <= 0 {
+		return false
+	}
+	prefix := fmt.Sprintf("%s/pulls/%d-fix", repo, prNumber)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for k, s := range m.sessions {
+		if strings.HasPrefix(k, prefix) && s != nil && s.isBusy() {
+			return true
+		}
+	}
+	return false
+}
+
+// exhaustedRework checks whether the per-PR rework counter has reached/exceeded
+// the configured cap. When over the cap, it labels the PR
+// `fordjent/failed:rework-exhausted` + `blocked`, posts a comment, and returns
+// true (so the caller skips session creation). On the first exhaustion event,
+// the cap row is left in place so subsequent triggers also short-circuit.
+func (m *Manager) exhaustedRework(ctx context.Context, repo string, prNumber int) bool {
+	if m.lc == nil || prNumber <= 0 {
+		return false
+	}
+	attempts, err := m.lc.IncrementRework(ctx, repo, prNumber)
+	if err != nil {
+		slog.Warn("rework: failed to increment counter", "pr", prNumber, "error", err)
+		return false // don't block on infra error; let the session proceed
+	}
+	cap := m.cfg.Agent.MaxReworkAttempts
+	if cap <= 0 {
+		cap = 3
+	}
+	if attempts <= cap {
+		slog.Info("rework: spawning _fix session within cap", "pr", prNumber, "attempts", attempts, "cap", cap)
+		return false
+	}
+	slog.Warn("rework: cap exceeded, blocking _fix session spawn",
+		"pr", prNumber, "attempts", attempts, "cap", cap)
+	if m.forgejoClient != nil {
+		_ = m.forgejoClient.AddIssueLabels(ctx, repo, prNumber,
+			[]string{"fordjent/failed:rework-exhausted", "blocked"})
+		_ = m.forgejoClient.PostIssueComment(ctx, repo, prNumber,
+			"Max rework attempts reached. Please review this PR manually.")
+	}
+	return true
+}
+
 func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[evt.SessionKey]
@@ -996,12 +1426,15 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 	if exists {
 		sess.mu.Lock()
 		sess.LastActive = time.Now()
-		// If this is a human comment on an open PR, mark it as a review fix session.
-		// This overrides the reviewer role (no write tools) to implementer (has write tools)
-		// so the agent can actually make the requested changes.
-		if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" && !strings.Contains(evt.Sender, "fordjent") && !strings.Contains(evt.Sender, "djent") {
+		// If this is a comment on an open PR (human OR djent-qa reviewer), mark it
+		// as a review fix session so the agent has write tools. The isAgentEvent
+		// filter (router.go) already drops comments carrying the `<!-- ford -->`
+		// self-marker, so cost-summary comments from fordjent-bot and djent-*
+		// don't reach this point. We only exclude 'automerge-trigger' (an internal
+		// synthetic sender representing the merge watcher).
+		if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" {
 			sess.IsPRReviewFix = true
-			slog.Info("PR comment from human: marking session as review-fix (implementer role)",
+			slog.Info("PR comment routed to review-fix session (implementer role)",
 				"session_key", sess.Key, "pr", evt.PRNumber, "sender", evt.Sender)
 		}
 		sess.mu.Unlock()
@@ -1089,7 +1522,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 		Sender:          evt.Sender,
 		IsPMFollowUp:    evt.Type == event.PMReactivate,
 		IsScaffoldAnswer: hasQuestionLabel(ctx, m.forgejoClient, evt.Repository, evt.IssueNumber),
-		IsPRReviewFix:   evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger" && !strings.Contains(evt.Sender, "fordjent") && !strings.Contains(evt.Sender, "djent"),
+		IsPRReviewFix:   evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 && evt.Sender != "automerge-trigger",
 		IsArchival:      evt.Type == event.ArchiveChangeRequested,
 		ChangeName:       evt.Change,
 		TriggeringIssue: evt.TriggeringIssue,
@@ -1115,6 +1548,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 	metrics.IncSessions()
 	metrics.SetActiveSessions(int64(len(m.sessions)))
 
+	sess.wg.Add(1)
 	go m.runSession(sessCtx, sess)
 
 	slog.Info("created new session",
@@ -1128,6 +1562,7 @@ func (m *Manager) getOrCreate(ctx context.Context, evt *event.Event) (*Session, 
 
 // runSession is the per-session event loop. It processes events serially.
 func (m *Manager) runSession(ctx context.Context, sess *Session) {
+	defer sess.wg.Done() // paired with sess.wg.Add(1) before the `go` statement
 	// Detect role from issue or PR title/labels before agent construction
 	role := detectRoleFromSession(ctx, m.forgejoClient, sess)
 
@@ -1799,14 +2234,23 @@ func (m *Manager) evictOldest() {
 
 func (m *Manager) shutdownAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	sessions := make([]*Session, 0, len(m.sessions))
 	for key, sess := range m.sessions {
 		slog.Info("shutting down session", "session_key", key)
 		writeShutdownCheckpoint(sess.WorkDir, "cancelled", "")
 		sess.Cancel()
 		m.store.Delete(key)
+		sessions = append(sessions, sess)
 		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
+
+	// Wait for each session's runSession goroutine to fully exit (paired with
+	// sess.wg.Add(1) before the `go` statement in getOrCreate/recover).
+	// Without this wait, test temp-dir cleanup racily fails with ENOTEMPTY
+	// because the clone/file-writes happen after the test returns.
+	for _, sess := range sessions {
+		sess.wg.Wait()
 	}
 }
 

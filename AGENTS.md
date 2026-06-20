@@ -2228,3 +2228,193 @@ If no spec or no progress files exist, the reviewer logs a warning and proceeds 
 - `GET /status` JSON endpoint includes a `ralph` section with iteration counts and cost
 - Progress files are in the repo: `.ralph/progress/pr-{N}-iteration-{M}.md`
 - `ralph_sessions` table in `lifecycle.db` tracks iteration status and cost
+
+---
+
+## Bug Fix 34 — PR Rework Loop + Gated Automerge (June 19, 2026)
+
+**Problem**: Three behaviors the operator's mental model assumed were missing:
+
+1. **CI failures did not drive dev rework** — Forgejo emits `check_run` /
+   `workflow_run` webhooks, but the router default-cased them as "unsupported
+   event type" and the repo webhook wasn't subscribed to them.
+2. **`djent-qa` change-request reviews were silenced** — `Manager.getOrCreate`
+   gated the `pulls/N-fix` path on `!strings.Contains(sender, "fordjent") &&
+   !strings.Contains(sender, "djent")`, so the reviewer bot's
+   `changes_requested` reviews never reached the implementer. Self-loop noise
+   (cost summaries) was filtered via the `<!-- ford -->` body marker, which
+   continued to work; only the reviewer-side filter was overly broad.
+3. **Automerge fired pre-CI, pre-review** — manager.go merged the instant the
+   `automerge` label was applied, before any check runs or reviewer approval.
+
+**Solution** (the OpenSpec change `add-pr-rework-loop`):
+
+- **Webhook subscription**: bootstrap-local.sh + RUNBOOK + test-waves.py all
+  subscribe to `check_run` and `workflow_run` (NOT `status` — too coarse).
+- **Event types / router parsing**: added `CheckRunCompleted`,
+  `WorkflowRunCompleted`, `PullRequestReview`, `ReviewRequested` event types;
+  carrier fields `CheckName`/`CheckConclusion`/`CheckURL`/`HeadSHA`/
+  `ReviewState` on the `Event` struct. Router resolves the PR by
+  `check_run.pull_requests[0].number` (preferred) or by listing open PRs and
+  matching the head SHA as a fallback.
+- **Routing rules 7 + 8**: a `failed` check_run / workflow_run on a PR with no
+  `spec-proposed` / `spec-approved` / `ralph` / `merging` labels routes to
+  `pulls/N-fix` with `IsFix=true` (the existing implementer rework loop
+  re-used). Successful check_runs do NOT route to implementer; they prod the
+  gated automerge instead.
+- **`isFailedCICheckEvent` prompt injection**: when a `pulls/N-fix` session
+  spawns from a failed CI event, the implementer's system prompt gets a
+  "CI Failure (ACTION REQUIRED)" block with the check name, run URL,
+  conclusion, and head SHA — modeled after the human-comment injection.
+- **djent-qa feedback unblocked**: dropped the `sender contains djent` filter
+  from the two `IsPRReviewFix` predicates at manager.go:1002/1092. Marker-tagged
+  cost summaries continue to be dropped by `isAgentEvent` before they hit
+  `getOrCreateSession`.
+- **`forgejo_submit_review` tool** (new): `POST /repos/{repo}/pulls/{N}/reviews`
+  with `event`/`body`. On `approved` removes the `changes_requested` label;
+  on `changes_requested` adds it; on `commented` touches no labels. Registered
+  for the reviewer role only. Reviewer system prompt now prefers it over bare
+  `forgejo_comment` for decisive verdicts.
+- **Gated automerge**: the immediate merge at manager.go:770 was replaced by
+  `evaluateAutomerge(repo, pr, trigger)` — a no-op unless the PR has the
+  `automerge` label, then requires ALL check_runs on the head SHA to be
+  `success`, no `changes_requested` label, an approved djent-qa review (yolo
+  repos) or any approved review (non-yolo repos), and `Mergeable && !HasConflicts`.
+  The gate re-evaluates on `check_run.completed`, `issue_comment.created`
+  (non-marker), `pull_request_review`, and `pull_request.label_updated`
+  events. On success the `automerge` label is cleared so duplicate events
+  don't re-merge. Multi-style fallback (`merge`/`squash`/`rebase-merge`)
+  preserved to work around Forgejo v9 405s.
+- **Yolo reviewer auto-spawn**: on `pull_request.opened` in a yolo repo
+  authored by `djent-dev`, the manager emits a synthetic `ReviewRequested`
+  event in-process that spawns a reviewer (`djent-qa`) session at `pulls/N`.
+  The reviewer then approves (gated automerge fires) or submits
+  `changes_requested` (implementer fix session fires).
+- **Rework counter**: new `pr_rework` table in `lifecycle.db` keyed by
+  `(repo, pr_number)` with `attempts INTEGER` + `last_attempt_at TIMESTAMP`.
+  Incremented each time a `pulls/N-fix` session is spawned for a PR unless an
+  existing fix session for the same PR is already active (in which case the
+  existing session is reused without incrementing). When `attempts >
+  max_rework_attempts` (default 3, configurable), further `_fix` sessions for
+  that PR are blocked — the PR gets `fordjent/failed:rework-exhausted` and
+  `blocked` labels plus a "Max rework attempts reached" comment. Manual
+  reset: `DELETE FROM pr_rework WHERE repo=? AND pr_number=?` or
+  `lifecycle.ResetRework(ctx, repo, pr)`.
+
+**Files Changed**:
+
+| File | Change |
+|------|--------|
+| `internal/event/event.go` | Added 4 event types + 5 carrier fields on `Event` |
+| `internal/webhook/router.go` | Extended `switch eventType` for `check_run`/`workflow_run`/`pull_request_review`; added `populateCheckRunFields`/`populateWorkflowRunFields`/`populateReviewFields` + `resolvePRBySHA`; routing rules 7/8 + Rule 3b (formal review) + Rule 3c (`ReviewRequested`); `isFailedConclusion` helper; session-key uses `evt.PRNumber` (post-resolution) |
+| `internal/session/agent.go` | PR Review Mode trigger widens to include CI/review events; CI Failure prompt injection via `isFailedCICheckEvent`; reviewer-only `forgejo_submit_review` registered; reviewer role system prompt rewritten to prefer `forgejo_submit_review` |
+| `internal/session/manager.go` | Replaced immediate-merge with `evaluateAutomerge` (gated); yolo reviewer auto-spawn on `pull_request.opened`; `hasAutomergeLabel`, `hasActiveFixSession`, `exhaustedRework`, `isYoloRepo`, `isFixTriggerEvent`, `isFailedCheckConclusion` helpers; rework-cap guard before `getOrCreate` for fix-trigger events; dropped `djent*`/`fordjent*` sender filter from the two `IsPRReviewFix` predicates |
+| `internal/forgejo/client.go` | `SubmitReview`, `ListCommitCheckRuns`, `CheckRun` struct, `LatestReviewByUser` helper |
+| `internal/tool/forgejo_tools.go` | `forgejo_submit_review` tool with approve→remove-label / changes_requested→add-label side-effects |
+| `internal/lifecycle/lifecycle.go` | `pr_rework` table + `IncrementRework`/`GetRework`/`ResetRework` methods |
+| `internal/config/config.go` | `MaxReworkAttempts` config field (default 3) |
+| `fordjent.local.yaml` | `max_rework_attempts: 3` + comment |
+| `scripts/bootstrap-local.sh` + `scripts/test-waves.py` + `scripts/RUNBOOK-local-docker.md` | Subscribe to `check_run` + `workflow_run` events; runbook documents the rework loop + gated automerge + flow diagram |
+| `internal/webhook/router_test.go`, `internal/session/interaction_test.go`, `internal/session/agent_test.go`, `internal/tool/forgejo_tools_test.go`, `internal/lifecycle/lifecycle_test.go`, `internal/e2e/e2e_test.go` | New tests for routing rules, gated automerge states, submit-review side effects, rework counter, full-loop routing chain |
+
+**Test results after the change**: all packages pass; the only pre-existing
+failure is `TestBashToolSuccess` (Alpine has no `bash`) which is documented
+and unrelated.
+
+**Known limitations**:
+
+- Auto-rebase is still prompt-level for human-written PRs that bypass
+  `forgejo_create_pr` (no tool-level `git rebase` execution in the failed-check
+  rework path). The implementer may still push to a stale branch. Mitigation:
+  the existing `stalegate` integration in `forgejo_create_pr` runs auto-rebase
+  on PR creation, and reviewers in yolo repos are auto-spawned.
+- The rework counter does NOT reset on a successful merge — the row persists.
+  Reset is manual (`lifecycle.ResetRework` or a SQL DELETE).
+- The router resolves PR-by-SHA by listing ALL open PRs (`ListPRs(state=open)`
+  and linear-scanning for `HeadSHA`). On repos with very many open PRs, the
+  cost grows linearly. Acceptable for small/medium repos; revisit with a
+  Gitea commit-statuses API call for large repos.
+- The webhook subscription change requires re-running
+  `scripts/bootstrap-local.sh` (or manually updating an existing repo's
+  webhook via the API) for the new events to register.
+
+---
+
+## Bug Fix 35 — Reviewer Branch Checkout + submit_review dedup + bug-report dep block (June 20, 2026)
+
+**Source**: OpenSpec change `fix-gemma-harness-bugs` (proposal + design + specs + tasks in `openspec/changes/fix-gemma-harness-bugs/`). Backing analysis in `GEMMA-FAILURE-ANALYSIS.md`, which classified the Gemma4-12B stress-test failures into three buckets (harness bugs ~50%, indecision ~35%, capability gaps ~15%) and committed to fixing the harness bugs first.
+
+Three independent fixes that together remove ~half of the failure modes observed in the 2026-06-20 stress test:
+
+### A1 — Reviewer sessions actually check out the PR head branch
+
+**Problem**: `internal/session/agent.go` only checked out the PR head branch when the trigger event was `event.IssueCommentCreated` or `event.PullRequestReviewComment`. The auto-spawned reviewer (yolo reviewer dispatched via `event.ReviewRequested` at manager.go:803, and the `event.PullRequestOpened` path it's built on) was NOT covered. So the reviewer's local clone stayed on `main`, and `read_file` on files only present on the PR branch returned "no such file or directory" forever. The 12B reviewer Gemma4 then looped `forgejo_list_files(ref=...) → read_file → error` for 17+ turns (evidence: `pulls/15` memory on `fjadmin/gemma-stress`).
+
+**Fix**: replaced the inline predicate with a `isReviewerClassEvent(t event.Type) bool` helper that returns `true` for all four event types that place a session on a PR (`IssueCommentCreated`, `PullRequestReviewComment`, `ReviewRequested`, `PullRequestOpened`). Also made the context message role-aware: reviewer sessions get "do NOT push or commit; you are reviewing" instead of the implementer's "commit and push to this branch" guidance.
+
+**Live verification (Gemma4-12B on `fjadmin/gemma-stress` #18)**: log line `"checked out PR branch for review","branch":"feat/live-fix-test","session_key":"fjadmin/gemma-stress/pulls/18"` fires on a `pull_request.opened` event; reviewer then calls `read_file internal/hello/hello.go` → file accessed successfully (no "no such file" errors). A1 verified.
+
+**Files changed**: `internal/session/agent.go` (predicate + helper + role-aware context message), `internal/session/agent_test.go` (TestIsReviewerClassEvent: 8 cases).
+
+### A2 — `forgejo_submit_review` definitive success + per-session idempotency
+
+**Problem**: the `forgejo_submit_review` tool returned soft past-tense prose (`Review "approved" submitted on PR #14. Label side-effects applied.`). The 12B model didn't trust the success signal and called the tool again, multiple times (evidence: `pulls/14` memory on `fjadmin/gemma-stress` submitted `approved` three times in a row).
+
+**Fix**:
+- Success result is now a structured JSON schema: `{"status":"ok","pr":N,"state":S,"action_required":false,"duplicate":B,"note":"..."}`; the `note` explicitly tells the model "Do NOT call this tool again with the same state for this PR in this session".
+- Per-session `(pr,state)` idempotency guard: before calling Forgejo, the tool queries `ListPRReviews(repo,pr)` and (when a `reviewerLogin` was injected via `NewSubmitReviewTool`) checks `LatestReviewByUser(reviews, reviewerLogin)`. If a same-state review already exists, the tool returns a duplicate-success JSON without contacting Forgejo — no extra label side-effects, no network call.
+- Reviewer system prompt gains one anti-pattern rule: "Call forgejo_submit_review exactly ONCE per PR per review state."
+- `NewSubmitReviewTool` gained a `reviewerLogin` parameter; wired in `buildRoleRegistry` from `cfg.Forgejo.RoleUsers["reviewer"]`.
+
+**Live verification**: on `fjadmin/gemma-stress` PR #18, the djent-qa reviewer called `forgejo_submit_review(state=approved)` exactly once and stopped — no second or third call. A2 verified.
+
+**Files changed**: `internal/tool/forgejo_tools.go` (struct + Execute + helpers), `internal/session/agent.go` (registration with reviewer login + prompt rule), `internal/tool/forgejo_tools_test.go` (3 existing tests updated, 2 new tests: `TestSubmitReviewTool_DedupSuppressesDuplicateApproved`, `TestSubmitReviewTool_DifferentStatesNotDeduplicated`).
+
+### A3 — Bug-report dependency pre-flight block
+
+**Problem**: bug-report implementer sessions that reference another issue/PR whose code isn't on `main` yet are unsolvable — the code only exists on an unmerged feature branch. The 12B implementer Gemma4 spent 39 turns searching git history for prime-checker code that wasn't on main because PR #8 was merge-queue-blocked (evidence: `fjadmin/gemma-stress/issues/10` memory).
+
+**Fix**:
+- New config flag `enable_bug_report_dep_block` (default `true`) added to `config.AgentConfig` next to the other `enable_*` flags.
+- New `bug-report-dependency-block` capability: when an `IssueOpened` (or `IssueEdited`) event arrives for a non-PM-tagged issue, `Manager.checkBugReportDependencyBlock` runs before session creation:
+  1. parses issue title+body for `#N` references (issue/PR/dep variant) via the new `extractBugReportRefs` regex;
+  2. for each unique ref, calls `forgejoClient.GetIssue` and treats an issue as blocking iff it has an associated PR (`pull_request.url != ""`), is in `State == open` (i.e. unmerged);
+  3. on a match: adds the existing `blocked` FSM label (deduplicated client-side), appends `Depends on: #N` to the issue body via a new `EditIssueBody` Forgejo client method (wrapper around `PATCH /repos/{repo}/issues/{N}`), and posts an auto-block comment carrying the `<!-- ford -->` marker so `isAgentEvent` filters the resulting `issue_comment.created` webhook;
+  4. skips session creation. Existing scheduler `ReconcileBlocked` / `OnPRMerged` path removes the `blocked` label when the referenced PR merges and dispatches a fresh implementer session.
+- The pre-flight is idempotent across re-edits: re-firing on `IssueEdited` doesn't double-post the marker comment (checked via `ListComments` for an existing `Automatically blocked by Fordjent` marker body).
+- PM/`[review]`/`[decompose]`-tagged issues are exempt.
+
+**Live verification** (Gemma4-12B, `fjadmin/gemma-stress` #20): filed a bug-report issue with body "Bug introduced in PR #18" while PR #18 was open + unmerged. Result:
+- Pre-flight log: `"bug-report-dep-block: blocking issue with unmerged dependency","issue":20,"blocked_by_pr":18`.
+- Issue #20 label: `['blocked']`; body: appended `Depends on: #18`; exactly ONE marker-tagged auto-block comment posted (idempotency confirmed when the `issues.edited` webhook fired immediately after the body edit and re-ran the pre-flight without double-posting).
+- Zero implementer sessions created for issue #20 (no `LLM turn begin` / `created new session` log lines for `issues/20`).
+- After merging PR #18 via API, the scheduler cascade unblocked issue #20 (`'blocked'` label removed, `'ready'` + `'in_progress'` added, synthetic `IssueOpened` dispatched, new implementer session created).
+- A3 verified end-to-end.
+
+**Files changed**: `internal/session/manager.go` (`checkBugReportDependencyBlock`, `extractBugReportRefs` + `issueRefRe` regex, `applyBugReportBlock` idempotent), `internal/forgejo/client.go` (`EditIssueBody`), `internal/config/config.go` (`EnableBugReportDepBlock` flag + default true), `fordjent.local.yaml` (`enable_bug_report_dep_block: true`), `internal/session/interaction_test.go` (fake's `handleGetIssue` now path-aware via per-issue `issueOverrides`), `internal/session/bug_report_dep_block_test.go` (NEW: 6 tests — blocks on unmerged ref / no-block when merged / no-block for PM issue / PM title exempt / config flag disabled / ref parser unit tests).
+
+### Test results
+
+```
+go test ./... — all packages pass; ~35 tasks completed, ~10 new tests added.
+Docker image rebuilt + container restarted (port 127.0.0.1:8081->8080).
+Live wave: PR #18 + Issue #19 (got blocked earlier; first-instance) + Issue #20 (fresh bug-report → fully blocked, 0 LLM turns, then scheduler unblocked post-merge).
+```
+
+### What we did NOT change (intentionally, per the analysis)
+
+- Did NOT swap or fine-tune the LLM model. (Per `GEMMA-FAILURE-ANALYSIS.md`: fix harness bugs first; only then decide whether the B-bucket indecision loops still warrant a bigger model or an RL fine-tune specifically targeted at termination behaviour.)
+- Did NOT touch the merge-queue auto-retry / stalgate / scheduler reconcile paths (re-used existing infrastructure — `EditIssueBody` + existing `blocked` label + existing `Depends on:` dependency parsing + existing `OnPRMerged` unblock).
+- Did NOT add new FSM states or labels. (Re-uses the existing `blocked` FSM label and `Depends on:` directive already recognised by `scheduler.parseDependsOn`.)
+
+### What still remains from `GEMMA-FAILURE-ANALYSIS.md`
+
+- Bucket B (indecision loops): now isolated — `/issues/10`-style exploration loops with no unsolvable dependency will still spin. With the harness bugs fixed, the same wave replayed should make the B-bucket signal clean. Decision point: bigger model (Qwen3-30B / devstral-medium for the reviewer role specifically) OR RL fine-tune targeting termination behaviour.
+- Bucket C capability gaps (PM dropping instructions from long system prompt; duplicate cross-session branches): unchanged.
+- `C2` cross-session state seeding (so a new implementer session for an issue knows about prior failed attempts on the same issue): not implemented.
+
+### Migration / rollback
+
+- Config flag default `true` — existing deployments gain the bug-report pre-flight. Disable with `enable_bug_report_dep_block: false` if a false positive arises. No DB migration.
+- `forgejo_submit_review` success schema change is read by no other Go callers; only fed to the LLM. Tests that asserted on the old prose format were updated.
+- No new webhook events or Forgejo API surface beyond the new `EditIssueBody` wrapper around the documented `PATCH /repos/{repo}/issues/{N}` endpoint.

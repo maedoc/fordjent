@@ -198,8 +198,14 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 		}
 	}
 
-	// Step 4: If this is a PR review comment, fetch PR and checkout its branch
-	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
+	// Step 4: If this is a reviewer-class PR session, fetch PR and checkout its
+	// head branch so read_file sees the PR's files. Triggered by any event that
+	// places the session on a PR: human comments (IssueCommentCreated, PR review
+	// comments) AND machine-spawned reviewer sessions (ReviewRequested,
+	// PullRequestOpened). The buggy pre-condition (only the two human-comment
+	// types) left auto-spawned reviewers stuck on main, where read_file on
+	// PR-only files failed forever. See GEMMA-FAILURE-ANALYSIS.md A1.
+	if evt.PRNumber > 0 && isReviewerClassEvent(evt.Type) {
 		pr, err := a.forgejo.GetPR(ctx, evt.Repository, evt.PRNumber)
 		if err == nil && pr.Head.Ref != "" {
 			repoDir := a.sess.RepoDir
@@ -212,10 +218,20 @@ func (a *Agent) ProcessEvent(ctx context.Context, evt *event.Event) error {
 				slog.Warn("failed to checkout PR branch", "branch", pr.Head.Ref, "error", err)
 			}
 			slog.Info("checked out PR branch for review", "branch", pr.Head.Ref, "session_key", a.sess.Key)
+			// Context message is role-aware: implementers (PR-Review-Fix human-comment
+			// path) are expected to commit + push to the branch; reviewers (auto-
+			// spawned via ReviewRequested/PullRequestOpened) only inspect.
+			var contextContent string
+			if a.role == "reviewer" {
+				contextContent = fmt.Sprintf("[Context] Reviewing PR #%d '%s'. You are on branch '%s'. Use read_file to inspect files — read_file succeeds for files in this PR. Do NOT push or commit; you are reviewing, not implementing.",
+					pr.Number, pr.Title, pr.Head.Ref)
+			} else {
+				contextContent = fmt.Sprintf("[Context] Responding to review on PR #%d '%s'. You are now on branch '%s'. Make changes on this branch, commit, and push to it. Do NOT create a new PR.",
+					pr.Number, pr.Title, pr.Head.Ref)
+			}
 			contextMessages = append(contextMessages, provider.Message{
-				Role: "user",
-				Content: fmt.Sprintf("[Context] Responding to review on PR #%d '%s'. You are now on branch '%s'. Make changes on this branch, commit, and push to it. Do NOT create a new PR.",
-					pr.Number, pr.Title, pr.Head.Ref),
+				Role:    "user",
+				Content: contextContent,
 			})
 		} else if err != nil {
 			slog.Warn("failed to get PR details", "pr", evt.PRNumber, "error", err)
@@ -574,7 +590,7 @@ func (a *Agent) buildSystemPrompt(ctx context.Context, evt *event.Event, analysi
 	}
 
 	var modeInstructions string
-	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment) {
+	if evt.PRNumber > 0 && (evt.Type == event.IssueCommentCreated || evt.Type == event.PullRequestReviewComment || evt.Type == event.PullRequestReview || evt.Type == event.CheckRunCompleted || evt.Type == event.WorkflowRunCompleted) {
 
 		// Extract the human's review feedback for context
 		var feedbackBody string
@@ -606,6 +622,25 @@ A human reviewer left the following feedback on this PR. You MUST address each p
 %s
 
 Read the code, make the necessary changes, run tests, commit, and push. Then post a comment summarizing what you changed.`, feedbackBody)
+		}
+
+		// If this rework was triggered by a failed CI check, surface the failure
+		// (check name, run URL) so the agent knows what to investigate first.
+		if isFailedCICheckEvent(evt) && a.role == "implementer" {
+			modeInstructions += fmt.Sprintf(`
+
+## CI Failure (ACTION REQUIRED)
+A Forgejo Actions check failed on this PR branch:
+- Check name: %s
+- Conclusion: %s
+- Run URL: %s
+- Head SHA: %s
+
+You MUST:
+1. Reproduce the failure locally (run the same build/tests the CI ran).
+2. Fix the code that caused the failure.
+3. Commit and push to this same PR branch.
+4. Confirm the fix locally before pushing.`, safeStr(evt.CheckName), safeStr(evt.CheckConclusion), safeStrOr(evt.CheckURL, "(no URL provided)"), safeStrOr(evt.HeadSHA, "(unknown)"))
 		}
 	} else if evt.PRNumber > 0 {
 		modeInstructions = `
@@ -759,22 +794,27 @@ When all implementation tasks are complete (milestone 100%):
 You are in Code Review mode. You do NOT write code or push commits. Your job is:
 - Examine the PR using read_file and forgejo_list_prs (view files, diff).
 - Check for correctness, style, test coverage, and edge cases.
-- If issues found, post a comment describing what needs to change.
-- DO NOT leave PRs open indefinitely — either merge or request changes.`
+- For decisive verdicts, prefer **forgejo_submit_review** over bare forgejo_comment:
+  - state="approved" when the implementation is correct (also clears the changes_requested label).
+  - state="changes_requested" when issues must be fixed (also adds the changes_requested label, which routes the implementer to a pulls/N-fix session).
+  - state="commented" only for non-binding clarifying questions.
+- Call forgejo_submit_review exactly ONCE per PR per review state. The tool's success result is final; do not re-submit. If you have already submitted an 'approved' (or 'changes_requested') review for this PR, do not call the tool again with the same state.
+- After submitting, do NOT call forgejo_merge_pr — the gated automerge watcher merges when CI is green and a review is approved.
+- DO NOT leave PRs open indefinitely — either approve or request changes.`
 
 		// Policy-aware merge instructions
 		if a.policy.NoAutoMerge {
 			modeInstructions += `
 
-- IMPORTANT: This repo has a no-auto-merge policy. You MUST NOT call forgejo_merge_pr. Post your review as a comment and let a human decide when to merge.`
+- IMPORTANT: This repo has a no-auto-merge policy. You MUST NOT call forgejo_merge_pr. Use forgejo_submit_review for verdicts; a human merges.`
 		} else if a.policy.RequireReview {
 			modeInstructions += `
 
-- IMPORTANT: This repo requires human review before merging. You MUST NOT call forgejo_merge_pr unless the PR has an 'approved' label. Post your review as a comment and wait for a human to add the 'approved' label.`
+- IMPORTANT: This repo requires human review before merging. You MUST NOT call forgejo_merge_pr unless the PR has an 'approved' label. Use forgejo_submit_review(state=approved) and let a human gate the actual merge.`
 		} else {
 			modeInstructions += `
 
-- If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_merge_pr IMMEDIATELY.`
+- If the PR was created by a bot (fordjent-bot) and the code is correct, call forgejo_submit_review(state="approved"). The gated automerge watcher handles the actual merge.`
 		}
 
 		hasAutomerge := a.detectAutomerge(ctx, evt)
@@ -782,8 +822,8 @@ You are in Code Review mode. You do NOT write code or push commits. Your job is:
 			modeInstructions += `
 
 - This PR has the 'automerge' label. Review the diff, verify build and tests pass.
-- If the code is correct and there are no conflicts, call forgejo_merge_pr immediately.
-- If issues are found, post a comment describing them and remove the 'automerge' label.`
+- Submit forgejo_submit_review(state="approved") when the code is correct.
+- If issues are found, submit forgejo_submit_review(state="changes_requested") with the specific required changes.`
 		}
 
 		// Spec-driven review instructions
@@ -1103,6 +1143,49 @@ func (a *Agent) buildContext(ctx context.Context, evt *event.Event) ([]provider.
 
 // extractParentRef parses the first "Depends on: #N" or "Closes: #N" reference
 // from an issue body and returns the issue number, or 0 if none found.
+// isFailedCICheckEvent reports whether the event is a check_run/workflow_run
+// with a failure-class conclusion. Used to scope CI-failure prompt injection.
+func isFailedCICheckEvent(evt *event.Event) bool {
+	if evt.Type != event.CheckRunCompleted && evt.Type != event.WorkflowRunCompleted {
+		return false
+	}
+	switch evt.CheckConclusion {
+	case "failure", "cancelled", "action_required", "timed_out":
+		return true
+	}
+	return false
+}
+
+// isReviewerClassEvent reports whether the event places the session on a PR
+// such that the agent's repo working copy MUST be checked out to the PR head
+// branch before the LLM loop starts. Without this, read_file fails for files
+// only present on the PR branch (see GEMMA-FAILURE-ANALYSIS.md A1).
+//
+// Covers: human comments (IssueCommentCreated, PullRequestReviewComment)
+// and machine-spawned reviewers (ReviewRequested via yolo auto-spawn,
+// PullRequestOpened).
+func isReviewerClassEvent(t event.Type) bool {
+	return t == event.IssueCommentCreated ||
+		t == event.PullRequestReviewComment ||
+		t == event.ReviewRequested ||
+		t == event.PullRequestOpened
+}
+
+// safeStr returns the empty string for an empty event field. Helps format
+// CI failure context without zeroes (e.g. "Head SHA: " reads worse than
+// "Head SHA: (unknown)").
+func safeStr(s string) string {
+	return s
+}
+
+// safeStrOr returns s unless s is empty, in which case it returns fallback.
+func safeStrOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
 func extractParentRef(body string) int {
 	for _, prefix := range []string{"Depends on: #", "depends on: #", "Closes: #", "closes: #"} {
 		idx := strings.Index(body, prefix)
@@ -1455,10 +1538,15 @@ func buildRoleRegistry(
 		// PM cannot create code PRs or merge — spec PRs are created via forgejo_create_pr
 	case "reviewer":
 		registry.Register(tool.NewMergePRTool(forgejoAdapter, true, sessionInfo.RepoDir()))
+		reviewerLogin := cfg.Forgejo.RoleUsers["reviewer"]
+		registry.Register(tool.NewSubmitReviewTool(forgejoAdapter, reviewerLogin))
 		registry.Register(tool.NewOpenSpecReadSpecTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecGetTasksTool(sessionInfo))
 		registry.Register(tool.NewOpenSpecReadChangeTool(sessionInfo))
-		// Reviewer can read specs, comment, and merge — but not write code
+		// Reviewer can read specs, comment, merge, and submit formal reviews.
+		// Implementation tools (write_file, git, bash) are excluded — if the
+		// reviewer requests changes, the implementer is spawned separately at
+		// pulls/N-fix and owns the code edits.
 	case "devops", "tester", "implementer":
 		fallthrough
 	default:
