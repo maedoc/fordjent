@@ -24,10 +24,16 @@ const (
 	PullRequestLabelUpdated  Type = "pull_request.label_updated"
 	PullRequestSync          Type = "pull_request.synchronize"
 	PullRequestReviewComment Type = "pull_request_review_comment.created"
+	PullRequestReview        Type = "pull_request_review.created" // forgejo review state: approved / changes_requested / commented
 	Push                     Type = "push"
-	PMReactivate             Type = "pm.reactivate"
-	SpecPRMerged             Type = "spec.pr_merged"
-	ArchiveChangeRequested   Type = "pm.archive_requested"
+	// CI events — Forgejo Actions check runs / workflow runs
+	CheckRunCompleted    Type = "check_run.completed"
+	WorkflowRunCompleted Type = "workflow_run.completed"
+	// Internal synthetic events
+	PMReactivate           Type = "pm.reactivate"
+	SpecPRMerged           Type = "spec.pr_merged"
+	ArchiveChangeRequested Type = "pm.archive_requested"
+	ReviewRequested        Type = "review.requested" // yolo repos: spawn djent-qa on djent-dev PR open
 )
 
 // Event is the normalized internal representation of a Forgejo webhook event.
@@ -41,9 +47,18 @@ type Event struct {
 	Sender          string                 `json:"sender"`
 	Action          string                 `json:"action"`
 	SessionKey      string                 `json:"session_key"`
-	Role            string                 `json:"role,omitempty"`              // set by routing table: pm, implementer, reviewer
-	Change          string                 `json:"change,omitempty"`            // for internal events like ArchiveChangeRequested
+	Role            string                 `json:"role,omitempty"`   // set by routing table: pm, implementer, reviewer
+	Change          string                 `json:"change,omitempty"` // for internal events like ArchiveChangeRequested
 	Payload         map[string]interface{} `json:"payload"`
+
+	// CI / review carrier fields — populated for CheckRunCompleted,
+	// WorkflowRunCompleted, and PullRequestReview events. Other events leave
+	// these at their zero values.
+	CheckName       string `json:"check_name,omitempty"`       // e.g. "CI", "tests"
+	CheckConclusion string `json:"check_conclusion,omitempty"` // "success" / "failure" / "cancelled" / "pending" / "action_required"
+	CheckURL        string `json:"check_url,omitempty"`        // link to the Forgejo Actions run
+	HeadSHA         string `json:"head_sha,omitempty"`         // commit SHA the check ran against
+	ReviewState     string `json:"review_state,omitempty"`     // "approved" / "changes_requested" / "commented"
 }
 
 // NewEvent creates a new event with a UUIDv7-style ID.

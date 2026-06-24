@@ -54,10 +54,10 @@ func TestWebhookMissingSignature(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
+		"action":     "opened",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
-		"sender": map[string]interface{}{"login": "alice"},
-		"issue": map[string]interface{}{"number": float64(42)},
+		"sender":     map[string]interface{}{"login": "alice"},
+		"issue":      map[string]interface{}{"number": float64(42)},
 	}
 	body, _ := json.Marshal(payload)
 
@@ -77,10 +77,10 @@ func TestWebhookNoSecret(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
+		"action":     "opened",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
-		"sender": map[string]interface{}{"login": "alice"},
-		"issue": map[string]interface{}{"number": float64(42)},
+		"sender":     map[string]interface{}{"login": "alice"},
+		"issue":      map[string]interface{}{"number": float64(42)},
 	}
 	body, _ := json.Marshal(payload)
 
@@ -114,7 +114,7 @@ func TestWebhookMissingEventHeader(t *testing.T) {
 func TestWebhookLoopPrevention(t *testing.T) {
 	cfg := &config.Config{
 		Webhook:  config.WebhookConfig{Secret: ""},
-		Agent:   config.AgentConfig{CommitPrefix: "[agent-automation]"},
+		Agent:    config.AgentConfig{CommitPrefix: "[agent-automation]"},
 		Security: config.SecurityConfig{FilterAgentEvents: true},
 	}
 	bus := event.NewBus()
@@ -122,7 +122,7 @@ func TestWebhookLoopPrevention(t *testing.T) {
 
 	// Push events with ref+commits must NEVER be filtered, even from bots
 	payload := map[string]interface{}{
-		"action": "push",
+		"action":     "push",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"ref":        "refs/heads/main",
@@ -193,11 +193,11 @@ func TestNormalizeEventIssueComment(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
-		"sender": map[string]interface{}{"login": "alice"},
-		"issue": map[string]interface{}{"number": float64(42)},
-		"comment": map[string]interface{}{"id": float64(100), "body": "help"},
+		"sender":     map[string]interface{}{"login": "alice"},
+		"issue":      map[string]interface{}{"number": float64(42)},
+		"comment":    map[string]interface{}{"id": float64(100), "body": "help"},
 	}
 
 	evt, err := router.normalizeEvent("issue_comment", "created", payload)
@@ -227,9 +227,9 @@ func TestNormalizeEventPullRequest(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
-		"repository": map[string]interface{}{"full_name": "org/repo"},
-		"sender": map[string]interface{}{"login": "bob"},
+		"action":       "opened",
+		"repository":   map[string]interface{}{"full_name": "org/repo"},
+		"sender":       map[string]interface{}{"login": "bob"},
 		"pull_request": map[string]interface{}{"number": float64(7)},
 	}
 
@@ -273,7 +273,7 @@ func TestNormalizeEventMissingRepo(t *testing.T) {
 	payload := map[string]interface{}{
 		"action": "opened",
 		"sender": map[string]interface{}{"login": "alice"},
-		"issue": map[string]interface{}{"number": float64(1)},
+		"issue":  map[string]interface{}{"number": float64(1)},
 	}
 
 	evt, err := router.normalizeEvent("issues", "opened", payload)
@@ -318,7 +318,7 @@ func TestNormalizeEventIssueCommentOnPR(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "alice"},
 		"issue": map[string]interface{}{
@@ -349,7 +349,7 @@ func TestNormalizeEventIssueLabelUpdated(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "label_updated",
+		"action":     "label_updated",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "alice"},
 		"issue":      map[string]interface{}{"number": float64(42)},
@@ -373,9 +373,9 @@ func TestNormalizeEventPullRequestLabelUpdated(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "label_updated",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "alice"},
+		"action":       "label_updated",
+		"repository":   map[string]interface{}{"full_name": "org/repo"},
+		"sender":       map[string]interface{}{"login": "alice"},
 		"pull_request": map[string]interface{}{"number": float64(9)},
 	}
 
@@ -400,9 +400,9 @@ func TestNormalizeEventPullRequestMerged(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "closed",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "alice"},
+		"action":     "closed",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "alice"},
 		"pull_request": map[string]interface{}{
 			"number": float64(5),
 			"merged": true,
@@ -427,9 +427,9 @@ func TestNormalizeEventPullRequestClosedNotMerged(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "closed",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "alice"},
+		"action":     "closed",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "alice"},
 		"pull_request": map[string]interface{}{
 			"number": float64(5),
 			"merged": false,
@@ -476,7 +476,7 @@ func TestIsAgentEvent_CommentMarker(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue":      map[string]interface{}{"number": float64(1)},
@@ -500,7 +500,7 @@ func TestIsAgentEvent_BotSenderComment(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue":      map[string]interface{}{"number": float64(1)},
@@ -524,7 +524,7 @@ func TestIsAgentEvent_BotSenderBracketComment(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent[bot]"},
 		"issue":      map[string]interface{}{"number": float64(1)},
@@ -548,7 +548,7 @@ func TestIsAgentEvent_HumanCommentNotFiltered(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "alice"},
 		"issue":      map[string]interface{}{"number": float64(1)},
@@ -572,9 +572,9 @@ func TestIsAgentEvent_PROpenedNotFiltered(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "fordjent-bot"},
+		"action":     "opened",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"pull_request": map[string]interface{}{
 			"number": float64(5),
 			"body":   "Auto-generated PR\n\n<!-- ford -->",
@@ -595,9 +595,9 @@ func TestIsAgentEvent_PRNonOpenedWithMarker(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "synchronize",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "fordjent-bot"},
+		"action":     "synchronize",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"pull_request": map[string]interface{}{
 			"number": float64(5),
 			"body":   "Auto-generated PR\n\n<!-- ford -->",
@@ -618,9 +618,9 @@ func TestIsAgentEvent_PRMergeNotFiltered(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "closed",
-		"repository":  map[string]interface{}{"full_name": "org/repo"},
-		"sender":      map[string]interface{}{"login": "fordjent-bot"},
+		"action":     "closed",
+		"repository": map[string]interface{}{"full_name": "org/repo"},
+		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"pull_request": map[string]interface{}{
 			"number": float64(5),
 			"merged": true,
@@ -642,7 +642,7 @@ func TestIsAgentEvent_IssueWithMarker(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
+		"action":     "opened",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue": map[string]interface{}{
@@ -665,7 +665,7 @@ func TestIsAgentEvent_BotIssueWithoutCommentNotFiltered(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "opened",
+		"action":     "opened",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue": map[string]interface{}{
@@ -695,15 +695,15 @@ func TestClosedPRCommentGuard(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{
-		Webhook:  config.WebhookConfig{Secret: ""},
-		Forgejo:  config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Webhook: config.WebhookConfig{Secret: ""},
+		Forgejo: config.ForgejoConfig{URL: srv.URL, Token: "test"},
 	}
 	bus := event.NewBus()
 	router := NewRouter(cfg, bus, slog.Default())
 	router.SetForgejoClient(forgejo.NewClient(srv.URL, "test"))
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "alice"},
 		"issue": map[string]interface{}{
@@ -746,15 +746,15 @@ func TestOpenPRCommentNotSkipped(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{
-		Webhook:  config.WebhookConfig{Secret: ""},
-		Forgejo:  config.ForgejoConfig{URL: srv.URL, Token: "test"},
+		Webhook: config.WebhookConfig{Secret: ""},
+		Forgejo: config.ForgejoConfig{URL: srv.URL, Token: "test"},
 	}
 	bus := event.NewBus()
 	router := NewRouter(cfg, bus, slog.Default())
 	router.SetForgejoClient(forgejo.NewClient(srv.URL, "test"))
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "alice"},
 		"issue": map[string]interface{}{
@@ -790,7 +790,7 @@ func TestIsAgentEvent_PingParentMarkerNotFiltered(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue":      map[string]interface{}{"number": float64(5)},
@@ -814,7 +814,7 @@ func TestIsAgentEvent_PingParentMarkerStillFiltersFordMarker(t *testing.T) {
 	router := NewRouter(cfg, bus, slog.Default())
 
 	payload := map[string]interface{}{
-		"action": "created",
+		"action":     "created",
 		"repository": map[string]interface{}{"full_name": "org/repo"},
 		"sender":     map[string]interface{}{"login": "fordjent-bot"},
 		"issue":      map[string]interface{}{"number": float64(5)},
@@ -1098,6 +1098,419 @@ func TestRouteTable_ReviewCommentWithActionableBody(t *testing.T) {
 	}
 	if result.SessionKey != "org/repo/pulls/30-fix" {
 		t.Errorf("expected org/repo/pulls/30-fix, got %s", result.SessionKey)
+	}
+}
+
+// TestRouteTable_FailedCheckRunOnDevPR covers Rule 7: a failed check_run on
+// a PR with no spec/ralph/merging labels routes to the implementer fix session.
+func TestRouteTable_FailedCheckRunOnDevPR(t *testing.T) {
+	// No Forgejo client → label list is nil → no spec/ralph/merging label.
+	// Rule 7 should still match the failed conclusion.
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.CheckRunCompleted, "org/repo", 0, 30, "runner", "completed")
+	evt.PRNumber = 30
+	evt.CheckName = "CI"
+	evt.CheckConclusion = "failure"
+	evt.CheckURL = "https://forgejo.local/org/repo/actions/runs/1"
+	evt.HeadSHA = "abc123"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match for failed check_run")
+	}
+	if result.Role != "implementer" {
+		t.Errorf("expected implementer role, got %s", result.Role)
+	}
+	if !result.IsFix {
+		t.Error("expected IsFix to be true")
+	}
+	if result.SessionKey != "org/repo/pulls/30-fix" {
+		t.Errorf("expected org/repo/pulls/30-fix, got %s", result.SessionKey)
+	}
+}
+
+// TestRouteTable_SuccessfulCheckRunDoesNotRoute covers the negative side of
+// Rule 7: success conclusions do not rework the dev (the gated automerge in
+// the manager re-evaluates them instead). Returns matched=false so the router
+// drops the event.
+func TestRouteTable_SuccessfulCheckRunDoesNotRoute(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.CheckRunCompleted, "org/repo", 0, 30, "runner", "completed")
+	evt.PRNumber = 30
+	evt.CheckConclusion = "success"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	_, matched := rt.Route(context.Background(), evt)
+	if matched {
+		t.Error("successful check_run should not match any routing rule")
+	}
+}
+
+// TestRouteTable_WorkflowRunFailedRoutesToImplementer covers Rule 8.
+func TestRouteTable_WorkflowRunFailedRoutesToImplementer(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.WorkflowRunCompleted, "org/repo", 0, 42, "runner", "completed")
+	evt.PRNumber = 42
+	evt.CheckName = "tests"
+	evt.CheckConclusion = "cancelled"
+	evt.HeadSHA = "deadbeef"
+	evt.SessionKey = "org/repo/pulls/42"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match for failed workflow_run")
+	}
+	if result.Role != "implementer" || !result.IsFix {
+		t.Errorf("expected implementer-fix, got role=%s IsFix=%v", result.Role, result.IsFix)
+	}
+	if result.SessionKey != "org/repo/pulls/42-fix" {
+		t.Errorf("expected org/repo/pulls/42-fix, got %s", result.SessionKey)
+	}
+}
+
+// TestRouteTable_DismissedReviewNotRouted covers Rule 3b's dismissed branch.
+func TestRouteTable_DismissedReviewNotRouted(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "djent-qa", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "dismissed"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	_, matched := rt.Route(context.Background(), evt)
+	if matched {
+		t.Error("dismissed review should not match any routing rule")
+	}
+}
+
+// TestRouteTable_ChangesRequestedReviewRoutesToImplementer covers Rule 3b's
+// changes_requested branch — the formal review equivalent of Rule 3.
+func TestRouteTable_ChangesRequestedReviewRoutesToImplementer(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "djent-qa", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "changes_requested"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match for changes_requested review")
+	}
+	if result.Role != "implementer" || !result.IsFix {
+		t.Errorf("expected implementer-fix, got role=%s IsFix=%v", result.Role, result.IsFix)
+	}
+	if result.SessionKey != "org/repo/pulls/30-fix" {
+		t.Errorf("expected org/repo/pulls/30-fix, got %s", result.SessionKey)
+	}
+}
+
+// TestRouteTable_ApprovedReviewDoesNotSpawn covers Rule 3b's approved branch —
+// the gated automerge watcher handles it, not the routing table.
+func TestRouteTable_ApprovedReviewDoesNotSpawn(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "djent-qa", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "approved"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	_, matched := rt.Route(context.Background(), evt)
+	if matched {
+		t.Error("approved review should not match any routing rule (manager drives gated merge)")
+	}
+}
+
+// TestRouteTable_ReviewRequestedSpawnsReviewer covers Rule 3c: the internal
+// ReviewRequested event emitted in yolo repos delegates to the djent-qa
+// reviewer role.
+func TestRouteTable_ReviewRequestedSpawnsReviewer(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.ReviewRequested, "org/repo", 0, 30, "fordjent", "review")
+	evt.PRNumber = 30
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match for ReviewRequested")
+	}
+	if result.Role != "reviewer" {
+		t.Errorf("expected reviewer role, got %s", result.Role)
+	}
+	if result.SessionKey != "org/repo/pulls/30" {
+		t.Errorf("expected org/repo/pulls/30, got %s", result.SessionKey)
+	}
+}
+
+// labelForgejoServer returns an httptest server backing a forgejo.Client whose
+// GetIssue returns an issue carrying the given label names. Other requests get
+// a 200 with an empty JSON object. The caller must defer srv.Close().
+func labelForgejoServer(t *testing.T, labels []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GetIssue path: /api/v1/repos/{repo}/issues/{n}
+		if strings.Contains(r.URL.Path, "/issues/") && !strings.Contains(r.URL.Path, "/comments") {
+			lbls := make([]map[string]interface{}, len(labels))
+			for i, l := range labels {
+				lbls[i] = map[string]interface{}{"name": l}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"number": 30,
+				"labels": lbls,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+}
+
+// TestIsFailedConclusion is a direct table test of the failure-classifier used
+// by Rules 7 and 8. Covers every conclusion string Forgejo/Gitea can emit.
+func TestIsFailedConclusion(t *testing.T) {
+	cases := []struct {
+		conclusion string
+		want       bool
+	}{
+		{"failure", true},
+		{"cancelled", true},
+		{"action_required", true},
+		{"timed_out", true},
+		{"success", false},
+		{"neutral", false},
+		{"skipped", false},
+		{"pending", false},
+		{"in_progress", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isFailedConclusion(c.conclusion); got != c.want {
+			t.Errorf("isFailedConclusion(%q) = %v, want %v", c.conclusion, got, c.want)
+		}
+	}
+}
+
+// TestRouteTable_FailedCheckRunOnSpecPRDoesNotRoute covers the label-gating
+// side of Rule 7: a failed check_run on a PR with the spec-approved label is
+// NOT routed to the implementer (spec PRs are owned by PM/review, not rework).
+func TestRouteTable_FailedCheckRunOnSpecPRDoesNotRoute(t *testing.T) {
+	srv := labelForgejoServer(t, []string{"spec-approved"})
+	defer srv.Close()
+	client := forgejo.NewClient(srv.URL, "test")
+	rt := NewRouteTable(client)
+
+	evt := event.NewEvent(event.CheckRunCompleted, "org/repo", 0, 30, "runner", "completed")
+	evt.PRNumber = 30
+	evt.CheckConclusion = "failure"
+	evt.HeadSHA = "abc123"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	if _, matched := rt.Route(context.Background(), evt); matched {
+		t.Error("failed check_run on a spec-approved PR should NOT route to implementer")
+	}
+}
+
+// TestRouteTable_FailedCheckRunOnRalphPRDoesNotRoute covers Rule 7's ralph-label
+// gating: ralph PRs manage their own iteration loop and must not be reworked
+// by the check_run path.
+func TestRouteTable_FailedCheckRunOnRalphPRDoesNotRoute(t *testing.T) {
+	srv := labelForgejoServer(t, []string{"ralph"})
+	defer srv.Close()
+	client := forgejo.NewClient(srv.URL, "test")
+	rt := NewRouteTable(client)
+
+	evt := event.NewEvent(event.CheckRunCompleted, "org/repo", 0, 30, "runner", "completed")
+	evt.PRNumber = 30
+	evt.CheckConclusion = "failure"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	if _, matched := rt.Route(context.Background(), evt); matched {
+		t.Error("failed check_run on a ralph PR should NOT route")
+	}
+}
+
+// TestRouteTable_FailedWorkflowRunOnMergingPRDoesNotRoute covers Rule 8's
+// merging-label gating.
+func TestRouteTable_FailedWorkflowRunOnMergingPRDoesNotRoute(t *testing.T) {
+	srv := labelForgejoServer(t, []string{"merging"})
+	defer srv.Close()
+	client := forgejo.NewClient(srv.URL, "test")
+	rt := NewRouteTable(client)
+
+	evt := event.NewEvent(event.WorkflowRunCompleted, "org/repo", 0, 30, "runner", "completed")
+	evt.PRNumber = 30
+	evt.CheckConclusion = "failure"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	if _, matched := rt.Route(context.Background(), evt); matched {
+		t.Error("failed workflow_run on a merging PR should NOT route")
+	}
+}
+
+// TestRouteTable_CommentedReviewDoesNotRoute covers Rule 3b's commented branch:
+// a non-decisive `commented` review is informational and does NOT spawn a
+// session. Actionable human feedback arrives via issue_comment.created.
+func TestRouteTable_CommentedReviewDoesNotRoute(t *testing.T) {
+	rt := NewRouteTable(nil)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "djent-qa", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "commented"
+	evt.SessionKey = "org/repo/pulls/30"
+
+	if _, matched := rt.Route(context.Background(), evt); matched {
+		t.Error("commented review should NOT spawn a session (informational only)")
+	}
+}
+
+// TestRouteTable_ChangesRequestedLabelAloneRoutesToImplementer covers Rule 3b's
+// label-fallback: a PR carrying the changes_requested label routes to the
+// implementer fix session even when ReviewState is empty (e.g. the review
+// webhook wasn't subscribed but a human set the label via the UI).
+func TestRouteTable_ChangesRequestedLabelAloneRoutesToImplementer(t *testing.T) {
+	srv := labelForgejoServer(t, []string{"changes_requested"})
+	defer srv.Close()
+	client := forgejo.NewClient(srv.URL, "test")
+	rt := NewRouteTable(client)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "alice", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "" // no review webhook state — label is the only signal
+	evt.SessionKey = "org/repo/pulls/30"
+
+	result, matched := rt.Route(context.Background(), evt)
+	if !matched {
+		t.Fatal("expected route to match for changes_requested label")
+	}
+	if result.Role != "implementer" || !result.IsFix {
+		t.Errorf("expected implementer-fix, got role=%s IsFix=%v", result.Role, result.IsFix)
+	}
+	if result.SessionKey != "org/repo/pulls/30-fix" {
+		t.Errorf("expected org/repo/pulls/30-fix, got %s", result.SessionKey)
+	}
+}
+
+// TestRouteTable_ApprovedBeatsStaleChangesRequestedLabel covers the precedence
+// rule: an `approved` review verdict suppresses routing even if a stale
+// changes_requested label is still on the PR (the approval supersedes).
+func TestRouteTable_ApprovedBeatsStaleChangesRequestedLabel(t *testing.T) {
+	srv := labelForgejoServer(t, []string{"changes_requested"})
+	defer srv.Close()
+	client := forgejo.NewClient(srv.URL, "test")
+	rt := NewRouteTable(client)
+
+	evt := event.NewEvent(event.PullRequestReview, "org/repo", 0, 30, "djent-qa", "submitted")
+	evt.PRNumber = 30
+	evt.ReviewState = "approved" // approval wins despite the stale label
+	evt.SessionKey = "org/repo/pulls/30"
+
+	if _, matched := rt.Route(context.Background(), evt); matched {
+		t.Error("approved review should NOT route even with a stale changes_requested label")
+	}
+}
+
+// TestPopulateCheckRunFields_ResolvesPRBySHA covers the highest-risk untested
+// path: a check_run payload WITHOUT pull_requests[] is resolved to a PR via
+// ListPRs + head-SHA matching. Verifies PRNumber and SessionKey are set from
+// the resolved PR, not left at 0.
+func TestPopulateCheckRunFields_ResolvesPRBySHA(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ListPRs path: /api/v1/repos/{repo}/pulls?state=open
+		if strings.Contains(r.URL.Path, "/pulls") && !strings.Contains(r.URL.Path, "/issues/") {
+			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"number": float64(7), "head": map[string]interface{}{"sha": "deadbeef"}},
+				{"number": float64(9), "head": map[string]interface{}{"sha": "cafef00d"}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	client := forgejo.NewClient(srv.URL, "test")
+	router.SetForgejoClient(client)
+
+	payload := map[string]interface{}{
+		"action":     "completed",
+		"repository": map[string]interface{}{"full_name": "duke/test-repo"},
+		// NOTE: no "pull_requests" field on check_run — forces SHA resolution.
+		"check_run": map[string]interface{}{
+			"name":       "CI",
+			"conclusion": "failure",
+			"head_sha":   "cafef00d",
+			"html_url":   "https://forgejo.local/duke/test-repo/actions/runs/9",
+		},
+		"sender": map[string]interface{}{"login": "forgejo-runner"},
+	}
+
+	evt, err := router.normalizeEvent("check_run", "completed", payload)
+	if err != nil {
+		t.Fatalf("normalizeEvent: %v", err)
+	}
+	if evt.PRNumber != 9 {
+		t.Errorf("expected PRNumber=9 resolved by SHA, got %d", evt.PRNumber)
+	}
+	if evt.HeadSHA != "cafef00d" {
+		t.Errorf("expected HeadSHA=cafef00d, got %q", evt.HeadSHA)
+	}
+	if evt.CheckConclusion != "failure" {
+		t.Errorf("expected conclusion failure, got %q", evt.CheckConclusion)
+	}
+	if evt.SessionKey != "duke/test-repo/pulls/9" {
+		t.Errorf("expected session key duke/test-repo/pulls/9, got %s", evt.SessionKey)
+	}
+}
+
+// TestPopulateCheckRunFields_NoPRResolvedDrops covers the negative SHA-resolution
+// path: a check_run whose head SHA matches no open PR is left with PRNumber=0
+// and a non-pulls session key, so routing drops it (direct-to-main commit).
+func TestPopulateCheckRunFields_NoPRResolvedDrops(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/pulls") && !strings.Contains(r.URL.Path, "/issues/") {
+			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"number": float64(7), "head": map[string]interface{}{"sha": "deadbeef"}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Webhook: config.WebhookConfig{Secret: ""}}
+	bus := event.NewBus()
+	router := NewRouter(cfg, bus, slog.Default())
+	router.SetForgejoClient(forgejo.NewClient(srv.URL, "test"))
+
+	payload := map[string]interface{}{
+		"action":     "completed",
+		"repository": map[string]interface{}{"full_name": "duke/test-repo"},
+		"check_run": map[string]interface{}{
+			"name":       "CI",
+			"conclusion": "failure",
+			"head_sha":   "nomatch",
+		},
+		"sender": map[string]interface{}{"login": "forgejo-runner"},
+	}
+
+	evt, err := router.normalizeEvent("check_run", "completed", payload)
+	if err != nil {
+		t.Fatalf("normalizeEvent: %v", err)
+	}
+	if evt.PRNumber != 0 {
+		t.Errorf("expected PRNumber=0 when no PR matches head SHA, got %d", evt.PRNumber)
+	}
+	if strings.Contains(evt.SessionKey, "/pulls/") {
+		t.Errorf("expected non-pulls session key, got %s", evt.SessionKey)
 	}
 }
 

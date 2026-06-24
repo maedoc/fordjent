@@ -107,7 +107,7 @@ def create_repo(name, seed_files=True):
             "content_type": "json",
             "secret": "local-webhook-secret-12345"
         },
-        "events": ["push", "issues", "issue_comment", "pull_request"],
+        "events": ["push", "issues", "issue_comment", "pull_request", "pull_request_review_comment", "check_run", "workflow_run"],
         "active": True
     })
 

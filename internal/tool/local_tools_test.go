@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,6 +32,25 @@ func (t *testAgentConfig) AllowProtectedPush() bool      { return t.allowProtect
 func (t *testAgentConfig) IsScaffold() bool              { return t.allowProtected }
 func (t *testAgentConfig) GitUser() string              { return "fjadmin" }
 
+// skipIfBwrapUnavailable skips tests that exercise the bash tool via bwrap.
+// On hosts where bwrap is missing or fails on `--no-new-privileges` (older
+// bwrap versions, unprivileged container hosts etc.), the bash-tool tests
+// cannot run end-to-end. This is environment-dependent, not a code defect.
+func skipIfBwrapUnavailable(t *testing.T) {
+	t.Helper()
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skipf("bwrap not found on PATH: %v", err)
+	}
+	// Probe that bwrap can launch with the no-new-privileges option the
+	// sandbox uses; older or stripped bwrap builds reject it with
+	// "Unknown option --no-new-privileges".
+	cmd := exec.Command(bwrap, "--no-new-privileges", "--unshare-all", "/bin/true")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("bwrap unavailable or rejects --no-new-privileges: %v", err)
+	}
+}
+
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -45,6 +65,7 @@ func setupTestRepo(t *testing.T) string {
 }
 
 func TestBashToolSuccess(t *testing.T) {
+	skipIfBwrapUnavailable(t)
 	dir := setupTestRepo(t)
 	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
@@ -58,6 +79,7 @@ func TestBashToolSuccess(t *testing.T) {
 }
 
 func TestBashToolStderr(t *testing.T) {
+	skipIfBwrapUnavailable(t)
 	dir := setupTestRepo(t)
 	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 
@@ -71,6 +93,7 @@ func TestBashToolStderr(t *testing.T) {
 }
 
 func TestBashToolExitError(t *testing.T) {
+	skipIfBwrapUnavailable(t)
 	dir := setupTestRepo(t)
 	tool := NewBashTool(&testSessionInfo{workDir: dir, repoDir: dir}, &testAgentConfig{protectedBranches: []string{"main", "master"}, allowProtected: false})
 

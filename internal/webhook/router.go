@@ -31,17 +31,17 @@ import (
 // Router receives Forgejo webhooks, validates them, normalizes events,
 // and publishes to the event bus.
 type Router struct {
-	cfg       *config.Config
-	bus       *event.Bus
-	logger    *slog.Logger
-	mux       *http.ServeMux
-	server    *http.Server
-	mu        sync.Mutex
+	cfg          *config.Config
+	bus          *event.Bus
+	logger       *slog.Logger
+	mux          *http.ServeMux
+	server       *http.Server
+	mu           sync.Mutex
 	shuttingDown bool
-	lc        *lifecycle.Lifecycle // optional: set post-construction for webhook delivery tracking
-	forgejo   *forgejo.Client      // optional: set post-construction for PR state checks
-	routeTable *RouteTable          // optional: set post-construction for PR label-based routing
-	seenEvents sync.Map            // event_id -> time.Time for dedup (TTL 30s)
+	lc           *lifecycle.Lifecycle // optional: set post-construction for webhook delivery tracking
+	forgejo      *forgejo.Client      // optional: set post-construction for PR state checks
+	routeTable   *RouteTable          // optional: set post-construction for PR label-based routing
+	seenEvents   sync.Map             // event_id -> time.Time for dedup (TTL 30s)
 }
 
 // RouteResult is computed by the routing table for each event.
@@ -125,6 +125,89 @@ func (rt *RouteTable) Route(ctx context.Context, evt *event.Event) (RouteResult,
 		}
 	}
 
+	// Rule 3b: PullRequestReview (formal review) on a spec-free PR.
+	// Routes to an implementer fix session when the review verdict is
+	// changes_requested OR the PR carries the `changes_requested` label
+	// (label-based routing is version-stable: the forgejo_submit_review tool
+	// sets the label, and a human can also set it from the UI even when the
+	// review webhook isn't subscribed). Approved/dismissed reviews are
+	// non-actionable. `commented` reviews are informational and do NOT spawn
+	// a session (a bare comment is not change-requesting; actionable human
+	// feedback arrives via issue_comment.created → Rule 4 instead).
+	if evt.Type == event.PullRequestReview && evt.PRNumber > 0 {
+		if hasLabel(prLabels, "spec-proposed") || hasLabel(prLabels, "spec-approved") {
+			// Spec PRs route to PM, not implementer.
+			return RouteResult{
+				Role:       "pm",
+				SessionKey: fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber),
+			}, true
+		}
+		switch evt.ReviewState {
+		case "dismissed":
+			return RouteResult{}, false
+		case "approved":
+			// Approved reviews don't spawn a new session on their own — the
+			// gated automerge watcher re-evaluates when it sees the event.
+			return RouteResult{}, false
+		case "changes_requested", "":
+			// An explicit changes_requested verdict, OR a PR carrying the
+			// changes_requested label (with a non-approved review state).
+			if evt.ReviewState == "changes_requested" || hasLabel(prLabels, "changes_requested") {
+				return RouteResult{
+					Role:       "implementer",
+					SessionKey: fmt.Sprintf("%s/pulls/%d-fix", evt.Repository, evt.PRNumber),
+					IsFix:      true,
+				}, true
+			}
+			// Empty ReviewState + no label: fall through (non-actionable).
+		}
+		// `commented` (and any other non-decisive state) falls through without
+		// spawning a session — see comment above.
+	}
+
+	// Rule 3c: ReviewRequested (internal synthetic event from yolo-repo PR
+	// open) → spawn reviewer (djent-qa) on pulls/N.
+	if evt.Type == event.ReviewRequested && evt.PRNumber > 0 {
+		return RouteResult{
+			Role:       "reviewer",
+			SessionKey: fmt.Sprintf("%s/pulls/%d", evt.Repository, evt.PRNumber),
+		}, true
+	}
+
+	// Rule 7: failed check_run.completed on a dev PR → Implementer fix.
+	// Pre-conditions: not on spec/ralph/merging PRs; PR is real.
+	if evt.Type == event.CheckRunCompleted && evt.PRNumber > 0 {
+		if !hasLabel(prLabels, "spec-proposed") &&
+			!hasLabel(prLabels, "spec-approved") &&
+			!hasLabel(prLabels, "ralph") &&
+			!hasLabel(prLabels, "merging") {
+			// Only failure-class conclusions rework; success re-evaluates automerge in the manager.
+			if isFailedConclusion(evt.CheckConclusion) {
+				return RouteResult{
+					Role:       "implementer",
+					SessionKey: fmt.Sprintf("%s/pulls/%d-fix", evt.Repository, evt.PRNumber),
+					IsFix:      true,
+				}, true
+			}
+		}
+	}
+
+	// Rule 8: failed workflow_run.completed on a dev PR → Implementer fix.
+	if evt.Type == event.WorkflowRunCompleted && evt.PRNumber > 0 {
+		if !hasLabel(prLabels, "spec-proposed") &&
+			!hasLabel(prLabels, "spec-approved") &&
+			!hasLabel(prLabels, "ralph") &&
+			!hasLabel(prLabels, "merging") {
+			if isFailedConclusion(evt.CheckConclusion) {
+				return RouteResult{
+					Role:       "implementer",
+					SessionKey: fmt.Sprintf("%s/pulls/%d-fix", evt.Repository, evt.PRNumber),
+					IsFix:      true,
+				}, true
+			}
+		}
+	}
+
 	// Rule 4: issue_comment.created on normal PR (human, no spec) → Reviewer
 	if evt.Type == event.IssueCommentCreated && evt.PRNumber > 0 {
 		sender := evt.Sender
@@ -187,6 +270,22 @@ func hasLabel(labels []string, name string) bool {
 		if l == name {
 			return true
 		}
+	}
+	return false
+}
+
+// isFailedConclusion returns true for check_run/workflow_run conclusions that
+// should rework the implementation. "success" / "neutral" / "skipped" do not.
+// "pending" / "in_progress" / "" are non-conclusive and do not rework either
+// (the manager's gated automerge re-evaluates them and decides to wait).
+// "cancelled" is intentionally included per the add-pr-rework-loop spec: a
+// cancelled run on a dev PR usually indicates a broken pipeline (compile
+// error aborting the job) that the dev session should address. If this proves
+// too aggressive in practice, drop "cancelled" from the set.
+func isFailedConclusion(conclusion string) bool {
+	switch conclusion {
+	case "failure", "cancelled", "action_required", "timed_out":
+		return true
 	}
 	return false
 }
@@ -712,10 +811,14 @@ func queryLifecycleDB(dbPath string) (map[string]interface{}, error) {
 	if err == nil && tRows != nil {
 		defer tRows.Close()
 		for tRows.Next() {
-			var sk string; var turn, tc, lat, tin, tout int; var errMsg, ts string
+			var sk string
+			var turn, tc, lat, tin, tout int
+			var errMsg, ts string
 			_ = tRows.Scan(&sk, &turn, &tc, &lat, &tin, &tout, &errMsg, &ts)
 			entry := map[string]interface{}{"session_key": sk, "turn": turn, "tool_calls": tc, "latency_ms": lat, "tokens_in": tin, "tokens_out": tout, "timestamp": ts}
-			if errMsg != "" { entry["error"] = errMsg }
+			if errMsg != "" {
+				entry["error"] = errMsg
+			}
 			turns = append(turns, entry)
 		}
 	}
@@ -1148,8 +1251,27 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 		typ = event.Type("pull_request." + action)
 	case "pull_request_review_comment":
 		typ = event.Type("pull_request_review_comment." + action)
+	case "pull_request_review":
+		// Forgejo review webhook action is typically "submitted"; map to the
+		// canonical ".created" constant so downstream routing treats it
+		// uniformly (the review state is carried in ReviewState, not action).
+		typ = event.PullRequestReview
 	case "push":
 		typ = event.Push
+	case "check_run":
+		// Forgejo fires action values "completed", "rerequested", "created".
+		// We only care about "completed" — other actions are noise.
+		if action == "completed" {
+			typ = event.CheckRunCompleted
+		} else {
+			return nil, fmt.Errorf("check_run action %q ignored", action)
+		}
+	case "workflow_run":
+		if action == "completed" {
+			typ = event.WorkflowRunCompleted
+		} else {
+			return nil, fmt.Errorf("workflow_run action %q ignored", action)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported event type: %s", eventType)
 	}
@@ -1157,9 +1279,22 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 	evt := event.NewEvent(typ, repo, issueNum, prNum, sender, action)
 	evt.Payload = payload
 
+	// Populate CI / review carrier fields for the new event types.
+	switch typ {
+	case event.CheckRunCompleted:
+		r.populateCheckRunFields(evt, payload)
+	case event.WorkflowRunCompleted:
+		r.populateWorkflowRunFields(evt, payload)
+	case event.PullRequestReview:
+		r.populateReviewFields(evt, payload)
+	}
+
 	// Compute session key: repository/issues/number or repository/pulls/number
-	if prNum > 0 {
-		evt.SessionKey = fmt.Sprintf("%s/pulls/%d", repo, prNum)
+	// Uses evt.PRNumber so that the populate* helpers (which may resolve the
+	// PR after the initial extractPRNum() call couldn't find it, e.g. for
+	// check_run payloads without an `issue` field) are reflected here.
+	if evt.PRNumber > 0 {
+		evt.SessionKey = fmt.Sprintf("%s/pulls/%d", repo, evt.PRNumber)
 	} else if issueNum > 0 {
 		evt.SessionKey = fmt.Sprintf("%s/issues/%d", repo, issueNum)
 	} else {
@@ -1167,6 +1302,135 @@ func (r *Router) normalizeEvent(eventType, action string, payload map[string]int
 	}
 
 	return evt, nil
+}
+
+// populateCheckRunFields extracts CheckName, CheckConclusion, CheckURL,
+// and HeadSHA from a Forgejo `check_run` payload. If the payload does not
+// carry a PR number (`check_run.pull_requests` is empty/missing — common on
+// Forgejo/Gitea), the router resolves the PR from the head SHA via the API.
+// If no PR is resolved, the event's PRNumber stays 0 and will be dropped
+// by routing (the check was on a direct-to-main commit, not a PR).
+func (r *Router) populateCheckRunFields(evt *event.Event, payload map[string]interface{}) {
+	if cr, ok := payload["check_run"].(map[string]interface{}); ok {
+		if name, ok := cr["name"].(string); ok {
+			evt.CheckName = name
+		}
+		if conc, ok := cr["conclusion"].(string); ok {
+			evt.CheckConclusion = conc
+		}
+		if url, ok := cr["html_url"].(string); ok {
+			evt.CheckURL = url
+		} else if url, ok := cr["url"].(string); ok {
+			evt.CheckURL = url
+		}
+		if hs, ok := cr["head_sha"].(string); ok {
+			evt.HeadSHA = hs
+		}
+		// Prefer PR number from `check_run.pull_requests[0].number`.
+		if prs, ok := cr["pull_requests"].([]interface{}); ok && len(prs) > 0 {
+			if pr, ok := prs[0].(map[string]interface{}); ok {
+				if num, ok := pr["number"].(float64); ok {
+					evt.PRNumber = int(num)
+				}
+			}
+		}
+	}
+	// Head SHA fallback: Forgejo may put it on the top-level check_suite wrapper.
+	if evt.HeadSHA == "" {
+		if cs, ok := payload["check_suite"].(map[string]interface{}); ok {
+			if hs, ok := cs["head_sha"].(string); ok {
+				evt.HeadSHA = hs
+			}
+		}
+	}
+	// Reconcile PR number when payload didn't carry it.
+	if evt.PRNumber == 0 && evt.HeadSHA != "" {
+		r.resolvePRBySHA(evt)
+	}
+}
+
+// populateWorkflowRunFields extracts the workflow run's conclusion + head SHA
+// from a Forgejo `workflow_run` payload. The PR is always resolved post-hoc
+// via the head SHA, since this webhook type does not carry `pull_requests`.
+func (r *Router) populateWorkflowRunFields(evt *event.Event, payload map[string]interface{}) {
+	if wr, ok := payload["workflow_run"].(map[string]interface{}); ok {
+		if name, ok := wr["name"].(string); ok {
+			evt.CheckName = name
+		}
+		if conc, ok := wr["conclusion"].(string); ok {
+			evt.CheckConclusion = conc
+		}
+		if url, ok := wr["html_url"].(string); ok {
+			evt.CheckURL = url
+		}
+		if hs, ok := wr["head_sha"].(string); ok {
+			evt.HeadSHA = hs
+		}
+	} else {
+		// Some Forgejo versions nest the run differently; try top-level fields.
+		if name, ok := payload["name"].(string); ok {
+			evt.CheckName = name
+		}
+		if conc, ok := payload["conclusion"].(string); ok {
+			evt.CheckConclusion = conc
+		}
+		if hs, ok := payload["head_sha"].(string); ok {
+			evt.HeadSHA = hs
+		}
+	}
+	if evt.PRNumber == 0 && evt.HeadSHA != "" {
+		r.resolvePRBySHA(evt)
+	}
+}
+
+// populateReviewFields extracts the review state from a Forgejo
+// `pull_request_review` payload and stamps ReviewState on the event.
+// Forgejo/Gitea report review state as lowercase strings
+// ("approved" / "changes_requested" / "commented" / "dismissed").
+// Dismissed reviews are non-actionable and dropped at routing time.
+func (r *Router) populateReviewFields(evt *event.Event, payload map[string]interface{}) {
+	state := ""
+	if rev, ok := payload["review"].(map[string]interface{}); ok {
+		if s, ok := rev["state"].(string); ok {
+			state = strings.ToLower(s)
+		}
+		if body, ok := rev["body"].(string); ok {
+			// Stash on the payload's `comment` slot so existing comment-based
+			// routing sees the body when it scans Payload for content.
+			payload["comment"] = map[string]interface{}{"body": body}
+		}
+	} else if s, ok := payload["state"].(string); ok {
+		state = strings.ToLower(s)
+	}
+	evt.ReviewState = state
+	evt.Action = state // surfaces the review verdict as the event's action verb
+}
+
+// resolvePRBySHA attempts to find an open PR whose head SHA matches the given
+// SHA and sets evt.PRNumber accordingly. Uses the Forgejo commit-statuses or
+// PR-by-head-SHA API. Called as a fallback when a CI-event payload is missing
+// `pull_requests`. Silent on failure — events with no resolved PR are dropped
+// by the routing table (the check was on a ref that isn't an open PR).
+func (r *Router) resolvePRBySHA(evt *event.Event) {
+	if r.forgejo == nil || evt.HeadSHA == "" || evt.Repository == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prs, err := r.forgejo.ListPRs(ctx, evt.Repository, "open")
+	if err != nil || len(prs) == 0 {
+		slog.Debug("check-run: no open PRs to resolve from head SHA",
+			"repo", evt.Repository, "head_sha", evt.HeadSHA, "error", err)
+		return
+	}
+	for _, pr := range prs {
+		if pr.Head.SHA == evt.HeadSHA {
+			evt.PRNumber = pr.Number
+			return
+		}
+	}
+	slog.Debug("check-run: head SHA did not match any open PR",
+		"repo", evt.Repository, "head_sha", evt.HeadSHA, "open_prs", len(prs))
 }
 
 // isAgentEvent detects events originating from the agent itself by checking
@@ -1626,7 +1890,7 @@ h1{color:#58a6ff}h2{color:#f0f6fc;border-bottom:1px solid #30363d;padding-bottom
 		html.EscapeString(owner), html.EscapeString(repo), kind, html.EscapeString(num), len(lines))
 
 	allTools := make(map[string]int)
-		for _, line := range lines {
+	for _, line := range lines {
 		var entry struct {
 			Timestamp  string `json:"timestamp"`
 			Turn       int    `json:"turn"`

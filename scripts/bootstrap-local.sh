@@ -480,7 +480,7 @@ curl -sf -X POST "http://127.0.0.1:$FORGEJO_PORT/api/v1/repos/$ADMIN_USER/$TEST_
             \"content_type\": \"json\",
             \"secret\": \"$WEBHOOK_SECRET\"
         },
-        \"events\": [\"issues\", \"issue_comment\", \"pull_request\", \"pull_request_review_comment\"],
+        \"events\": [\"issues\", \"issue_comment\", \"pull_request\", \"pull_request_review_comment\", \"check_run\", \"workflow_run\"],
         \"active\": true
     }" >/dev/null
 

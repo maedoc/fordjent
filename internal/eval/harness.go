@@ -671,7 +671,7 @@ func findForgejo(t *testing.T) string {
 	if err == nil {
 		return path
 	}
-	t.Fatal("forgejo binary not found. Install with: brew install forgejo")
+	t.Skip("forgejo binary not found. Install with: brew install forgejo or download from https://forgejo.org")
 	return ""
 }
 

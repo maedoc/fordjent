@@ -380,6 +380,16 @@ func initSchema(db *sql.DB) error {
 		occurred_at  DATETIME NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_webhook_time ON webhook_deliveries(occurred_at);
+
+		-- Per-PR rework counter (pulls/N-fix session spawns). Bounded by
+		-- max_rework_attempts. Reset manually by deleting the row.
+		CREATE TABLE IF NOT EXISTS pr_rework (
+			repo            TEXT NOT NULL,
+			pr_number       INTEGER NOT NULL,
+			attempts        INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at DATETIME NOT NULL,
+			PRIMARY KEY (repo, pr_number)
+		);
 	`)
 	return err
 }
@@ -434,3 +444,69 @@ func (l *Lifecycle) RecordDelivery(ctx context.Context, eventType, action, repo 
 	})
 }
 
+// IncrementRework atomically increments (or inserts) the per-PR rework counter
+// and returns the new attempt count. Keyed by (repo, pr_number). Used by the
+// manager before spawning a pulls/N-fix session. The RETURNING clause makes
+// the returned count the exact value this call produced (closing the
+// TOCTOU gap a separate INSERT-then-SELECT would open under concurrent
+// _fix spawns). SQLite >= 3.35 supports RETURNING; modernc.org/sqlite ships
+// a compatible build.
+func (l *Lifecycle) IncrementRework(ctx context.Context, repo string, prNumber int) (int, error) {
+	if l.db == nil {
+		return 0, fmt.Errorf("lifecycle db not open")
+	}
+	if repo == "" || prNumber <= 0 {
+		return 0, fmt.Errorf("invalid key: repo=%q pr=%d", repo, prNumber)
+	}
+	now := time.Now().UTC()
+	var attempts int
+	// Upsert with RETURNING so the count is the value this call produced.
+	err := l.db.QueryRowContext(ctx,
+		`INSERT INTO pr_rework (repo, pr_number, attempts, last_attempt_at)
+		 VALUES (?, ?, 1, ?)
+		 ON CONFLICT(repo, pr_number) DO UPDATE SET
+		   attempts = attempts + 1,
+		   last_attempt_at = excluded.last_attempt_at
+		 RETURNING attempts`,
+		repo, prNumber, now,
+	).Scan(&attempts)
+	if err != nil {
+		return 0, fmt.Errorf("increment rework: %w", err)
+	}
+	return attempts, nil
+}
+
+// GetRework returns the current attempt count for a PR, or 0 if no row exists.
+func (l *Lifecycle) GetRework(ctx context.Context, repo string, prNumber int) (int, error) {
+	if l.db == nil {
+		return 0, fmt.Errorf("lifecycle db not open")
+	}
+	var attempts int
+	err := l.db.QueryRowContext(ctx,
+		`SELECT attempts FROM pr_rework WHERE repo = ? AND pr_number = ?`,
+		repo, prNumber,
+	).Scan(&attempts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("query rework: %w", err)
+	}
+	return attempts, nil
+}
+
+// ResetRework deletes the per-PR rework counter row. Useful for manual operator
+// resets after a PR has been reworked past the cap.
+func (l *Lifecycle) ResetRework(ctx context.Context, repo string, prNumber int) error {
+	if l.db == nil {
+		return fmt.Errorf("lifecycle db not open")
+	}
+	_, err := l.db.ExecContext(ctx,
+		`DELETE FROM pr_rework WHERE repo = ? AND pr_number = ?`,
+		repo, prNumber,
+	)
+	if err != nil {
+		return fmt.Errorf("reset rework: %w", err)
+	}
+	return nil
+}

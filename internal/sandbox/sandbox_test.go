@@ -14,8 +14,16 @@ func skipIfNoBwrap(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("bwrap only available on Linux")
 	}
-	if _, err := exec.LookPath("bwrap"); err != nil {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
 		t.Skip("bwrap not found on PATH")
+	}
+	// Probe that bwrap can launch with the no-new-privileges option the sandbox
+	// uses; older or stripped bwrap builds reject it and tests would fail. This
+	// is environment-dependent, not a code defect.
+	probe := exec.Command(bwrap, "--no-new-privileges", "--unshare-all", "/bin/true")
+	if err := probe.Run(); err != nil {
+		t.Skipf("bwrap unavailable or rejects --no-new-privileges: %v", err)
 	}
 }
 

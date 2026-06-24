@@ -529,7 +529,7 @@ curl -s -X POST -H "Authorization: token $TOK" -H "Content-Type: application/jso
   -d "{
     \"type\": \"forgejo\",
     \"config\": {\"url\": \"http://fordjent:8080/acp/v1/events\", \"content_type\": \"json\", \"secret\": \"$WEBHOOK_SECRET\"},
-    \"events\": [\"issues\", \"issue_comment\", \"pull_request\", \"pull_request_review_comment\", \"push\"],
+    \"events\": [\"issues\", \"issue_comment\", \"pull_request\", \"pull_request_review_comment\", \"push\", \"check_run\", \"workflow_run\"],
     \"active\": true
   }" http://127.0.0.1:4230/api/v1/repos/$REPO/hooks -o /dev/null
 
@@ -620,6 +620,106 @@ The two systems are **complementary, not redundant**: Fordjent's gate is a
 fast, guaranteed local compile check that prevents the most embarrassing PRs;
 the runner is the authoritative CI that catches environment-specific issues
 and gates merges.
+
+### CI failures drive dev rework (the rework loop)
+
+High-level loop diagram:
+
+```
+  ┌──── Forgejo Actions runner ────┐
+  │  .forgejo/workflows/*.yaml ✘ │  (failed check_run)
+  └───────────────┬───────────────┘
+                  │ check_run.completed (conclusion=failure)
+                  ▼
+  ┌─── Fordjent router ────────────┐
+  │  resolve PR (pull_requests[] │
+  │  OR head-SHA → ListPRs)      │
+  │  RouteTable rule 7 →          │
+  │  pulls/N-fix @ implementer    │
+  └───────────────┬───────────────┘
+                  ▼
+  ┌─ Implementer fix session ─┐
+  │  checkout PR branch      │
+  │  Prompt injects CI name + │
+  │  run URL (CI Failure     │
+  │  block)                  │
+  │  → fix, build, push      │
+  └───────────────┬───────────┘
+                  │ push triggers runner (rerun)
+                  ▼
+  ┌─ check_run.completed (success) ┐
+  │  RouteTable: not implementer   │
+  │  Manager.evaluateAutomerge:    │
+  │  gate → if QA approved + merge │
+  │  → merge + clear automerge    │
+  └─────── (or: QA still pend)─┘
+```
+
+The repo webhook SHALL subscribe to `check_run` and `workflow_run` events
+(in addition to `issues`, `issue_comment`, `pull_request`,
+`pull_request_review_comment`, `push`). Do **NOT** subscribe to `status` —
+it fires for every ref update on every branch and would flood the manager.
+
+With those events subscribed, the rework loop is:
+
+```
+1. Runner fails on a dev PR's head SHA (e.g. go test failure)
+2. Forgejo fires check_run.completed (conclusion=failure)
+3. Fordjent router fetches PR labels — if PR has no spec-proposed /
+   spec-approved / merging label, route to implementer at pulls/N-fix
+   with IsFix=true
+4. Implementer session spawns on the PR head branch, sees the failing
+   check name + URL in its system prompt, fixes the code, pushes
+5. New push triggers a new runner run; if green, the next check_run.completed
+   re-evaluates the gated automerge (see below)
+```
+
+### djent-qa feedback also drives dev rework
+
+When `djent-qa` submits a Forgejo review with state `changes_requested`, the
+reviewer adds the `changes_requested` PR label (via `forgejo_submit_review`).
+The router keys off **both** the review `state` and the PR label: a
+`changes_requested` verdict OR the label routes to `pulls/N-fix`. Label-based
+routing is version-stable — a human can set the label from the UI even when
+the review webhook isn't subscribed, and the `forgejo_submit_review` tool sets
+it predictably. An `approved` verdict always wins over a stale
+`changes_requested` label (approval supersedes). `commented` and `dismissed`
+reviews do not spawn a session; actionable human feedback arrives via
+`issue_comment.created` (Rule 4) instead.
+
+The old behavior of filtering any `djent-*` sender from the `pulls/N-fix`
+path has been removed. Self-loop noise (cost summaries etc.) is still
+filtered via the `<!-- ford -->` body marker on the comment.
+
+### Gated automerge (replaces label-triggered automerge)
+
+Previously the `automerge` label on a PR caused an immediate API merge.
+Now the manager waits and re-evaluates on each `check_run.completed`,
+`issue_comment.created` (non-marker), and `pull_request_review` event.
+Merge fires only when ALL hold:
+
+1. all `check_run`s on the head SHA have conclusion `success`, AND
+2. the most recent `djent-qa` review is `approved` OR (in non-yolo repos)
+   any reviewer's `approved` review, AND
+3. the PR is `mergeable` with no conflicts, AND
+4. there is no `changes_requested` PR label.
+
+In yolo repos (`fordjent-yolo` topic) a fresh `pull_request.opened` event
+from `djent-dev` spawns a reviewer session automatically (`ReviewRequested`
+internal event), so QA approval is provided without human action.
+
+### Rework cap
+
+A per-PR counter in `lifecycle.db` (`pr_rework` table) bounds the
+dev ↔ QA ping-pong. Default `max_rework_attempts: 3`. When hit, the PR is
+labeled `fordjent/failed:rework-exhausted` + `blocked` and a comment is
+posted; the manager stops auto-spawning `_fix` sessions for that PR.
+
+Verification of the loop:
+```bash
+docker logs -f fordjent 2>&1 | jq -r 'select(.msg|test("pult|review|change"))'
+sqlite3 /var/lib/fordjent/lifecycle.db 'SELECT * FROM pr_rework;'
+```
 
 ---
 
